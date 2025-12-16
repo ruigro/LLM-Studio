@@ -1,0 +1,83 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Build / packaging
+dist/
+build/
+*.egg-info/
+
+# Logs and runtime
+*.log
+logs/
+tmp/
+temp/
+
+# Model artifacts and checkpoints (large/generated files)
+outputs/
+checkpoints/
+fine_tuned_llama_adapter/
+*.ckpt
+*.pt
+*.pth
+*.safetensors
+*.bin
+pytorch_model.bin
+hf_model/
+
+# Dataset caches and large data files
+data/
+dataset/
+*.jsonl
+.cache/
+huggingface/
+transformers_cache/
+
+# Experiment tracking
+wandb/
+mlruns/
+tensorboard/
+runs/
+
+# IDE/editor
+.vscode/
+.idea/
+
+## Additional common caches and temp files
+.DS_Store
+Thumbs.db
+.cache/
+transformers_cache/
+huggingface/
+# local virtual env
+.venv/
+env/
+venv/
+
+# Notebook checkpoints
+.ipynb_checkpoints/
+
+# Experiment tracking and monitoring
+wandb/
+mlruns/
+tensorboard/
+runs/
+
+# Local cleanup script
+cleanup_generated.sh
