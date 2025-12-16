@@ -107,6 +107,10 @@ def main():
             output_dir=OUTPUT_DIR,
             optim="adamw_8bit",
             seed=3407,
+            # Disable Hugging Face Trainer intermediate checkpoints (creates `checkpoint-<step>` dirs)
+            save_strategy="no",
+            # Keep a small number if you enable saving later
+            save_total_limit=2,
         ),
     )
 
