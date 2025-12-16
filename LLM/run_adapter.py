@@ -2,7 +2,7 @@
 """Run a fine-tuned LoRA adapter with a base model (supports 4-bit + offload).
 
 Usage examples:
-  python run_adapter.py --adapter-dir ./fine_tuned_llama_adapter/checkpoint-84 --prompt "Say hello"
+    python run_adapter.py --adapter-dir ./fine_tuned_adapter/checkpoint-84 --prompt "Say hello"
   python run_adapter.py --base-model unsloth/llama-3.2-3b-instruct-unsloth-bnb-4bit --prompt "Hello" --max-new-tokens 128
 """
 import argparse
@@ -146,7 +146,7 @@ def generate_text(tokenizer, model, prompt, max_new_tokens=128, temperature=0.7)
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--adapter-dir", default="./fine_tuned_llama_adapter/checkpoint-84", help="Path to saved LoRA adapter checkpoint")
+    p.add_argument("--adapter-dir", default="./fine_tuned_adapter/checkpoint-84", help="Path to saved LoRA adapter checkpoint")
     p.add_argument("--base-model", default="unsloth/llama-3.2-3b-instruct-unsloth-bnb-4bit", help="Base model name or path")
     p.add_argument("--prompt", default="### Instruction:\nSay hello\n\n### Response:\n", help="Prompt to generate from")
     p.add_argument("--max-new-tokens", type=int, default=128)

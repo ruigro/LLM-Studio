@@ -12,7 +12,7 @@ def parse_args():
     p.add_argument("--model-name", default="unsloth/llama-3.2-3b-instruct-unsloth-bnb-4bit")
     p.add_argument("--max-seq-length", type=int, default=2048)
     p.add_argument("--data-path", default="train_data.jsonl")
-    p.add_argument("--output-dir", default="./fine_tuned_llama_adapter")
+    p.add_argument("--output-dir", default="./fine_tuned_adapter")
     p.add_argument("--lora-r", type=int, default=8)
     p.add_argument("--lora-alpha", type=int, default=16)
     p.add_argument("--lora-dropout", type=float, default=0.05)

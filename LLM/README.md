@@ -40,7 +40,7 @@ Run `finetune.py` pointing at your training data and desired output directory. R
 ```bash
 python LLM/finetune.py \
   --train-file LLM/train_data.jsonl \
-  --output-dir fine_tuned_llama_adapter \
+  --output-dir fine_tuned_adapter \
   --epochs 3 \
   --batch-size 8
 ```
@@ -53,7 +53,7 @@ Run `validate_prompts.py` (or `validation_prompts.jsonl`) to generate evaluation
 ```bash
 python LLM/validate_prompts.py \
   --prompts LLM/validation_prompts.jsonl \
-  --model-dir fine_tuned_llama_adapter \
+  --model-dir fine_tuned_adapter \
   --output LLM/validation_results.jsonl
 ```
 
@@ -62,7 +62,7 @@ Use `run_adapter.py` to load the finetuned model and run interactive prompts or 
 
 ```bash
 python LLM/run_adapter.py \
-  --model-dir fine_tuned_llama_adapter \
+  --model-dir fine_tuned_adapter \
   --prompt "Hello, please summarize the following text..."
 ```
 

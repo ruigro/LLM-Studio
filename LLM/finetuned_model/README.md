@@ -1,7 +1,8 @@
+````markdown
 ---
 base_model: unsloth/llama-3.2-3b-instruct-unsloth-bnb-4bit
 library_name: transformers
-model_name: customer_service_model
+model_name: finetuned_model
 tags:
 - generated_from_trainer
 - trl
@@ -10,7 +11,7 @@ tags:
 licence: license
 ---
 
-# Model Card for customer_service_model
+# Model Card for finetuned_model
 
 This model is a fine-tuned version of [unsloth/llama-3.2-3b-instruct-unsloth-bnb-4bit](https://huggingface.co/unsloth/llama-3.2-3b-instruct-unsloth-bnb-4bit).
 It has been trained using [TRL](https://github.com/huggingface/trl).
@@ -30,7 +31,6 @@ print(output["generated_text"])
 
  
 
-
 This model was trained with SFT.
 
 ### Framework versions
@@ -42,7 +42,6 @@ This model was trained with SFT.
 - Tokenizers: 0.22.1
 
 ## Citations
-
 
 
 Cite TRL as:
@@ -57,3 +56,4 @@ Cite TRL as:
 	howpublished = {\url{https://github.com/huggingface/trl}}
 }
 ```
+````

@@ -2,8 +2,8 @@
 """Run validation prompts through the adapter + base model and report pass/fail.
 
 Usage example:
-  python validate_prompts.py \
-    --adapter-dir ./fine_tuned_llama_adapter/checkpoint-1 \
+    python validate_prompts.py \
+        --adapter-dir ./fine_tuned_adapter/checkpoint-1 \
     --base-model unsloth/llama-3.2-3b-instruct-unsloth-bnb-4bit \
     --prompts validation_prompts.jsonl \
     --out results.jsonl
