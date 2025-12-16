@@ -1,6 +1,21 @@
 import argparse
 import os
+import sys
+import json
+import re
 import torch
+
+# Default to offline W&B unless explicitly enabled via --enable-wandb or env var
+if "--enable-wandb" not in sys.argv and "WANDB_MODE" not in os.environ:
+    os.environ["WANDB_MODE"] = "offline"
+
+# If Weave is available, import it so W&B can enable Weave features locally
+try:
+    import weave  # type: ignore
+    print("Weave imported: enhanced LLM call tracing enabled (local).")
+except Exception:
+    # weave is optional; continue without it
+    pass
 from unsloth import FastLanguageModel
 from trl import SFTTrainer
 from transformers import TrainingArguments, BitsAndBytesConfig
@@ -98,8 +113,47 @@ def main():
     trainer.train()
 
     print("Saving LoRA adapters and tokenizer...")
-    # Save PEFT adapter checkpoint
-    peft_out = os.path.join(OUTPUT_DIR, "checkpoint-1")
+
+    # Prepare a mapping file to keep consistent per-base-model IDs
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    map_path = os.path.join(OUTPUT_DIR, "model_map.json")
+    try:
+        if os.path.exists(map_path):
+            with open(map_path, "r", encoding="utf-8") as mf:
+                model_map = json.load(mf)
+        else:
+            model_map = {}
+    except Exception:
+        model_map = {}
+
+    # Assign a short model id like M1, M2 for the base model name
+    if MODEL_NAME in model_map:
+        mid = model_map[MODEL_NAME]
+    else:
+        # next index
+        next_idx = len(model_map) + 1
+        mid = f"M{next_idx}"
+        model_map[MODEL_NAME] = mid
+        try:
+            with open(map_path, "w", encoding="utf-8") as mf:
+                json.dump(model_map, mf, indent=2)
+        except Exception:
+            pass
+
+    # Find existing checkpoints for this model id and pick next numeric suffix
+    existing = []
+    try:
+        for name in os.listdir(OUTPUT_DIR):
+            m = re.match(rf"^{re.escape(mid)}Checkpoint(\d+)$", name)
+            if m:
+                existing.append(int(m.group(1)))
+    except Exception:
+        existing = []
+
+    next_num = max(existing) + 1 if existing else 1
+    peft_out = os.path.join(OUTPUT_DIR, f"{mid}Checkpoint{next_num}")
+    os.makedirs(peft_out, exist_ok=True)
+
     model.save_pretrained(peft_out)
     tokenizer.save_pretrained(peft_out)
     print(f"Finetuning complete! Adapter saved to: {peft_out}")

@@ -32,7 +32,7 @@ temp/
 # Model artifacts and checkpoints (large/generated files)
 outputs/
 checkpoints/
-fine_tuned_llama_adapter/
+fine_tuned_adapter/
 *.ckpt
 *.pt
 *.pth
@@ -41,6 +41,16 @@ fine_tuned_llama_adapter/
 pytorch_model.bin
 hf_model/
 
+# Per-run experiment artifacts and generated metadata
+# W&B offline runs and logs
+LLM/wandb/
+wandb/
+**/offline-run-*/
+
+# Model mapping and auto-generated checkpoint folders
+**/model_map.json
+**/M*Checkpoint*/
+
 # Dataset caches and large data files
 data/
 dataset/
@@ -48,6 +58,10 @@ dataset/
 .cache/
 huggingface/
 transformers_cache/
+
+# Compiled caches
+unsloth_compiled_cache/
+LLM/unsloth_compiled_cache/
 
 # Experiment tracking
 wandb/
@@ -78,6 +92,3 @@ wandb/
 mlruns/
 tensorboard/
 runs/
-
-# Local cleanup script
-cleanup_generated.sh

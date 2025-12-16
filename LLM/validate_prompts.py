@@ -14,6 +14,14 @@ from pathlib import Path
 
 from run_adapter import load_model, generate_text
 
+
+# Optional: import weave so W&B Weave tracing can be used during validation if installed
+try:
+    import weave  # type: ignore
+    print("Weave imported in validate_prompts: LLM call tracing enabled (local).")
+except Exception:
+    pass
+
 MENU_KEYWORDS = [
     "main menu",
     "please choose",
@@ -44,10 +52,19 @@ def run_validation(adapter_dir, base_model, prompts_file, out_file, max_new_toke
             prompts.append(json.loads(line))
 
     results = []
-    for p in prompts:
+    total_prompts = len(prompts)
+    passed_count = 0
+    failed_count = 0
+    
+    print(f"\nRunning validation on {total_prompts} prompts...\n")
+    
+    for idx, p in enumerate(prompts, 1):
         pid = p.get("id")
         ptype = p.get("type")
         prompt = p.get("prompt")
+        
+        print(f"[{idx}/{total_prompts}] Testing prompt ID: {pid} (type: {ptype})...", end=" ")
+        
         output = generate_text(tokenizer, model, prompt, max_new_tokens=max_new_tokens, temperature=temperature)
 
         if ptype == "positive":
@@ -56,6 +73,13 @@ def run_validation(adapter_dir, base_model, prompts_file, out_file, max_new_toke
         else:
             passed = looks_like_menu(output)
             note = "negative - should be menu"
+
+        if passed:
+            print("✅ PASS")
+            passed_count += 1
+        else:
+            print("❌ FAIL")
+            failed_count += 1
 
         results.append({
             "id": pid,
@@ -72,10 +96,14 @@ def run_validation(adapter_dir, base_model, prompts_file, out_file, max_new_toke
             f.write(json.dumps(r, ensure_ascii=False) + "\n")
 
     # summary
-    total = len(results)
-    passed = sum(1 for r in results if r["pass"])
-    failed = total - passed
-    print(f"Validation complete: {passed}/{total} passed, {failed} failed. Results -> {out_file}")
+    print(f"\n{'='*60}")
+    print(f"VALIDATION SUMMARY")
+    print(f"{'='*60}")
+    print(f"Total prompts:  {total_prompts}")
+    print(f"✅ Passed:      {passed_count} ({passed_count/total_prompts*100:.1f}%)")
+    print(f"❌ Failed:      {failed_count} ({failed_count/total_prompts*100:.1f}%)")
+    print(f"Results saved:  {out_file}")
+    print(f"{'='*60}")
 
 
 if __name__ == "__main__":

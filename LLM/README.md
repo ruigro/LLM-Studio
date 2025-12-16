@@ -6,107 +6,76 @@ This document explains how to set up the environment and run the included script
 - Python 3.8+ installed
 - Git
 - (Optional) CUDA drivers and a suitable GPU for faster training
+# LLM — Quick Usage
 
-**Setup**
-1. Create and activate a virtual environment:
+Minimal instructions to set up and use the LLM management scripts in this folder.
+
+Setup
+-----
+
+Run these inside the `LLM` folder. Change into `LLM`, create and activate a virtual environment, then install the requirements:
 
 ```bash
-python -m venv .venv
+cd LLM
+python3 -m venv .venv
 source .venv/bin/activate
-pip install -U pip
+pip install -r requirements.txt
 ```
 
-2. Install required packages. If a `requirements.txt` is present, use it; otherwise install typical packages used for finetuning:
+Example training data (JSONL)
+----------------------------
+
+Save one example per line to `train_data.jsonl`:
+
+```jsonl
+{"instruction": "Translate the following sentence into French:", "output": "Bonjour le monde"}
+```
+
+Using the recommended helper: `workflow.py` (run inside `LLM`)
+---------------------------------------
 
 ```bash
-pip install -r requirements.txt  # if available
-# or common packages:
-pip install torch transformers accelerate datasets peft safetensors sentencepiece
+# Train only
+cd LLM
+python workflow.py train --data-path train_data.jsonl --output-dir ./fine_tuned_adapter --epochs 3 --batch-size 1
+
+# Validate only
+python workflow.py validate --adapter-dir ./fine_tuned_adapter/M1Checkpoint1
+
+# Run inference
+python workflow.py run --adapter-dir ./fine_tuned_adapter/M1Checkpoint1 --prompt "### Instruction:\nSummarize this paragraph.\n\n### Response:\n"
+
+# Full pipeline (train -> validate -> run)
+python workflow.py all --epochs 3 --prompt "Test prompt"
 ```
 
-**Files of interest**
-- `finetune.py` — script used to finetune/train the model on `train_data.jsonl`.
-- `run_adapter.py` — script to run inference against a finetuned adapter/model.
-- `train_data.jsonl` — training data in JSONL format.
-- `validate_prompts.py` — script to run validation prompts and produce results.
-- `validation_prompts.jsonl` — validation prompts.
-- `validation_results.jsonl` — sample or output validation results.
-
-Note: Inspect each script to confirm CLI flags and expected arguments; the examples below are generic and may need to be adjusted to the script's actual flags.
-
-**Finetune / Train (example)**
-Run `finetune.py` pointing at your training data and desired output directory. Replace flags with those implemented by the script when needed.
+Manual commands (run inside `LLM`)
+---------------
 
 ```bash
-python LLM/finetune.py \
-  --train-file LLM/train_data.jsonl \
-  --output-dir fine_tuned_adapter \
-  --epochs 3 \
-  --batch-size 8
+# Train (manual)
+cd LLM
+python finetune.py --data-path train_data.jsonl --output-dir ./fine_tuned_adapter --epochs 3 --batch-size 1
+
+# Validate (manual)
+python validate_prompts.py --adapter-dir ./fine_tuned_adapter/M1Checkpoint1 --base-model unsloth/llama-3.2-3b-instruct-unsloth-bnb-4bit --prompts validation_prompts.jsonl --out validation_results.jsonl
+
+# Run (manual)
+python run_adapter.py --adapter-dir ./fine_tuned_adapter/M1Checkpoint1 --prompt "### Instruction:\nSummarize this paragraph.\n\n### Response:\n"
 ```
 
-If your script uses `accelerate` or other libraries, configure them beforehand (e.g., `accelerate config`).
+Notes
+-----
 
-**Validate**
-Run `validate_prompts.py` (or `validation_prompts.jsonl`) to generate evaluation results. Example:
+- Checkpoints are saved as `M{n}Checkpoint{m}` under your `--output-dir` (e.g. `fine_tuned_adapter/M1Checkpoint1`).
+- W&B is offline by default. To enable online W&B, install `wandb` and run `workflow.py` with `--enable-wandb`.
+- Preview cleanup with `bash cleanup_generated.sh` and delete with `bash cleanup_generated.sh --yes`.
 
-```bash
-python LLM/validate_prompts.py \
-  --prompts LLM/validation_prompts.jsonl \
-  --model-dir fine_tuned_adapter \
-  --output LLM/validation_results.jsonl
+Example instruction (short)
+--------------------------
+
+```jsonl
+{"instruction": "Summarize the following paragraph in one sentence:", "output": "This paragraph explains how to..."}
 ```
 
-**Run / Inference**
-Use `run_adapter.py` to load the finetuned model and run interactive prompts or scripted inference. Example:
-
-```bash
-python LLM/run_adapter.py \
-  --model-dir fine_tuned_adapter \
-  --prompt "Hello, please summarize the following text..."
-```
-
-You can also run the script without flags if it reads defaults from a config file — inspect `run_adapter.py` for details.
-
-**Tips & Notes**
-- Adjust batch sizes and learning rates to fit your GPU memory.
-- Exclude large model files from git (see repository `.gitignore`).
-- If using Hugging Face tooling, set `HF_HOME` or use `transformers` caching to a suitable location.
-- Back up important checkpoints outside the repository before cleaning or reinitializing directories.
-
-If you'd like, I can:
-- Add a `requirements.txt` capturing the exact packages used here.
-- Add example CLI wrappers or a small shell script to run common workflows.
-
-**Cross-platform notes**
-- On Windows use PowerShell or WSL for the bash commands shown above; use a Conda environment or `py -m venv .venv` to create virtual environments.
-- For CPU-only environments, install CPU builds of PyTorch (see https://pytorch.org for platform-specific install commands).
-- Set these environment variables to control caching locations if you want reproducible behavior across machines:
-  - `HF_HOME` — Hugging Face home directory
-  - `TRANSFORMERS_CACHE` — Transformers model cache directory
-
-**Cleanup (safe, cross-machine)**
-This repository includes `cleanup_generated.sh` (at the repo root) which performs a dry-run by default and removes ephemeral caches and IDE folders when run with `--yes`.
-
-Dry-run (lists targets, does not delete):
-
-```bash
-bash cleanup_generated.sh
-```
-
-To actually delete the listed ephemeral files/folders:
-
-```bash
-bash cleanup_generated.sh --yes
-```
-
-Windows (PowerShell) equivalent (dry-run):
-
-```powershell
-Get-ChildItem -Path . -Recurse -Directory -Filter __pycache__ -ErrorAction SilentlyContinue
-Get-ChildItem -Path . -Recurse -File -Include *.pyc,*.log -ErrorAction SilentlyContinue
-```
-
-Notes:
-- The cleanup script intentionally skips directories that look like model checkpoints or `data` directories (it will print a skip message). It only removes ephemeral caches and logs by default.
-- If you'd like me to be more or less aggressive (e.g. remove `validation_results.jsonl` or old checkpoints), tell me which patterns you want removed and I will adjust the script and re-run it.
+That's it — use `workflow.py` for most tasks; manual commands remain available for custom workflows.

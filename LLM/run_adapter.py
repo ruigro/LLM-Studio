@@ -2,7 +2,7 @@
 """Run a fine-tuned LoRA adapter with a base model (supports 4-bit + offload).
 
 Usage examples:
-    python run_adapter.py --adapter-dir ./fine_tuned_adapter/checkpoint-84 --prompt "Say hello"
+    python run_adapter.py --adapter-dir ./fine_tuned_adapter/M1Checkpoint1 --prompt "Say hello"
   python run_adapter.py --base-model unsloth/llama-3.2-3b-instruct-unsloth-bnb-4bit --prompt "Hello" --max-new-tokens 128
 """
 import argparse
@@ -14,6 +14,14 @@ from peft import PeftModel
 # Suppress known warnings
 warnings.filterwarnings("ignore", message=".*quantization_config.*")
 warnings.filterwarnings("ignore", message=".*pkg_resources.*")
+
+
+# Optional: import weave to enable W&B Weave tracing if installed
+try:
+    import weave  # type: ignore
+    print("Weave imported in run_adapter: LLM call tracing enabled (local).")
+except Exception:
+    pass
 
 
 def load_model(base_model, adapter_dir, use_4bit=True, offload=True):
@@ -146,7 +154,7 @@ def generate_text(tokenizer, model, prompt, max_new_tokens=128, temperature=0.7)
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--adapter-dir", default="./fine_tuned_adapter/checkpoint-84", help="Path to saved LoRA adapter checkpoint")
+    p.add_argument("--adapter-dir", default="./fine_tuned_adapter/M1Checkpoint1", help="Path to saved LoRA adapter checkpoint")
     p.add_argument("--base-model", default="unsloth/llama-3.2-3b-instruct-unsloth-bnb-4bit", help="Base model name or path")
     p.add_argument("--prompt", default="### Instruction:\nSay hello\n\n### Response:\n", help="Prompt to generate from")
     p.add_argument("--max-new-tokens", type=int, default=128)
