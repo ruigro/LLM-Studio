@@ -6,6 +6,68 @@ This document explains how to set up the environment and run the included script
 - Python 3.8+ installed
 - Git
 - (Optional) CUDA drivers and a suitable GPU for faster training
+
+# 🎨 GUI Interface (Recommended)
+
+The easiest way to use this project is through the beautiful web-based GUI.
+
+## Quick Start (Windows)
+
+1. **Install Python** from [python.org](https://www.python.org/downloads/)
+   - Download Python 3.8 or higher
+   - **Important**: Check "Add Python to PATH" during installation
+
+2. **Run the setup script** (choose one):
+   ```cmd
+   cd C:\1_GitHome\Local-LLM-Server\LLM
+   install_python.bat
+   ```
+   Or in PowerShell:
+   ```powershell
+   cd C:\1_GitHome\Local-LLM-Server\LLM
+   .\install_python.ps1
+   ```
+
+3. **Launch the GUI**:
+   ```cmd
+   run_gui.bat
+   ```
+   Or in PowerShell:
+   ```powershell
+   .\run_gui.ps1
+   ```
+
+The GUI will open at `http://localhost:8501` in your browser.
+
+## Quick Launch (After Setup)
+
+Once everything is installed, simply run:
+
+**Windows:**
+```cmd
+cd C:\1_GitHome\Local-LLM-Server\LLM
+start_gui.bat
+```
+
+**PowerShell:**
+```powershell
+cd C:\1_GitHome\Local-LLM-Server\LLM
+.\start_gui.ps1
+```
+
+## Manual Setup
+
+If you prefer manual setup:
+
+```bash
+cd LLM
+python -m venv .venv
+.venv\Scripts\activate  # Windows
+# .venv/bin/activate   # Linux/Mac
+pip install -r requirements.txt
+streamlit run gui.py
+```
+
 # LLM — Quick Usage
 
 Minimal instructions to set up and use the LLM management scripts in this folder.
