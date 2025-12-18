@@ -569,6 +569,8 @@ def run_training(config):
                 text=True,
                 bufsize=1,  # Line buffered
                 universal_newlines=True,
+                encoding='utf-8',
+                errors='replace',  # Replace invalid UTF-8 chars instead of crashing
                 cwd=working_dir,
                 env=env
             )
@@ -647,21 +649,41 @@ def run_training(config):
             """Read process output in a separate thread"""
             try:
                 while not stop_reading.is_set():
-                    output = process.stdout.readline()
-                    if output:
-                        output_queue.put(output.rstrip())
-                    elif process.poll() is not None:
-                        # Process finished, read remaining
-                        try:
-                            remaining = process.stdout.read()
-                            if remaining:
-                                for line in remaining.splitlines():
-                                    if line.strip():
-                                        output_queue.put(line.rstrip())
-                        except:
-                            pass
-                        output_queue.put(None)  # Signal end
-                        break
+                    try:
+                        output = process.stdout.readline()
+                        if output:
+                            # Handle Unicode encoding issues
+                            try:
+                                # Try to decode as UTF-8, fallback to errors='replace'
+                                decoded = output.encode('utf-8', errors='replace').decode('utf-8', errors='replace')
+                                output_queue.put(decoded.rstrip())
+                            except:
+                                # If that fails, use errors='replace' to skip bad chars
+                                output_queue.put(output.rstrip())
+                        elif process.poll() is not None:
+                            # Process finished, read remaining
+                            try:
+                                remaining = process.stdout.read()
+                                if remaining:
+                                    # Handle Unicode for remaining output too
+                                    try:
+                                        decoded = remaining.encode('utf-8', errors='replace').decode('utf-8', errors='replace')
+                                        for line in decoded.splitlines():
+                                            if line.strip():
+                                                output_queue.put(line.rstrip())
+                                    except:
+                                        for line in remaining.splitlines():
+                                            if line.strip():
+                                                output_queue.put(line.rstrip())
+                            except Exception as read_err:
+                                output_queue.put(f"Error reading remaining output: {read_err}")
+                            output_queue.put(None)  # Signal end
+                            break
+                    except UnicodeDecodeError as ude:
+                        # Handle Unicode decode errors gracefully
+                        output_queue.put(f"[Unicode decode error: {ude}]")
+                    except Exception as read_err:
+                        output_queue.put(f"ERROR reading output: {read_err}")
             except Exception as e:
                 output_queue.put(f"ERROR reading output: {e}")
                 output_queue.put(None)
@@ -712,14 +734,12 @@ def run_training(config):
         
         stop_reading.set()
         
-        log_file.close()
-        
-        # Get return code
+        # Get return code BEFORE closing file
         return_code = process.poll()
         if return_code is None:
             return_code = 0
         
-        # Add final status message to log file
+        # Add final status message to log file BEFORE closing
         log_file.write("=" * 60 + "\n")
         if return_code == 0:
             log_file.write("✅ Training completed successfully!\n")
@@ -730,15 +750,29 @@ def run_training(config):
     
     except Exception as e:
         error_msg = f"❌ Error starting training: {str(e)}"
-        st.session_state.training_logs.append(error_msg)
-        st.session_state.training_status = "failed"
-        st.session_state.training_process = None
         import traceback
-        st.session_state.training_logs.append(traceback.format_exc())
+        tb = traceback.format_exc()
+        
+        # Write to log file (should exist since we create it at start)
         try:
-            log_file.close()
+            if 'log_file' in locals() and not log_file.closed:
+                log_file.write(error_msg + "\n")
+                log_file.write(tb + "\n")
+                log_file.flush()
+                log_file.close()
+            else:
+                # If log file doesn't exist or is closed, write to error file
+                with open(error_file, 'w', encoding='utf-8') as f:
+                    f.write(error_msg + "\n")
+                    f.write(tb + "\n")
         except:
-            pass
+            # Last resort: write to error file
+            try:
+                with open(error_file, 'w', encoding='utf-8') as f:
+                    f.write(error_msg + "\n")
+                    f.write(tb + "\n")
+            except:
+                pass
 
 def main():
     st.markdown('<h1 class="main-header">🤖 LLM Fine-tuning Studio</h1>', unsafe_allow_html=True)
@@ -1286,44 +1320,42 @@ def main():
         
         # Show training status
         if st.session_state.training_status == "training":
-            # Check for error files first
-            error_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "training_error.txt")
-            if os.path.exists(error_file):
+            # Read logs from file and display
+            log_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "training_log.txt")
+            
+            st.markdown("""
+            <div class="info-box">
+                🔄 <strong>Training in progress...</strong> Refreshing logs every 2 seconds.
+            </div>
+            """, unsafe_allow_html=True)
+            
+            if st.button("🛑 Stop Training", key="stop_training_main"):
+                st.session_state.training_status = "idle"
+                st.warning("Training stopped by user")
+                st.rerun()
+            
+            # Read and display logs
+            if os.path.exists(log_file):
                 try:
-                    with open(error_file, 'r', encoding='utf-8') as f:
-                        error_content = f.read()
-                        if error_content:
-                            st.error("❌ Training thread error detected!")
-                            st.text_area("Error Details", error_content, height=200)
+                    with open(log_file, 'r', encoding='utf-8') as f:
+                        logs = f.read()
+                        st.text_area("Training Logs", logs, height=500, key="live_logs")
+                        
+                        # Check if training finished
+                        if "Training completed successfully" in logs:
+                            st.session_state.training_status = "completed"
+                            st.success("✅ Training completed!")
+                            st.rerun()
+                        elif "Training failed" in logs:
                             st.session_state.training_status = "failed"
-                except:
-                    pass
+                            st.error("❌ Training failed")
+                            st.rerun()
+                except Exception as e:
+                    st.error(f"Error reading logs: {e}")
             
-            # Status indicator
-            col_status1, col_status2 = st.columns([3, 1])
-            with col_status1:
-                st.markdown("""
-                <div class="info-box">
-                    🔄 <strong>Training in progress...</strong> Check logs below for real-time updates.
-                </div>
-                """, unsafe_allow_html=True)
-            with col_status2:
-                if st.button("🛑 Stop Training", key="stop_training_main", type="secondary", use_container_width=True):
-                    stop_training()
-                    st.rerun()
-            
-            # Check if process is still alive
-            process = st.session_state.training_process
-            if process is not None:
-                if process.poll() is not None:
-                    # Process has finished
-                    return_code = process.returncode
-                    st.session_state.training_status = "completed" if return_code == 0 else "failed"
-                    st.session_state.training_process = None
-                    st.rerun()
-            elif st.session_state.training_status == "training":
-                # Process not tracked but status says training - check if it failed
-                st.warning("⚠️ Process not tracked - may have failed to start. Check logs below.")
+            # Auto-refresh every 2 seconds
+            time.sleep(2)
+            st.rerun()
             
             with st.expander("📋 View Training Logs (Live)", expanded=True):
                 if st.session_state.training_logs:

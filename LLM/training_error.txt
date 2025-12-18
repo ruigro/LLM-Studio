@@ -1,45 +1,6 @@
-Thread error at 2025-12-19 00:01:29
-Error: st.session_state has no attribute "training_logs". Did you forget to initialize it? More info: https://docs.streamlit.io/develop/concepts/architecture/session-state#initialization
-============================================================
+❌ Error starting training: I/O operation on closed file.
 Traceback (most recent call last):
-  File "C:\1_GitHome\Local-LLM-Server\LLM\gui.py", line 723, in run_training
+  File "C:\1_GitHome\Local-LLM-Server\LLM\gui.py", line 745, in run_training
     log_file.write("=" * 60 + "\n")
 ValueError: I/O operation on closed file.
 
-During handling of the above exception, another exception occurred:
-
-Traceback (most recent call last):
-  File "C:\1_GitHome\Local-LLM-Server\LLM\.venv\Lib\site-packages\streamlit\runtime\state\session_state.py", line 471, in __getitem__
-    base_value = self._getitem(widget_id, key)
-                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "C:\1_GitHome\Local-LLM-Server\LLM\.venv\Lib\site-packages\streamlit\runtime\state\session_state.py", line 524, in _getitem
-    raise KeyError
-KeyError
-
-During handling of the above exception, another exception occurred:
-
-Traceback (most recent call last):
-  File "C:\1_GitHome\Local-LLM-Server\LLM\.venv\Lib\site-packages\streamlit\runtime\state\session_state_proxy.py", line 130, in __getattr__
-    return self[key]
-           ~~~~^^^^^
-  File "C:\1_GitHome\Local-LLM-Server\LLM\.venv\Lib\site-packages\streamlit\runtime\state\session_state_proxy.py", line 101, in __getitem__
-    return get_session_state()[key]
-           ~~~~~~~~~~~~~~~~~~~^^^^^
-  File "C:\1_GitHome\Local-LLM-Server\LLM\.venv\Lib\site-packages\streamlit\runtime\state\safe_session_state.py", line 104, in __getitem__
-    return self._state[key]
-           ~~~~~~~~~~~^^^^^
-  File "C:\1_GitHome\Local-LLM-Server\LLM\.venv\Lib\site-packages\streamlit\runtime\state\session_state.py", line 478, in __getitem__
-    raise KeyError(_missing_key_error_message(key))
-KeyError: 'st.session_state has no key "training_logs". Did you forget to initialize it? More info: https://docs.streamlit.io/develop/concepts/architecture/session-state#initialization'
-
-During handling of the above exception, another exception occurred:
-
-Traceback (most recent call last):
-  File "C:\1_GitHome\Local-LLM-Server\LLM\gui.py", line 456, in run_training_safe
-    run_training(config)
-  File "C:\1_GitHome\Local-LLM-Server\LLM\gui.py", line 733, in run_training
-    st.session_state.training_logs.append(error_msg)
-    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "C:\1_GitHome\Local-LLM-Server\LLM\.venv\Lib\site-packages\streamlit\runtime\state\session_state_proxy.py", line 132, in __getattr__
-    raise AttributeError(_missing_attr_error_message(key))
-AttributeError: st.session_state has no attribute "training_logs". Did you forget to initialize it? More info: https://docs.streamlit.io/develop/concepts/architecture/session-state#initialization

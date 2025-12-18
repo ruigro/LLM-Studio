@@ -1,14 +1,28 @@
-Training started at 2025-12-19 00:01:25
+Training started at 2025-12-19 00:17:13
 ============================================================
-Command: C:\1_GitHome\Local-LLM-Server\LLM\.venv\Scripts\python.exe -u finetune.py --model-name unsloth/llama-3.2-3b-instruct-unsloth-bnb-4bit --data-path train_data.jsonl --output-dir ./fine_tuned_adapter --epochs 1 --batch-size 1 --lora-r 8 --lora-alpha 16 --lora-dropout 0.05 --grad-accum 8 --max-seq-length 2048
+Command: C:\1_GitHome\Local-LLM-Server\LLM\.venv\Scripts\python.exe -u finetune.py --model-name unsloth/llama-3.2-3b-instruct-unsloth-bnb-4bit --data-path train_data.jsonl --output-dir ./fine_tuned_adapter --epochs 3 --batch-size 1 --lora-r 8 --lora-alpha 16 --lora-dropout 0.05 --grad-accum 8 --max-seq-length 2048
 Working directory: C:\1_GitHome\Local-LLM-Server\LLM
 Python executable: C:\1_GitHome\Local-LLM-Server\LLM\.venv\Scripts\python.exe
 Finetune script: C:\1_GitHome\Local-LLM-Server\LLM\finetune.py
 Dataset: train_data.jsonl
 Model: unsloth/llama-3.2-3b-instruct-unsloth-bnb-4bit
-Epochs: 1
+Epochs: 3
 Attempting to start subprocess...
-Process started with PID: 7708
+Process started with PID: 27920
 Process is running, starting output reader...
-ðŸ¦¥ Unsloth: Will patch your computer to enable 2x faster free finetuning.
-ERROR reading output: 'charmap' codec can't decode byte 0x8f in position 5: character maps to <undefined>
+🦥 Unsloth: Will patch your computer to enable 2x faster free finetuning.
+⚙️  Running in WANDB offline mode
+🦥 Unsloth Zoo will now patch everything to make training faster!
+Loading model and tokenizer in 4-bit...
+Traceback (most recent call last):
+  File "C:\1_GitHome\Local-LLM-Server\LLM\finetune.py", line 167, in <module>
+    main()
+  File "C:\1_GitHome\Local-LLM-Server\LLM\finetune.py", line 63, in main
+    model, tokenizer = FastLanguageModel.from_pretrained(
+                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\1_GitHome\Local-LLM-Server\LLM\.venv\Lib\site-packages\unsloth\models\loader.py", line 332, in from_pretrained
+    model_types = get_transformers_model_type(
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+TypeError: get_transformers_model_type() got an unexpected keyword argument 'trust_remote_code'
+============================================================
+❌ Training failed with exit code 1
