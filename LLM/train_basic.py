@@ -4,13 +4,14 @@ Simple training WITHOUT unsloth - uses standard PEFT/LoRA
 This will work.
 """
 import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer, TrainingArguments, Trainer
+from transformers import AutoModelForCausalLM, AutoTokenizer, TrainingArguments, Trainer, TrainerCallback
 from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
 from datasets import load_dataset
 import sys
 import argparse
 import json
 import os
+import time
 
 # Parse arguments or use defaults
 parser = argparse.ArgumentParser()
@@ -111,6 +112,64 @@ def tokenize(examples):
 
 dataset = dataset.map(tokenize, batched=True)
 
+# Progress tracking callback
+class ProgressCallback(TrainerCallback):
+    def __init__(self, output_dir):
+        self.output_dir = output_dir
+        self.progress_file = os.path.join(output_dir, "training_progress.json")
+        self.start_time = time.time()
+        self.loss_history = []
+        
+    def on_log(self, args, state, control, logs=None, **kwargs):
+        if logs is None:
+            return
+        
+        elapsed = time.time() - self.start_time
+        current_step = state.global_step
+        total_steps = state.max_steps
+        
+        # Calculate ETA
+        if current_step > 0:
+            steps_per_sec = current_step / elapsed
+            remaining_steps = total_steps - current_step
+            eta_seconds = remaining_steps / steps_per_sec if steps_per_sec > 0 else 0
+        else:
+            eta_seconds = 0
+        
+        # Track loss
+        if "loss" in logs:
+            self.loss_history.append({"step": current_step, "loss": logs["loss"]})
+        
+        # Get GPU memory if available
+        gpu_memory_used = 0
+        gpu_memory_total = 0
+        if torch.cuda.is_available():
+            gpu_memory_used = torch.cuda.memory_allocated() / 1024**3  # GB
+            gpu_memory_total = torch.cuda.get_device_properties(0).total_memory / 1024**3
+        
+        progress_data = {
+            "epoch": state.epoch,
+            "total_epochs": args.num_train_epochs,
+            "step": current_step,
+            "total_steps": total_steps,
+            "loss": logs.get("loss", 0),
+            "learning_rate": logs.get("learning_rate", 0),
+            "elapsed_time": int(elapsed),
+            "eta_seconds": int(eta_seconds),
+            "samples_per_second": logs.get("samples_per_second", 0),
+            "gpu_memory_used_gb": round(gpu_memory_used, 2),
+            "gpu_memory_total_gb": round(gpu_memory_total, 2),
+            "loss_history": self.loss_history[-50:]  # Keep last 50 points
+        }
+        
+        # Write to file
+        try:
+            os.makedirs(self.output_dir, exist_ok=True)
+            with open(self.progress_file, 'w') as f:
+                json.dump(progress_data, f)
+        except Exception as e:
+            print(f"Warning: Could not write progress: {e}")
+
 print("Training...")
 trainer = Trainer(
     model=model,
@@ -128,6 +187,7 @@ trainer = Trainer(
         warmup_steps=10,  # Add warmup
         lr_scheduler_type="cosine",  # Better learning rate schedule
     ),
+    callbacks=[ProgressCallback(OUTPUT_DIR)]
 )
 
 trainer.train()

@@ -482,6 +482,165 @@ def load_trained_models():
     
     return sorted(models, key=lambda x: x[0], reverse=True)
 
+def load_all_available_models():
+    """Load both base models and fine-tuned models for testing"""
+    models = []
+    
+    def detect_model_type(model_name):
+        """Detect if model is instruct/chat or base"""
+        name_lower = model_name.lower()
+        # Check for instruct/chat indicators
+        instruct_keywords = ["instruct", "chat", "-it", "alpaca", "vicuna", "wizard", "nemotron"]
+        if any(keyword in name_lower for keyword in instruct_keywords):
+            return "instruct"
+        return "base"
+    
+    # Add downloaded base models
+    downloaded_dir = "./models"
+    if os.path.exists(downloaded_dir):
+        for item in os.listdir(downloaded_dir):
+            item_path = os.path.join(downloaded_dir, item)
+            if os.path.isdir(item_path):
+                # Check if it's a valid model directory
+                if os.path.exists(os.path.join(item_path, "config.json")):
+                    model_type = detect_model_type(item)
+                    type_label = "INSTRUCT" if model_type == "instruct" else "BASE"
+                    models.append({
+                        "name": f"[{type_label}] {item}",
+                        "path": item_path,
+                        "type": "base",
+                        "model_type": model_type,
+                        "display_name": item.replace("_", "/")
+                    })
+    
+    # Add fine-tuned models (always treated as instruct after training)
+    trained_models = load_trained_models()
+    for path, display_name, base_model in trained_models:
+        models.append({
+            "name": f"[FINE-TUNED] {display_name}",
+            "path": path,
+            "type": "fine-tuned",
+            "model_type": "instruct",  # Fine-tuned models are instruction-tuned
+            "base_model": base_model
+        })
+    
+    return models
+
+def clean_model_output(text):
+    """Clean model output from training artifacts and formatting issues"""
+    import re
+    import html
+    
+    # Unescape HTML entities (&#x27; etc)
+    text = html.unescape(text)
+    
+    # NUCLEAR OPTION: Remove ALL Hugging Face security warnings
+    # This catches EVERYTHING from the warning start to the actual response
+    
+    # Step 1: Remove the entire warning block (from "A new version" to end or until we find actual content)
+    text = re.sub(
+        r'(?:❌ Error: )?A new version of the following files was downloaded.*?(?=\n\n[A-Z]|$)', 
+        '', 
+        text, 
+        flags=re.DOTALL
+    )
+    
+    # Step 2: Remove any standalone file list lines
+    text = re.sub(r'^- [a-z_]+\.py\s*$', '', text, flags=re.MULTILINE)
+    
+    # Step 3: Remove "Make sure to double-check" lines
+    text = re.sub(r'^\. Make sure to double-check.*?$', '', text, flags=re.MULTILINE)
+    
+    # Step 4: Remove any line containing huggingface.co URLs
+    text = re.sub(r'^.*https://huggingface\.co/.*$', '', text, flags=re.MULTILINE)
+    
+    # Step 5: If text starts with warning fragments, remove them
+    if text.startswith('- ') or text.startswith('. Make sure'):
+        lines = text.split('\n')
+        # Skip lines until we find actual content
+        for i, line in enumerate(lines):
+            if line and not line.startswith('-') and not line.startswith('. Make sure') and len(line) > 10:
+                text = '\n'.join(lines[i:])
+                break
+    
+    # Remove training artifacts
+    artifacts = ["Note:", "Code:", "### Instruction:", "### Response:", 
+                 "<div", "</div>", "class=", "```python", "```"]
+    for artifact in artifacts:
+        if artifact in text:
+            text = text.split(artifact)[0].strip()
+    
+    # Remove incomplete sentences
+    text = re.sub(r'\s+\S*$', '', text) if not text.endswith(('.', '!', '?', '"', "'")) else text
+    
+    # Clean up extra whitespace and blank lines
+    text = re.sub(r'\n\s*\n\s*\n+', '\n\n', text)
+    text = re.sub(r'^\s+', '', text, flags=re.MULTILINE)
+    
+    return text.strip()
+
+def generate_model_response(model_info, prompt):
+    """Generate response from a model (base or fine-tuned)"""
+    import subprocess
+    import sys
+    
+    # Get model type for proper formatting
+    model_type = model_info.get("model_type", "base")
+    
+    try:
+        if model_info["type"] == "base":
+            # For base models, use run_adapter.py with --base-model flag and NO --adapter-dir
+            # This tells it to load ONLY the base model without any adapter
+            cmd = [
+                sys.executable,
+                "run_adapter.py",
+                "--base-model", model_info["path"],
+                "--prompt", prompt,
+                "--max-new-tokens", "512",
+                "--temperature", "0.7",
+                "--model-type", model_type,
+                "--no-adapter"  # Flag to skip adapter loading
+            ]
+        else:
+            # Generate from fine-tuned model (with adapter)
+            cmd = [
+                sys.executable,
+                "run_adapter.py",
+                "--adapter-dir", model_info["path"],
+                "--prompt", prompt,
+                "--max-new-tokens", "512",
+                "--temperature", "0.7",
+                "--model-type", model_type
+            ]
+        
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=60,
+            encoding='utf-8',
+            errors='replace'
+        )
+        
+        if result.returncode == 0:
+            output = result.stdout.strip()
+            # Extract output if marked
+            if "--- OUTPUT ---" in output:
+                output = output.split("--- OUTPUT ---", 1)[1].strip()
+            return clean_model_output(output)
+        else:
+            error_msg = result.stderr.strip()
+            # Show only first 200 chars of error
+            if len(error_msg) > 200:
+                error_msg = error_msg[:200] + "..."
+            return f"❌ Error: {error_msg}"
+    
+    except subprocess.TimeoutExpired:
+        return "⏱️ Timeout: Response took too long"
+    except Exception as e:
+        return f"❌ Error: {str(e)[:200]}"
+
+
 def analyze_model(model_name):
     """Analyze model characteristics and return profile"""
     if not model_name:
@@ -1388,6 +1547,41 @@ def main():
                     border-left: 4px solid #667eea;
                     margin-bottom: 1rem;
                 }
+                .model-card-content {
+                    display: flex;
+                    gap: 1rem;
+                    align-items: flex-start;
+                }
+                .model-main-info {
+                    flex: 0 0 60%;
+                    min-width: 0;
+                }
+                .model-description {
+                    flex: 1;
+                    max-height: 80px;
+                    overflow-y: auto;
+                    padding: 0.5rem;
+                    background: rgba(255,255,255,0.05);
+                    border-radius: 6px;
+                    border-left: 2px solid rgba(102, 126, 234, 0.5);
+                    font-size: 0.85rem;
+                    color: #cccccc;
+                    line-height: 1.4;
+                }
+                .model-description::-webkit-scrollbar {
+                    width: 4px;
+                }
+                .model-description::-webkit-scrollbar-track {
+                    background: rgba(255,255,255,0.05);
+                    border-radius: 4px;
+                }
+                .model-description::-webkit-scrollbar-thumb {
+                    background: rgba(102, 126, 234, 0.6);
+                    border-radius: 4px;
+                }
+                .model-description::-webkit-scrollbar-thumb:hover {
+                    background: rgba(102, 126, 234, 0.8);
+                }
                 .model-name {
                     font-size: 1.2rem;
                     font-weight: bold;
@@ -1447,9 +1641,16 @@ def main():
                                 
                                 st.markdown(f"""
                                 <div class="model-card">
-                                    <div class="model-name">{model_name}{category_badge}</div>
-                                    <div class="model-info">📦 {model_info['size']}</div>
-                                    <div class="model-info">🆔 {model_id}</div>
+                                    <div class="model-card-content">
+                                        <div class="model-main-info">
+                                            <div class="model-name">{model_name}{category_badge}</div>
+                                            <div class="model-info">📦 {model_info['size']}</div>
+                                            <div class="model-info">🆔 {model_id}</div>
+                                        </div>
+                                        <div class="model-description">
+                                            {model_info.get('description', 'No description available')}
+                                        </div>
+                                    </div>
                                 </div>
                                 """, unsafe_allow_html=True)
                                 
@@ -1965,6 +2166,7 @@ def main():
                             st.stop()
                         
                         st.session_state.training_status = "training"
+                        st.session_state.output_dir = output_dir  # Store output dir for progress file
                         st.session_state.training_logs = []
                         st.session_state.training_logs.append("=" * 60)
                         st.session_state.training_logs.append("🚀 Starting training...")
@@ -2014,125 +2216,222 @@ def main():
         
         # Show training status
         if st.session_state.training_status == "training":
-            # Read logs from file and display
-            log_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "training_log.txt")
+            # FUTURISTIC TRAINING VISUALIZATION
             
+            # CSS for futuristic design
             st.markdown("""
-            <div class="info-box">
-                🔄 <strong>Training in progress...</strong> Refreshing logs every 2 seconds.
+            <style>
+            @keyframes pulse {
+                0%, 100% { opacity: 1; }
+                50% { opacity: 0.5; }
+            }
+            @keyframes shimmer {
+                0% { background-position: -1000px 0; }
+                100% { background-position: 1000px 0; }
+            }
+            .training-banner {
+                background: linear-gradient(135deg, rgba(102, 126, 234, 0.2) 0%, rgba(118, 75, 162, 0.2) 100%);
+                border: 2px solid rgba(102, 126, 234, 0.5);
+                border-radius: 15px;
+                padding: 1.5rem;
+                margin-bottom: 2rem;
+                box-shadow: 0 0 30px rgba(102, 126, 234, 0.3);
+            }
+            .training-status {
+                font-size: 2rem;
+                font-weight: bold;
+                color: #fff;
+                animation: pulse 2s infinite;
+            }
+            .metric-card {
+                background: linear-gradient(135deg, rgba(30, 30, 60, 0.8) 0%, rgba(20, 20, 40, 0.9) 100%);
+                border: 1px solid rgba(102, 126, 234, 0.4);
+                border-radius: 12px;
+                padding: 1.5rem;
+                margin: 0.5rem;
+                box-shadow: 0 0 20px rgba(102, 126, 234, 0.2);
+                backdrop-filter: blur(10px);
+            }
+            .metric-label {
+                font-size: 0.9rem;
+                color: #a0a0ff;
+                text-transform: uppercase;
+                letter-spacing: 1px;
+            }
+            .metric-value {
+                font-size: 2.5rem;
+                font-weight: bold;
+                color: #fff;
+                text-shadow: 0 0 10px rgba(102, 126, 234, 0.5);
+                margin: 0.5rem 0;
+            }
+            .progress-container {
+                background: rgba(20, 20, 40, 0.5);
+                border-radius: 10px;
+                padding: 0.3rem;
+                margin: 1rem 0;
+            }
+            .futuristic-progress {
+                height: 30px;
+                background: linear-gradient(90deg, 
+                    #667eea 0%, 
+                    #764ba2 25%, 
+                    #f093fb 50%, 
+                    #ff7f0e 75%, 
+                    #ff4500 100%);
+                background-size: 200% 100%;
+                animation: shimmer 3s infinite linear;
+                border-radius: 8px;
+                box-shadow: 0 0 15px rgba(102, 126, 234, 0.6);
+            }
+            </style>
+            """, unsafe_allow_html=True)
+            
+            # Training Status Banner
+            st.markdown("""
+            <div class="training-banner">
+                <div class="training-status">⚡ TRAINING IN PROGRESS</div>
             </div>
             """, unsafe_allow_html=True)
             
-            if st.button("🛑 Stop Training", key="stop_training_main"):
+            # Read progress from JSON file
+            progress_file = os.path.join(st.session_state.get("output_dir", "./fine_tuned_adapter"), "training_progress.json")
+            st.caption(f"📂 Looking for progress at: {progress_file}")
+            progress_data = None
+            
+            if os.path.exists(progress_file):
+                try:
+                    with open(progress_file, 'r') as f:
+                        progress_data = json.load(f)
+                except:
+                    pass
+            
+            if progress_data:
+                # Progress bars
+                epoch = progress_data.get("epoch", 0)
+                total_epochs = progress_data.get("total_epochs", 1)
+                step = progress_data.get("step", 0)
+                total_steps = progress_data.get("total_steps", 1)
+                
+                epoch_progress = epoch / total_epochs if total_epochs > 0 else 0
+                step_progress = step / total_steps if total_steps > 0 else 0
+                
+                # Epoch Progress
+                st.markdown(f"### 🔄 Epoch {int(epoch)}/{int(total_epochs)}")
+                st.progress(epoch_progress)
+                
+                # Step Progress
+                st.markdown(f"### 📊 Step {step}/{total_steps} ({int(step_progress * 100)}%)")
+                st.progress(step_progress)
+                
+                # Time info
+                elapsed = progress_data.get("elapsed_time", 0)
+                eta = progress_data.get("eta_seconds", 0)
+                elapsed_str = f"{elapsed // 60:02d}:{elapsed % 60:02d}"
+                eta_str = f"{eta // 60:02d}:{eta % 60:02d}"
+                
+                col_time1, col_time2 = st.columns(2)
+                with col_time1:
+                    st.metric("⏱️ Elapsed", elapsed_str)
+                with col_time2:
+                    st.metric("⏳ ETA", eta_str)
+                
+                # Metric Cards in 2x2 grid
+                st.markdown("### 📈 Live Metrics")
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    loss = progress_data.get("loss", 0)
+                    # Color based on loss (red if high, green if low)
+                    loss_color = "#10b981" if loss < 1.0 else ("#ff7f0e" if loss < 2.0 else "#ff4500")
+                    st.markdown(f"""
+                    <div class="metric-card">
+                        <div class="metric-label">Current Loss</div>
+                        <div class="metric-value" style="color: {loss_color};">{loss:.4f}</div>
+                    </div>
+                    """, unsafe_allow_html=True)
+                    
+                    lr = progress_data.get("learning_rate", 0)
+                    st.markdown(f"""
+                    <div class="metric-card">
+                        <div class="metric-label">Learning Rate</div>
+                        <div class="metric-value">{lr:.2e}</div>
+                    </div>
+                    """, unsafe_allow_html=True)
+                
+                with col2:
+                    speed = progress_data.get("samples_per_second", 0)
+                    st.markdown(f"""
+                    <div class="metric-card">
+                        <div class="metric-label">🚀 Speed</div>
+                        <div class="metric-value">{speed:.2f} samples/s</div>
+                    </div>
+                    """, unsafe_allow_html=True)
+                    
+                    gpu_used = progress_data.get("gpu_memory_used_gb", 0)
+                    gpu_total = progress_data.get("gpu_memory_total_gb", 1)
+                    gpu_percent = (gpu_used / gpu_total * 100) if gpu_total > 0 else 0
+                    st.markdown(f"""
+                    <div class="metric-card">
+                        <div class="metric-label">🎮 GPU Memory</div>
+                        <div class="metric-value">{gpu_used:.1f} / {gpu_total:.1f} GB</div>
+                        <div style="margin-top: 0.5rem;">
+                            <div style="background: rgba(255,255,255,0.1); border-radius: 5px; height: 10px;">
+                                <div style="background: linear-gradient(90deg, #667eea, #764ba2); width: {gpu_percent}%; height: 100%; border-radius: 5px;"></div>
+                            </div>
+                        </div>
+                    </div>
+                    """, unsafe_allow_html=True)
+                
+                # Loss History Graph
+                loss_history = progress_data.get("loss_history", [])
+                if loss_history:
+                    st.markdown("### 📉 Loss Over Time")
+                    import pandas as pd
+                    df = pd.DataFrame(loss_history)
+                    st.line_chart(df.set_index("step")["loss"])
+            else:
+                st.info("⏳ Waiting for training data...")
+            
+            # Stop button
+            if st.button("🛑 Stop Training", key="stop_training_main", type="primary"):
                 st.session_state.training_status = "idle"
                 st.warning("Training stopped by user")
                 st.rerun()
             
-            # Read and display logs
-            if os.path.exists(log_file):
-                try:
-                    with open(log_file, 'r', encoding='utf-8', errors='replace') as f:
-                        logs = f.read()
-                        
-                        # Show log length for debugging
-                        st.caption(f"📄 Log file size: {len(logs)} characters | Last updated: {time.strftime('%H:%M:%S')}")
-                        
-                        st.text_area("Training Logs", logs, height=500, key="live_logs")
-                        
-                        # Check if training finished or had OOM error
-                        if "✅ Training completed successfully" in logs or "Done! Model saved" in logs:
-                            st.session_state.training_status = "completed"
-                            st.success("✅ Training completed!")
-                            st.rerun()
-                        elif "❌ Training failed" in logs or "OutOfMemoryError" in logs or "CUDA out of memory" in logs:
-                            st.session_state.training_status = "failed"
-                            st.error("❌ Training failed - Check logs for details")
-                            if "OutOfMemoryError" in logs or "CUDA out of memory" in logs:
-                                st.error("💡 **Out of Memory!** Reduce batch size to 1, or reduce max sequence length to 1024")
-                            st.rerun()
-                except Exception as e:
-                    st.error(f"Error reading logs: {e}")
-            else:
-                st.warning("⚠️ Log file not found yet. Waiting for training to start...")
+            # Read logs from file and display
+            log_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "training_log.txt")
             
-            # Auto-refresh every 2 seconds
-            time.sleep(2)
-            st.rerun()
-            
-            # Show process status and diagnostics
-            st.markdown("### 🔍 Process Status & Diagnostics")
-            
-            # First, check if process was stored
-            if 'training_process' not in st.session_state or st.session_state.training_process is None:
-                st.error("⚠️ Process not tracked - may have failed to start")
-                st.caption("This usually means the process crashed immediately or failed to start.")
-                
-                # Show what should have happened
-                st.markdown("**Expected process info:**")
-                import sys
-                python_exe = sys.executable
-                finetune_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "finetune.py")
-                st.code(f"Python: {python_exe}\nScript: {finetune_path}")
-                
-                # Test button
-                if st.button("🧪 Test if finetune.py works", key="test_finetune"):
-                    test_cmd = [python_exe, "-u", "finetune.py", "--help"]
+            # Detailed logs in expander
+            with st.expander("📄 View Detailed Logs", expanded=False):
+                if os.path.exists(log_file):
                     try:
-                        result = subprocess.run(
-                            test_cmd,
-                            capture_output=True,
-                            text=True,
-                            timeout=10,
-                            cwd=os.path.dirname(os.path.abspath(__file__))
-                        )
-                        if result.returncode == 0:
-                            st.success("✅ finetune.py can be executed!")
-                            st.text_area("Help output", result.stdout, height=200)
-                        else:
-                            st.error(f"❌ finetune.py failed with code {result.returncode}")
-                            st.text_area("Error output", result.stderr, height=200)
+                        with open(log_file, 'r', encoding='utf-8', errors='replace') as f:
+                            logs = f.read()
+                            st.caption(f"Log file size: {len(logs)} characters | Last updated: {time.strftime('%H:%M:%S')}")
+                            st.text_area("Training Logs", logs, height=400, key="live_logs")
+                            
+                            # Check if training finished or had errors
+                            if "✅ Training completed successfully" in logs or "Done! Model saved" in logs:
+                                st.session_state.training_status = "completed"
+                                st.success("✅ Training completed!")
+                                st.rerun()
+                            elif "❌ Training failed" in logs or "OutOfMemoryError" in logs or "CUDA out of memory" in logs:
+                                st.session_state.training_status = "failed"
+                                st.error("❌ Training failed - Check logs for details")
+                                if "OutOfMemoryError" in logs or "CUDA out of memory" in logs:
+                                    st.error("💡 **Out of Memory!** Reduce batch size or max sequence length")
+                                st.rerun()
                     except Exception as e:
-                        st.error(f"❌ Error testing: {e}")
-                        import traceback
-                        st.text(traceback.format_exc())
-            
-            process = st.session_state.training_process
-            if process is not None:
-                status = process.poll()
-                if status is None:
-                    st.success(f"✅ Process running (PID: {process.pid})")
-                    # Check if process is actually doing something
-                    try:
-                        import psutil
-                        proc = psutil.Process(process.pid)
-                        cpu_percent = proc.cpu_percent(interval=0.1)
-                        memory_mb = proc.memory_info().rss / 1024 / 1024
-                        st.caption(f"CPU: {cpu_percent:.1f}% | Memory: {memory_mb:.1f} MB")
-                        if cpu_percent < 0.1 and memory_mb < 100:
-                            st.warning("⚠️ Process appears to be idle - may be stuck or waiting")
-                    except:
-                        pass
+                        st.error(f"Error reading logs: {e}")
                 else:
-                    st.warning(f"⚠️ Process finished with code: {status}")
-                    st.session_state.training_status = "completed" if status == 0 else "failed"
-            else:
-                st.error("⚠️ Process not tracked - may have failed to start")
-                # Try to find running finetune.py processes
-                try:
-                    import psutil
-                    found_processes = []
-                    for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
-                        try:
-                            cmdline = proc.info['cmdline']
-                            if cmdline and 'finetune.py' in ' '.join(cmdline):
-                                found_processes.append(f"PID {proc.info['pid']}")
-                        except (psutil.NoSuchProcess, psutil.AccessDenied):
-                            pass
-                    if found_processes:
-                        st.info(f"Found finetune.py processes: {', '.join(found_processes)}")
-                        st.caption("These processes may be from a previous training session")
-                except ImportError:
-                    st.caption("Install psutil for better process tracking: pip install psutil")
+                    st.warning("⚠️ Log file not found yet. Waiting for training to start...")
+            
+            # Auto-refresh every 1 second for smooth updates
+            time.sleep(1)
+            st.rerun()
+        
+        # Training completed or idle status messages
             
             # Diagnostic buttons
             col_diag1, col_diag2 = st.columns(2)
@@ -2196,273 +2495,168 @@ def main():
             st.session_state.training_status = "idle"
     
     elif page == "🧪 Test Model":
-        st.header("💬 Chat with Your Model")
+        st.header("🧪 Test Models - Side-by-Side Chat")
         
-        # Initialize chat history in session state
-        if "chat_history" not in st.session_state:
-            st.session_state.chat_history = []
+        # Load all available models
+        available_models = load_all_available_models()
         
-        trained_models = load_trained_models()
-        
-        if not trained_models:
-            st.markdown("""
-            <div class="warning-box">
-                ⚠️ No trained models found. Train a model first!
-            </div>
-            """, unsafe_allow_html=True)
+        if not available_models:
+            st.warning("⚠️ No models available. Download a base model or train a fine-tuned model first.")
         else:
-            # Sidebar for settings
-            with st.sidebar:
-                st.subheader("📦 Model Selection")
-                
-                if not trained_models:
-                    st.warning("No trained models found")
-                else:
-                    # Build display mapping with metadata
-                    model_options = []
-                    model_data = {}
-                    for path, display_name, base_model in trained_models:
-                        model_options.append(display_name)
-                        model_data[display_name] = {"path": path, "base": base_model}
-                    
-                    selected_display = st.selectbox("Select Model", model_options)
-                    selected_model = model_data[selected_display]["path"]
-                    base_model = model_data[selected_display]["base"]
-                    
-                    # Show model info
-                    st.markdown(f"**Base:** `{base_model.split('/')[-1] if '/' in base_model else base_model}`")
-                    st.markdown(f"**Path:** `{selected_model}`")
-                    
-                    # Delete button
-                    st.divider()
-                    if st.button("🗑️ Delete This Model", type="secondary", use_container_width=True):
-                        try:
-                            import shutil
-                            shutil.rmtree(selected_model)
-                            st.success(f"✅ Deleted: {selected_display}")
-                            st.rerun()
-                        except Exception as e:
-                            st.error(f"❌ Error deleting model: {e}")
-                st.markdown(f"**Adapter:** `{selected_display}`")
-                
-                st.divider()
-                st.subheader("⚙️ Generation Settings")
-                max_tokens = st.slider("Max Tokens", 32, 512, 128)
-                temperature = st.slider("Temperature", 0.0, 2.0, 0.7, step=0.1)
-                
-                st.divider()
-                if st.button("🗑️ Clear Chat", use_container_width=True):
-                    st.session_state.chat_history = []
-                    st.rerun()
+            # Initialize chat history
+            if 'dual_chat_history' not in st.session_state:
+                st.session_state.dual_chat_history = []
             
-            # Chat CSS for custom HTML bubbles
+            # Model selection at top
+            col_select1, col_select2 = st.columns(2)
+            
+            with col_select1:
+                st.markdown("### 🔵 Model A")
+                model_a_options = ["None"] + [m["name"] for m in available_models]
+                selected_a = st.selectbox("", model_a_options, key="model_a", label_visibility="collapsed")
+                model_a = None
+                if selected_a != "None":
+                    model_a = next(m for m in available_models if m["name"] == selected_a)
+            
+            with col_select2:
+                st.markdown("### 🟢 Model B")
+                model_b_options = ["None"] + [m["name"] for m in available_models]
+                selected_b = st.selectbox("", model_b_options, key="model_b", label_visibility="collapsed")
+                model_b = None
+                if selected_b != "None":
+                    model_b = next(m for m in available_models if m["name"] == selected_b)
+            
+            st.divider()
+            
+            # CSS for chat bubbles
             st.markdown("""
             <style>
-            .chat-container {
-                padding: 20px 0;
-            }
-            .user-message-wrapper {
-                display: flex;
-                justify-content: flex-end;
-                margin-bottom: 1rem;
-                width: 100%;
-            }
-            .user-message {
+            .user-bubble {
                 background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
                 color: white;
-                padding: 1rem 1.2rem;
-                border-radius: 18px;
-                max-width: 90%;
-                box-shadow: 0 2px 8px rgba(102, 126, 234, 0.3);
-                word-wrap: break-word;
+                padding: 0.8rem;
+                border-radius: 12px;
+                margin: 0.5rem 0;
+                text-align: right;
+                margin-left: 20%;
             }
-            .ai-message-wrapper {
-                display: flex;
-                justify-content: flex-start;
-                margin-bottom: 1rem;
-                width: 100%;
-            }
-            .ai-message {
-                background: linear-gradient(135deg, #ff7f0e 0%, #ff4500 100%);
+            .ai-bubble-a {
+                background: linear-gradient(135deg, #4a5568 0%, #2d3748 100%);
                 color: white;
-                padding: 1rem 1.2rem;
-                border-radius: 18px;
-                max-width: 90%;
-                box-shadow: 0 2px 8px rgba(255, 127, 14, 0.3);
-                border-left: 4px solid #ff6b00;
-                word-wrap: break-word;
+                padding: 0.8rem;
+                border-radius: 12px;
+                margin: 0.5rem 0;
+                margin-right: 20%;
+                border-left: 4px solid #667eea;
             }
-            .message-label {
-                font-size: 0.75rem;
-                font-weight: bold;
-                margin-bottom: 5px;
-                opacity: 0.8;
-            }
-            /* FORCE visible text in ALL inputs */
-            div[data-testid="stForm"] input[type="text"],
-            div[data-testid="stTextInput"] input,
-            .stTextInput input,
-            input[type="text"] {
-                color: #ffffff !important;
-                background-color: #2d2d2d !important;
-                border: 1px solid #555 !important;
-            }
-            div[data-testid="stForm"] input[type="text"]::placeholder,
-            div[data-testid="stTextInput"] input::placeholder,
-            .stTextInput input::placeholder,
-            input[type="text"]::placeholder {
-                color: #aaaaaa !important;
+            .ai-bubble-b {
+                background: linear-gradient(135deg, #065f46 0%, #064e3b 100%);
+                color: white;
+                padding: 0.8rem;
+                border-radius: 12px;
+                margin: 0.5rem 0;
+                margin-right: 20%;
+                border-left: 4px solid #10b981;
             }
             </style>
             """, unsafe_allow_html=True)
             
-            # Display chat history using custom HTML
-            if not st.session_state.chat_history:
-                st.markdown('<div style="text-align:center; color:#888; padding:50px;">Start a conversation! 👇</div>', unsafe_allow_html=True)
+            # Two-column chat display with synchronized rows
+            st.markdown("#### 💬 Chat History")
+            
+            if not st.session_state.dual_chat_history:
+                st.info("No messages yet")
             else:
                 import html as html_module
-                for msg in st.session_state.chat_history:
-                    # Unescape any HTML entities, then escape to prevent injection, then convert newlines
-                    content = html_module.unescape(msg["content"])
-                    content = html_module.escape(content)
-                    content = content.replace('\n', '<br>')
+                
+                # Loop through messages and display them in synchronized rows
+                for msg in st.session_state.dual_chat_history:
+                    # User message row - synchronized across both columns
+                    col_user1, col_user2 = st.columns(2)
+                    with col_user1:
+                        user_content = html_module.escape(msg["user"])
+                        st.markdown(f'<div class="user-bubble">{user_content}</div>', unsafe_allow_html=True)
+                    with col_user2:
+                        user_content = html_module.escape(msg["user"])
+                        st.markdown(f'<div class="user-bubble">{user_content}</div>', unsafe_allow_html=True)
                     
-                    if msg["role"] == "user":
-                        st.markdown(f'''
-                        <div class="user-message-wrapper">
-                            <div class="user-message">
-                                <div class="message-label">You</div>
-                                {content}
-                            </div>
-                        </div>
-                        ''', unsafe_allow_html=True)
-                    else:
-                        st.markdown(f'''
-                        <div class="ai-message-wrapper">
-                            <div class="ai-message">
-                                <div class="message-label">AI Assistant</div>
-                                {content}
-                            </div>
-                        </div>
-                        ''', unsafe_allow_html=True)
+                    # AI response row - synchronized across both columns
+                    col_ai1, col_ai2 = st.columns(2)
+                    
+                    with col_ai1:
+                        # Model A response
+                        if msg.get("response_a"):
+                            ai_content = html_module.escape(msg["response_a"])
+                            ai_content = ai_content.replace('\n', '<br>')
+                            st.markdown(f'<div class="ai-bubble-a">{ai_content}</div>', unsafe_allow_html=True)
+                        elif msg.get("generating_a"):
+                            st.caption("⏳ Generating...")
+                        else:
+                            st.caption("⚠️ Model A not selected")
+                    
+                    with col_ai2:
+                        # Model B response
+                        if msg.get("response_b"):
+                            ai_content = html_module.escape(msg["response_b"])
+                            ai_content = ai_content.replace('\n', '<br>')
+                            st.markdown(f'<div class="ai-bubble-b">{ai_content}</div>', unsafe_allow_html=True)
+                        elif msg.get("generating_b"):
+                            st.caption("⏳ Generating...")
+                        else:
+                            st.caption("⚠️ Model B not selected")
+            
+            st.divider()
             
             # Chat input at bottom
-            with st.form(key="chat_form", clear_on_submit=True):
-                col1, col2 = st.columns([5, 1])
-                with col1:
-                    user_input = st.text_input(
-                        "Message",
-                        placeholder="Type your message here...",
-                        label_visibility="collapsed"
-                    )
-                with col2:
+            with st.form(key="dual_chat_form", clear_on_submit=True):
+                col_input, col_send, col_clear = st.columns([8, 1, 1])
+                with col_input:
+                    user_input = st.text_input("Message", placeholder="Type your message...", label_visibility="collapsed")
+                with col_send:
                     send_button = st.form_submit_button("Send", use_container_width=True, type="primary")
+                with col_clear:
+                    clear_button = st.form_submit_button("Clear", use_container_width=True)
             
-            if send_button and user_input.strip():
-                # Add user message to history and show it immediately
-                st.session_state.chat_history.append({"role": "user", "content": user_input})
+            if clear_button:
+                st.session_state.dual_chat_history = []
+                st.rerun()
+            
+            if send_button and user_input:
+                if model_a is None and model_b is None:
+                    st.error("Please select at least one model")
+                else:
+                    # Add user message immediately and show it
+                    new_message = {
+                        "user": user_input,
+                        "generating_a": model_a is not None,
+                        "generating_b": model_b is not None
+                    }
+                    st.session_state.dual_chat_history.append(new_message)
+                    st.session_state.generating_dual = True
+                    st.rerun()  # Show user message immediately
+            
+            # Generate responses after showing user message
+            if st.session_state.get("generating_dual", False):
+                st.session_state.generating_dual = False
                 
-                # Set flag to generate response
-                st.session_state.generating = True
-                st.rerun()  # Immediately show user message
+                # Get last message
+                last_msg = st.session_state.dual_chat_history[-1]
+                user_input = last_msg["user"]
                 
-            # Generate response if flag is set
-            if st.session_state.get("generating", False):
-                st.session_state.generating = False
+                # Generate responses
+                if model_a and last_msg.get("generating_a"):
+                    with st.spinner("Model A thinking..."):
+                        response_a = generate_model_response(model_a, user_input)
+                        last_msg["response_a"] = response_a
+                        last_msg["generating_a"] = False
                 
-                # Get the last user message
-                user_input = None
-                for msg in reversed(st.session_state.chat_history):
-                    if msg["role"] == "user":
-                        user_input = msg["content"]
-                        break
+                if model_b and last_msg.get("generating_b"):
+                    with st.spinner("Model B thinking..."):
+                        response_b = generate_model_response(model_b, user_input)
+                        last_msg["response_b"] = response_b
+                        last_msg["generating_b"] = False
                 
-                if user_input:
-                    # Construct adapter path
-                    if selected_model.startswith("./"):
-                        adapter_dir = selected_model
-                    else:
-                        adapter_dir = f"./{selected_model}"
-                    
-                    # Format prompt properly
-                    formatted_prompt = f"### Instruction:\n{user_input}\n\n### Response:\n"
-                    
-                    with st.spinner("🤔 Thinking..."):
-                        try:
-                            import sys
-                            python_exe = sys.executable
-                            cmd = [
-                                python_exe, "run_adapter.py",
-                                "--adapter-dir", adapter_dir,
-                                "--base-model", base_model,
-                                "--prompt", formatted_prompt,
-                                "--max-new-tokens", str(max_tokens),
-                                "--temperature", str(temperature),
-                            ]
-                            
-                            result = subprocess.run(
-                                cmd,
-                                capture_output=True,
-                                text=True,
-                                timeout=180,
-                                cwd=os.path.dirname(os.path.abspath(__file__)),
-                                encoding='utf-8',
-                                errors='replace'
-                            )
-                            
-                            if result.returncode == 0:
-                                output = result.stdout.strip()
-                                if "--- OUTPUT ---" in output:
-                                    output = output.split("--- OUTPUT ---", 1)[1].strip()
-                                
-                                # Clean up output - ONLY remove actual training artifacts
-                                # Remove instruction markers at the very start if present
-                                if output.startswith("### Instruction:"):
-                                    if "### Response:" in output:
-                                        output = output.split("### Response:", 1)[1].strip()
-                                
-                                # ONLY stop at clear training markers that shouldn't be in responses
-                                # Be VERY conservative - don't break legitimate content
-                                stop_markers = [
-                                    "\n\n### Instruction:",  # New instruction block
-                                    "\n\n### Response:",    # New response block  
-                                    "\n\n### Note:",        # Training notes
-                                    "\n\n(Note:",           # Parenthetical notes
-                                ]
-                                for marker in stop_markers:
-                                    if marker in output:
-                                        output = output.split(marker)[0].strip()
-                                        break
-                                
-                                # Remove trailing whitespace
-                                output = output.rstrip()
-                                
-                                if output and len(output) > 0:
-                                    # Add AI response to history
-                                    st.session_state.chat_history.append({"role": "assistant", "content": output})
-                                else:
-                                    st.session_state.chat_history.append({
-                                        "role": "assistant", 
-                                        "content": "⚠️ I couldn't generate a response. Please try again."
-                                    })
-                            else:
-                                error_msg = result.stderr if result.stderr else "Unknown error"
-                                st.session_state.chat_history.append({
-                                    "role": "assistant",
-                                    "content": f"❌ Error: {error_msg[:200]}"
-                                })
-                        except subprocess.TimeoutExpired:
-                            st.session_state.chat_history.append({
-                                "role": "assistant",
-                                "content": "⏱️ Response timed out. Please try again with a shorter message."
-                            })
-                        except Exception as e:
-                            st.session_state.chat_history.append({
-                                "role": "assistant",
-                                "content": f"❌ Error: {str(e)[:200]}"
-                            })
-                    
-                    st.rerun()
+                st.rerun()
     
     elif page == "✅ Validate Model":
         st.header("✅ Validate Model Performance")
