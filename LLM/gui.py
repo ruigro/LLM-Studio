@@ -51,13 +51,46 @@ st.set_page_config(
 # Custom CSS for beautiful styling
 st.markdown("""
 <style>
-    /* Hide Streamlit deploy button and menu */
+    /* FORCE 30px top spacing - multiple selectors for maximum specificity */
+    section.main > div.block-container {
+        padding-top: 30px !important;
+        margin-top: 0 !important;
+    }
+    .stApp section.main > div {
+        padding-top: 30px !important;
+        margin-top: 0 !important;
+    }
+    div.block-container {
+        padding-top: 30px !important;
+        margin-top: 0 !important;
+    }
+    section[data-testid="stMain"] > div {
+        padding-top: 30px !important;
+        margin-top: 0 !important;
+    }
+    .main > div:first-child {
+        padding-top: 30px !important;
+        margin-top: 0 !important;
+    }
+    
+    /* Hide Streamlit deploy button and menu but keep sidebar toggle */
     #MainMenu {visibility: hidden;}
     footer {visibility: hidden;}
-    header {visibility: hidden;}
+    header[data-testid="stHeader"] {
+        visibility: visible !important;
+        display: block !important;
+    }
     button[title="View app source"] {display: none;}
     button[title="Deploy this app"] {display: none;}
     button[kind="header"] {display: none;}
+    /* Keep sidebar toggle button visible */
+    button[kind="header"][data-testid*="baseButton-header"] {
+        display: block !important;
+    }
+    [data-testid="collapsedControl"] {
+        display: block !important;
+        visibility: visible !important;
+    }
     
     /* Custom Navbar Styles - Improved Colors */
     .navbar {
@@ -111,7 +144,7 @@ st.markdown("""
         -webkit-text-fill-color: transparent;
         text-align: center;
         margin-bottom: 1rem;
-        margin-top: 0.5rem;
+        margin-top: 0;
         padding: 0.5rem 1rem;
     }
     .stButton>button {
@@ -234,17 +267,48 @@ if 'downloading_models' not in st.session_state:
 
 # Model presets with metadata
 MODEL_PRESETS = {
-    "Llama 3.2 3B Instruct (4-bit)": {
-        "id": "unsloth/llama-3.2-3b-instruct-unsloth-bnb-4bit",
-        "size": "~2.5 GB",
-        "description": "Fast 3B parameter model, great for quick experiments",
-        "tags": ["llama", "3b", "instruct", "4-bit"]
+    # === 4 NEWEST MODELS (2024-2025) ===
+    "Llama 3.3 70B Instruct (4-bit)": {
+        "id": "unsloth/Llama-3.3-70B-Instruct-bnb-4bit",
+        "size": "~35 GB",
+        "description": "Latest Llama 3.3 70B model with enhanced capabilities",
+        "tags": ["llama", "70b", "instruct", "4-bit"],
+        "category": "newest"
     },
+    "Qwen2.5 72B Instruct (4-bit)": {
+        "id": "unsloth/Qwen2.5-72B-Instruct-bnb-4bit",
+        "size": "~36 GB",
+        "description": "State-of-the-art Qwen 2.5 72B model",
+        "tags": ["qwen", "72b", "instruct", "4-bit", "multilingual"],
+        "category": "newest"
+    },
+    "Gemma 2 27B Instruct (4-bit)": {
+        "id": "unsloth/gemma-2-27b-it-bnb-4bit",
+        "size": "~14 GB",
+        "description": "Google's Gemma 2 27B instruction-tuned model",
+        "tags": ["gemma", "27b", "instruct", "4-bit"],
+        "category": "newest"
+    },
+    "Phi-4 14B (4-bit)": {
+        "id": "unsloth/Phi-4-bnb-4bit",
+        "size": "~7 GB",
+        "description": "Microsoft's latest Phi-4 14B model",
+        "tags": ["phi", "14b", "4-bit"],
+        "category": "newest"
+    },
+    
+    # === 20 MOST POPULAR MODELS ===
     "Llama 3.2 1B Instruct (4-bit)": {
         "id": "unsloth/llama-3.2-1b-instruct-unsloth-bnb-4bit",
         "size": "~800 MB",
         "description": "Ultra-lightweight 1B model, fastest training",
         "tags": ["llama", "1b", "instruct", "4-bit"]
+    },
+    "Llama 3.2 3B Instruct (4-bit)": {
+        "id": "unsloth/llama-3.2-3b-instruct-unsloth-bnb-4bit",
+        "size": "~2.5 GB",
+        "description": "Fast 3B parameter model, great for quick experiments",
+        "tags": ["llama", "3b", "instruct", "4-bit"]
     },
     "Llama 3.1 8B Instruct (4-bit)": {
         "id": "unsloth/llama-3.1-8b-instruct-unsloth-bnb-4bit",
@@ -252,23 +316,113 @@ MODEL_PRESETS = {
         "description": "Powerful 8B model with better performance",
         "tags": ["llama", "8b", "instruct", "4-bit"]
     },
-    "Mistral 7B Instruct (4-bit)": {
-        "id": "unsloth/mistral-7b-instruct-bnb-4bit",
+    "Llama 3.1 70B Instruct (4-bit)": {
+        "id": "unsloth/Meta-Llama-3.1-70B-Instruct-bnb-4bit",
+        "size": "~35 GB",
+        "description": "Powerful Llama 3.1 70B model",
+        "tags": ["llama", "70b", "instruct", "4-bit"]
+    },
+    "Mistral 7B Instruct v0.3 (4-bit)": {
+        "id": "unsloth/mistral-7b-instruct-v0.3-bnb-4bit",
         "size": "~4.5 GB",
-        "description": "High-quality Mistral model, excellent for instruction following",
+        "description": "Latest Mistral 7B v0.3 instruction model",
         "tags": ["mistral", "7b", "instruct", "4-bit"]
+    },
+    "Mistral Nemo 12B Instruct (4-bit)": {
+        "id": "unsloth/Mistral-Nemo-Instruct-2407-bnb-4bit",
+        "size": "~6.5 GB",
+        "description": "Mistral Nemo 12B with enhanced capabilities",
+        "tags": ["mistral", "12b", "instruct", "4-bit"]
     },
     "Qwen 2.5 3B Instruct (4-bit)": {
         "id": "unsloth/Qwen2.5-3B-Instruct-bnb-4bit",
         "size": "~2.5 GB",
-        "description": "Qwen 2.5 model with strong multilingual capabilities",
+        "description": "Compact Qwen 2.5 model with multilingual support",
         "tags": ["qwen", "3b", "instruct", "4-bit", "multilingual"]
     },
     "Qwen 2.5 7B Instruct (4-bit)": {
         "id": "unsloth/Qwen2.5-7B-Instruct-bnb-4bit",
         "size": "~4.5 GB",
-        "description": "Larger Qwen model with enhanced performance",
+        "description": "Popular Qwen 2.5 7B model",
         "tags": ["qwen", "7b", "instruct", "4-bit", "multilingual"]
+    },
+    "Qwen 2.5 14B Instruct (4-bit)": {
+        "id": "unsloth/Qwen2.5-14B-Instruct-bnb-4bit",
+        "size": "~8 GB",
+        "description": "Qwen 2.5 14B with strong reasoning",
+        "tags": ["qwen", "14b", "instruct", "4-bit", "multilingual"]
+    },
+    "Qwen 2.5 32B Instruct (4-bit)": {
+        "id": "unsloth/Qwen2.5-32B-Instruct-bnb-4bit",
+        "size": "~18 GB",
+        "description": "Large Qwen 2.5 32B model",
+        "tags": ["qwen", "32b", "instruct", "4-bit", "multilingual"]
+    },
+    "Gemma 2 2B Instruct (4-bit)": {
+        "id": "unsloth/gemma-2-2b-it-bnb-4bit",
+        "size": "~1.5 GB",
+        "description": "Google's smallest Gemma 2 model",
+        "tags": ["gemma", "2b", "instruct", "4-bit"]
+    },
+    "Gemma 2 9B Instruct (4-bit)": {
+        "id": "unsloth/gemma-2-9b-it-bnb-4bit",
+        "size": "~5 GB",
+        "description": "Google's Gemma 2 9B instruction model",
+        "tags": ["gemma", "9b", "instruct", "4-bit"]
+    },
+    "Phi-3.5 Mini Instruct (4-bit)": {
+        "id": "unsloth/Phi-3.5-mini-instruct-bnb-4bit",
+        "size": "~2.5 GB",
+        "description": "Microsoft's Phi-3.5 Mini model",
+        "tags": ["phi", "3.8b", "instruct", "4-bit"]
+    },
+    "Phi-3 Medium Instruct (4-bit)": {
+        "id": "unsloth/Phi-3-medium-4k-instruct-bnb-4bit",
+        "size": "~7.5 GB",
+        "description": "Microsoft's Phi-3 Medium 14B model",
+        "tags": ["phi", "14b", "instruct", "4-bit"]
+    },
+    "Yi 1.5 9B Chat (4-bit)": {
+        "id": "unsloth/Yi-1.5-9B-Chat-bnb-4bit",
+        "size": "~5 GB",
+        "description": "Yi 1.5 9B chat model with strong performance",
+        "tags": ["yi", "9b", "chat", "4-bit"]
+    },
+    "DeepSeek V2.5 (4-bit)": {
+        "id": "unsloth/DeepSeek-V2.5-bnb-4bit",
+        "size": "~10 GB",
+        "description": "DeepSeek V2.5 with enhanced reasoning",
+        "tags": ["deepseek", "v2.5", "4-bit"]
+    },
+    "Mixtral 8x7B Instruct (4-bit)": {
+        "id": "unsloth/Mixtral-8x7B-Instruct-v0.1-bnb-4bit",
+        "size": "~24 GB",
+        "description": "Mistral's Mixtral MoE model",
+        "tags": ["mixtral", "8x7b", "instruct", "4-bit", "moe"]
+    },
+    "Zephyr 7B Beta (4-bit)": {
+        "id": "unsloth/zephyr-7b-beta-bnb-4bit",
+        "size": "~4.5 GB",
+        "description": "Popular Zephyr 7B Beta model",
+        "tags": ["zephyr", "7b", "4-bit"]
+    },
+    "OpenHermes 2.5 Mistral 7B (4-bit)": {
+        "id": "unsloth/OpenHermes-2.5-Mistral-7B-bnb-4bit",
+        "size": "~4.5 GB",
+        "description": "OpenHermes 2.5 based on Mistral 7B",
+        "tags": ["openhermes", "mistral", "7b", "4-bit"]
+    },
+    "Nous Hermes 2 Mixtral 8x7B (4-bit)": {
+        "id": "unsloth/Nous-Hermes-2-Mixtral-8x7B-DPO-bnb-4bit",
+        "size": "~24 GB",
+        "description": "Nous Hermes 2 on Mixtral architecture",
+        "tags": ["nous", "hermes", "mixtral", "8x7b", "4-bit"]
+    },
+    "Starling 7B Alpha (4-bit)": {
+        "id": "unsloth/Starling-LM-7B-alpha-bnb-4bit",
+        "size": "~4.5 GB",
+        "description": "Starling 7B Alpha RLHF model",
+        "tags": ["starling", "7b", "4-bit", "rlhf"]
     },
     "Custom Model": {
         "id": None,
@@ -327,6 +481,138 @@ def load_trained_models():
                     models.append((item_path, f"Checkpoint: {item}", "Unknown"))
     
     return sorted(models, key=lambda x: x[0], reverse=True)
+
+def analyze_model(model_name):
+    """Analyze model characteristics and return profile"""
+    if not model_name:
+        return None
+    
+    model_lower = model_name.lower()
+    
+    # Detect model type
+    if "instruct" in model_lower or "chat" in model_lower:
+        model_type = "Instruct"
+    else:
+        model_type = "Base"
+    
+    # Detect size (3B, 7B, 8B, 13B, etc.)
+    import re
+    size_match = re.search(r'(\d+\.?\d*)[bB]', model_name)
+    if size_match:
+        size_value = float(size_match.group(1))
+        model_size = f"{size_value}B"
+    else:
+        size_value = 8.0  # Default assumption
+        model_size = "Unknown"
+    
+    # Detect quantization
+    if "4bit" in model_lower or "4-bit" in model_lower or "bnb-4bit" in model_lower:
+        quantization = "4-bit"
+    elif "8bit" in model_lower or "8-bit" in model_lower:
+        quantization = "8-bit"
+    else:
+        quantization = "Full Precision"
+    
+    return {
+        "type": model_type,
+        "size": model_size,
+        "size_value": size_value,
+        "quantization": quantization,
+        "name": model_name
+    }
+
+def get_recommended_params(model_profile, dataset_size=10):
+    """Get recommended training parameters based on model profile"""
+    if not model_profile:
+        return None
+    
+    # Base recommendations
+    params = {}
+    
+    # Learning Rate calculation
+    base_lr = 2e-4  # Default for base models
+    
+    if model_profile["type"] == "Instruct":
+        base_lr = 5e-5  # Much lower for instruct models
+    
+    # Adjust for model size
+    if model_profile["size_value"] >= 7:
+        base_lr = base_lr * 0.5  # Half for larger models
+    
+    # Adjust for quantization
+    if "4-bit" in model_profile["quantization"]:
+        base_lr = base_lr * 0.8  # 20% lower for quantized
+    
+    params["learning_rate"] = base_lr
+    
+    # LoRA parameters
+    if model_profile["size_value"] >= 7:
+        params["lora_r"] = 8
+        params["lora_alpha"] = 16
+    else:
+        params["lora_r"] = 8
+        params["lora_alpha"] = 16
+    
+    params["lora_dropout"] = 0.05
+    
+    # Batch size
+    if model_profile["size_value"] >= 7:
+        params["batch_size"] = 1
+    else:
+        params["batch_size"] = 2
+    
+    # Epochs based on dataset size
+    if dataset_size < 20:
+        params["epochs"] = 1
+    elif dataset_size < 100:
+        params["epochs"] = 2
+    else:
+        params["epochs"] = 3
+    
+    # Other params
+    params["grad_accum"] = 8
+    params["max_seq_length"] = 2048
+    
+    return params
+
+def check_parameter_safety(param_name, value, recommended_value, model_profile):
+    """Check if parameter value is safe and return status"""
+    if recommended_value is None:
+        return "unknown", "No recommendation available"
+    
+    if param_name == "learning_rate":
+        ratio = value / recommended_value
+        if 0.8 <= ratio <= 1.2:
+            return "optimal", "✅ Safe learning rate"
+        elif ratio > 2.0:
+            if model_profile and model_profile["type"] == "Instruct":
+                return "danger", f"⚠️ {ratio:.1f}x higher than recommended! May destroy instruction-following"
+            else:
+                return "warning", f"⚠️ {ratio:.1f}x higher than recommended. May cause instability"
+        elif ratio > 1.2:
+            return "warning", f"⚠️ {ratio:.1f}x higher than recommended"
+        else:
+            return "acceptable", "Lower LR = slower but safer training"
+    
+    elif param_name == "epochs":
+        if value == recommended_value:
+            return "optimal", "✅ Optimal epoch count"
+        elif value > recommended_value * 2:
+            return "danger", f"⚠️ {value} epochs may cause severe overfitting!"
+        elif value > recommended_value:
+            return "warning", f"⚠️ Risk of overfitting with {value} epochs"
+        else:
+            return "acceptable", "Fewer epochs = less overfitting risk"
+    
+    elif param_name == "batch_size":
+        if value == recommended_value:
+            return "optimal", "✅ Optimal batch size"
+        elif value > recommended_value and model_profile and model_profile["size_value"] >= 7:
+            return "warning", f"⚠️ Batch size {value} may cause OOM on large models"
+        else:
+            return "acceptable", "Batch size acceptable"
+    
+    return "acceptable", "Within acceptable range"
 
 def load_downloaded_models():
     """Load list of downloaded models"""
@@ -402,6 +688,38 @@ def search_huggingface_models(query, limit=20):
     except Exception as e:
         st.error(f"Search error: {str(e)}")
         return []
+
+def fetch_model_description(model_id):
+    """Fetch model card description from Hugging Face"""
+    if not HF_HUB_AVAILABLE:
+        return "Description unavailable"
+    
+    try:
+        from huggingface_hub import model_info
+        info = model_info(model_id)
+        # Get card data if available
+        if hasattr(info, 'card_data') and info.card_data:
+            # Try to get description from card metadata
+            if hasattr(info.card_data, 'get'):
+                desc = info.card_data.get('model-index', [{}])[0].get('description', '')
+                if desc:
+                    return desc
+        
+        # Fallback: Try to get from README (first 1000 chars)
+        try:
+            from huggingface_hub import hf_hub_download
+            readme_path = hf_hub_download(model_id, "README.md", repo_type="model")
+            with open(readme_path, 'r', encoding='utf-8') as f:
+                content = f.read(1000)  # First 1000 chars
+                # Strip markdown headers and extract text
+                lines = [l for l in content.split('\n') if l.strip() and not l.startswith('#')]
+                return ' '.join(lines[:3])  # First 3 paragraphs
+        except:
+            pass
+            
+        return "No description available"
+    except Exception as e:
+        return f"Error fetching description: {str(e)[:50]}"
 
 def stop_training():
     """Stop the training process"""
@@ -847,6 +1165,30 @@ def run_training(config):
                 pass
 
 def main():
+    # JavaScript to force top padding as fallback
+    st.components.v1.html("""
+    <script>
+        // Force 30px top padding on page load
+        window.addEventListener('load', function() {
+            setTimeout(function() {
+                const selectors = [
+                    'section.main > div.block-container',
+                    '.stApp section.main > div',
+                    'div.block-container',
+                    'section[data-testid="stMain"] > div'
+                ];
+                selectors.forEach(function(selector) {
+                    const elements = document.querySelectorAll(selector);
+                    elements.forEach(function(el) {
+                        el.style.paddingTop = '30px';
+                        el.style.marginTop = '0px';
+                    });
+                });
+            }, 100);
+        });
+    </script>
+    """, height=0)
+    
     st.markdown('<h1 class="main-header">🤖 LLM Fine-tuning Studio</h1>', unsafe_allow_html=True)
     
     # Render custom navbar
@@ -1015,81 +1357,171 @@ def main():
             tab1, tab2 = st.tabs(["📋 Predefined Models", "🔍 Search Hugging Face"])
             
             with tab1:
-                st.subheader("Popular Models for Fine-tuning")
-                st.markdown("Select from our curated list of models optimized for fine-tuning:")
+                st.markdown("### 📚 Curated Models for Fine-tuning")
+                
+                # Add CSS for bigger text and scrollable container
+                st.markdown("""
+                <style>
+                .scrollable-models-container {
+                    max-height: 600px;
+                    overflow-y: auto;
+                    padding-right: 10px;
+                }
+                .scrollable-models-container::-webkit-scrollbar {
+                    width: 8px;
+                }
+                .scrollable-models-container::-webkit-scrollbar-track {
+                    background: rgba(255,255,255,0.1);
+                    border-radius: 10px;
+                }
+                .scrollable-models-container::-webkit-scrollbar-thumb {
+                    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                    border-radius: 10px;
+                }
+                .scrollable-models-container::-webkit-scrollbar-thumb:hover {
+                    background: linear-gradient(135deg, #764ba2 0%, #667eea 100%);
+                }
+                .model-card {
+                    background: rgba(102, 126, 234, 0.1);
+                    padding: 1rem;
+                    border-radius: 10px;
+                    border-left: 4px solid #667eea;
+                    margin-bottom: 1rem;
+                }
+                .model-name {
+                    font-size: 1.2rem;
+                    font-weight: bold;
+                    color: #ffffff;
+                    margin-bottom: 0.5rem;
+                }
+                .model-info {
+                    font-size: 1rem;
+                    color: #cccccc;
+                    margin: 0.3rem 0;
+                }
+                .new-badge {
+                    background: linear-gradient(90deg, #ff7f0e 0%, #ff4500 100%);
+                    padding: 2px 8px;
+                    border-radius: 4px;
+                    font-size: 0.7rem;
+                    font-weight: bold;
+                    margin-left: 8px;
+                }
+                </style>
+                """, unsafe_allow_html=True)
                 
                 downloaded_models = load_downloaded_models()
                 
-                for model_name, model_info in MODEL_PRESETS.items():
-                    if model_info["id"] is None:
-                        continue
+                # Separate newest and popular models
+                newest_models = []
+                popular_models = []
+                
+                for name, info in MODEL_PRESETS.items():
+                    if info["id"] is not None:
+                        if info.get("category") == "newest":
+                            newest_models.append((name, info))
+                        else:
+                            popular_models.append((name, info))
+                
+                # Combine: newest first, then popular
+                models_list = newest_models + popular_models
+                
+                # Wrap in scrollable div
+                st.markdown('<div class="scrollable-models-container">', unsafe_allow_html=True)
+                
+                # Create 2-column grid
+                for i in range(0, len(models_list), 2):
+                    cols = st.columns(2)
                     
-                    model_id = model_info["id"]
-                    is_downloaded = is_model_downloaded(model_id)
-                    
-                    with st.container():
-                        col1, col2, col3 = st.columns([3, 1, 1])
-                        
-                        with col1:
-                            with st.container():
-                                st.markdown(f"**{model_name}**")
-                                st.caption(f"🆔 `{model_id}` | 📦 {model_info['size']}")
-                                st.caption(f"📝 {model_info['description']}")
-                                st.caption(f"🏷️ {', '.join(model_info['tags'])}")
-                                st.markdown("---")
-                        
-                        with col2:
-                            if is_downloaded:
-                                st.success("✅ Downloaded")
-                            else:
-                                st.info("Not Downloaded")
-                        
-                        with col3:
-                            download_key = f"download_{model_id}"
-                            if model_id in st.session_state.downloading_models:
-                                st.warning("Downloading...")
-                            elif is_downloaded:
-                                if st.button("🗑️ Remove", key=f"remove_{model_id}"):
-                                    model_name_clean = model_id.replace("/", "_")
-                                    model_path = f"./models/{model_name_clean}"
-                                    import shutil
-                                    try:
-                                        shutil.rmtree(model_path)
-                                        st.success(f"Removed {model_name}")
-                                        st.rerun()
-                                    except Exception as e:
-                                        st.error(f"Error: {e}")
-                            else:
-                                if st.button("📥 Download", key=download_key):
-                                    st.session_state.downloading_models[model_id] = True
-                                    st.rerun()
-                        
-                        if model_id in st.session_state.downloading_models:
-                            with st.status(f"Downloading {model_name}...", expanded=True) as status:
-                                try:
-                                    progress_bar = st.progress(0)
-                                    status.update(label=f"Downloading {model_id}...")
-                                    
-                                    def update_progress(current, total):
-                                        if total > 0:
-                                            progress = current / total
-                                            progress_bar.progress(progress)
-                                    
-                                    download_path = download_model(model_id)
-                                    progress_bar.progress(1.0)
-                                    status.update(label=f"✅ Downloaded {model_name}!", state="complete")
-                                    st.success(f"Model downloaded to: {download_path}")
-                                    del st.session_state.downloading_models[model_id]
-                                    time.sleep(2)
-                                    st.rerun()
-                                except Exception as e:
-                                    status.update(label=f"❌ Download failed: {str(e)}", state="error")
-                                    del st.session_state.downloading_models[model_id]
-                                    st.error(f"Error downloading model: {str(e)}")
+                    for col_idx, col in enumerate(cols):
+                        if i + col_idx < len(models_list):
+                            model_name, model_info = models_list[i + col_idx]
+                            model_id = model_info["id"]
+                            is_downloaded = is_model_downloaded(model_id)
+                            
+                            with col:
+                                # Category badge for newest models
+                                category_badge = ""
+                                if model_info.get("category") == "newest":
+                                    category_badge = '<span class="new-badge">NEW</span>'
+                                
+                                st.markdown(f"""
+                                <div class="model-card">
+                                    <div class="model-name">{model_name}{category_badge}</div>
+                                    <div class="model-info">📦 {model_info['size']}</div>
+                                    <div class="model-info">🆔 {model_id}</div>
+                                </div>
+                                """, unsafe_allow_html=True)
+                                
+                                # Status and button row
+                                btn_col1, btn_col2 = st.columns([1, 1])
+                                with btn_col1:
+                                    if is_downloaded:
+                                        st.success("✅ Ready")
+                                    else:
+                                        st.info("📥 Not Downloaded")
+                                
+                                with btn_col2:
+                                    download_key = f"download_{model_id}"
+                                    if model_id in st.session_state.downloading_models:
+                                        st.warning("⏳ Downloading...")
+                                    elif is_downloaded:
+                                        if st.button("🗑️", key=f"remove_{model_id}", use_container_width=True):
+                                            model_name_clean = model_id.replace("/", "_")
+                                            model_path = f"./models/{model_name_clean}"
+                                            import shutil
+                                            try:
+                                                shutil.rmtree(model_path)
+                                                st.success(f"Removed")
+                                                st.rerun()
+                                            except Exception as e:
+                                                st.error(f"Error: {e}")
+                                    else:
+                                        if st.button("📥 Download", key=download_key, type="primary", use_container_width=True):
+                                            st.session_state.downloading_models[model_id] = True
+                                            st.rerun()
+                                
+                                if model_id in st.session_state.downloading_models:
+                                    with st.status(f"Downloading...", expanded=True) as status:
+                                        try:
+                                            progress_bar = st.progress(0)
+                                            download_path = download_model(model_id)
+                                            progress_bar.progress(1.0)
+                                            status.update(label=f"✅ Complete!", state="complete")
+                                            del st.session_state.downloading_models[model_id]
+                                            time.sleep(1)
+                                            st.rerun()
+                                        except Exception as e:
+                                            status.update(label=f"❌ Failed", state="error")
+                                            del st.session_state.downloading_models[model_id]
+                                            st.error(f"Error: {str(e)}")
+                
+                st.markdown('</div>', unsafe_allow_html=True)
             
             with tab2:
                 st.subheader("Search Hugging Face Hub")
                 st.markdown("Search for models on Hugging Face Hub:")
+                
+                # Add CSS for scrollable description box
+                st.markdown("""
+                <style>
+                /* Scrollable description box styling */
+                div[style*="overflow-y: auto"]::-webkit-scrollbar {
+                    width: 6px;
+                }
+                div[style*="overflow-y: auto"]::-webkit-scrollbar-track {
+                    background: rgba(255,255,255,0.1);
+                    border-radius: 10px;
+                }
+                div[style*="overflow-y: auto"]::-webkit-scrollbar-thumb {
+                    background: rgba(102, 126, 234, 0.5);
+                    border-radius: 10px;
+                }
+                div[style*="overflow-y: auto"]::-webkit-scrollbar-thumb:hover {
+                    background: rgba(102, 126, 234, 0.8);
+                }
+                </style>
+                """, unsafe_allow_html=True)
                 
                 search_query = st.text_input("Search models", placeholder="e.g., llama instruct, mistral, qwen")
                 
@@ -1104,47 +1536,67 @@ def main():
                             model_id = model["id"]
                             is_downloaded = is_model_downloaded(model_id)
                             
+                            # Fetch description
+                            description = fetch_model_description(model_id)
+                            
                             with st.container():
-                                col1, col2, col3 = st.columns([3, 1, 1])
+                                # New layout: 60% info, 40% description
+                                info_col, desc_col = st.columns([3, 2])
                                 
-                                with col1:
-                                    tags_list = model.get("tags", [])[:5] if model.get("tags") else []
-                                    tags_display = ", ".join(tags_list) if tags_list else "No tags"
+                                with info_col:
+                                    st.markdown(f"**{model_id}**")
                                     downloads_count = model.get("downloads", 0) or 0
+                                    st.caption(f"📥 Downloads: {downloads_count:,}")
+                                    tags_list = model.get("tags", [])[:5] if model.get("tags") else []
+                                    if tags_list:
+                                        st.caption(f"🏷️ {', '.join(tags_list)}")
                                     
-                                    # Use Streamlit components instead of raw HTML for better rendering
-                                    with st.container():
-                                        st.markdown(f"**{model_id}**")
-                                        st.caption(f"📥 Downloads: {downloads_count:,}")
-                                        if tags_list:
-                                            st.caption(f"🏷️ Tags: {tags_display}")
-                                        st.markdown("---")
-                                
-                                with col2:
-                                    if is_downloaded:
-                                        st.success("✅ Downloaded")
-                                    else:
-                                        st.info("Not Downloaded")
-                                
-                                with col3:
-                                    download_key = f"download_hf_{model_id}"
-                                    if model_id in st.session_state.downloading_models:
-                                        st.warning("Downloading...")
-                                    elif is_downloaded:
-                                        if st.button("🗑️ Remove", key=f"remove_hf_{model_id}"):
-                                            model_name_clean = model_id.replace("/", "_")
-                                            model_path = f"./models/{model_name_clean}"
-                                            import shutil
-                                            try:
-                                                shutil.rmtree(model_path)
-                                                st.success(f"Removed {model_id}")
+                                    # Status and button in sub-columns
+                                    status_col, btn_col = st.columns([1, 1])
+                                    with status_col:
+                                        if is_downloaded:
+                                            st.success("✅ Ready")
+                                        else:
+                                            st.info("📥 Available")
+                                    
+                                    with btn_col:
+                                        download_key = f"download_hf_{model_id}"
+                                        if model_id in st.session_state.downloading_models:
+                                            st.warning("⏳...")
+                                        elif is_downloaded:
+                                            if st.button("🗑️", key=f"remove_hf_{model_id}", use_container_width=True):
+                                                model_name_clean = model_id.replace("/", "_")
+                                                model_path = f"./models/{model_name_clean}"
+                                                import shutil
+                                                try:
+                                                    shutil.rmtree(model_path)
+                                                    st.success(f"Removed")
+                                                    st.rerun()
+                                                except Exception as e:
+                                                    st.error(f"Error: {e}")
+                                        else:
+                                            if st.button("📥", key=download_key, type="primary", use_container_width=True):
+                                                st.session_state.downloading_models[model_id] = True
                                                 st.rerun()
-                                            except Exception as e:
-                                                st.error(f"Error: {e}")
-                                    else:
-                                        if st.button("📥 Download", key=download_key):
-                                            st.session_state.downloading_models[model_id] = True
-                                            st.rerun()
+                                
+                                with desc_col:
+                                    # Scrollable description box
+                                    st.markdown(f'''
+                                    <div style="
+                                        height: 120px;
+                                        overflow-y: auto;
+                                        padding: 10px;
+                                        background: rgba(102, 126, 234, 0.1);
+                                        border-radius: 8px;
+                                        border-left: 3px solid #667eea;
+                                        font-size: 0.9rem;
+                                        color: #cccccc;
+                                    ">
+                                        {description}
+                                    </div>
+                                    ''', unsafe_allow_html=True)
+                                
+                                st.markdown("---")
                                 
                                 if model_id in st.session_state.downloading_models:
                                     with st.status(f"Downloading {model_id}...", expanded=True) as status:
@@ -1232,32 +1684,114 @@ def main():
                 
                 # Show preview
                 with st.expander("📖 Preview Dataset (first 5 examples)", expanded=True):
-                    with open(data_path, "r") as f:
-                        lines = f.readlines()[:5]
-                        preview_data = []
-                        for line in lines:
-                            try:
-                                preview_data.append(json.loads(line))
-                            except:
-                                pass
-                        if preview_data:
-                            st.json(preview_data)
-                        else:
-                            st.warning("Could not parse dataset. Please check format.")
+                    try:
+                        with open(data_path, "r", encoding='utf-8') as f:
+                            lines = f.readlines()[:5]
+                            preview_data = []
+                            for line in lines:
+                                try:
+                                    preview_data.append(json.loads(line))
+                                except:
+                                    pass
+                            if preview_data:
+                                st.json(preview_data)
+                            else:
+                                st.warning("Could not parse dataset. Please check format.")
+                    except Exception as e:
+                        st.error(f"Error reading dataset: {str(e)}")
                 
                 # Dataset stats
-                with open(data_path, "r") as f:
-                    total_lines = sum(1 for _ in f)
-                st.metric("Total Examples", total_lines)
+                try:
+                    with open(data_path, "r", encoding='utf-8') as f:
+                        total_lines = sum(1 for _ in f)
+                    st.metric("Total Examples", total_lines)
+                except Exception as e:
+                    st.error(f"Error counting examples: {str(e)}")
             else:
                 data_path = st.text_input("Or enter path to existing dataset", value="train_data.jsonl")
                 if os.path.exists(data_path):
                     st.success(f"✅ Found dataset: {data_path}")
-                    with open(data_path, "r") as f:
-                        total_lines = sum(1 for _ in f)
-                    st.metric("Total Examples", total_lines)
+                    try:
+                        with open(data_path, "r", encoding='utf-8') as f:
+                            total_lines = sum(1 for _ in f)
+                        st.metric("Total Examples", total_lines)
+                    except Exception as e:
+                        st.error(f"Error reading dataset: {str(e)}")
         
         with col2:
+            # Analyze selected model and show profile card
+            model_profile = None
+            recommended_params = None
+            dataset_size = 10  # Default
+            
+            if os.path.exists("train_data.jsonl"):
+                try:
+                    with open("train_data.jsonl", "r", encoding='utf-8') as f:
+                        dataset_size = sum(1 for _ in f)
+                except:
+                    dataset_size = 10  # Default if error
+            
+            if model_name:
+                model_profile = analyze_model(model_name)
+                recommended_params = get_recommended_params(model_profile, dataset_size)
+            
+            # Model Profile Card
+            if model_profile:
+                st.markdown("""
+                <style>
+                .profile-card {
+                    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                    padding: 1rem;
+                    border-radius: 12px;
+                    margin-bottom: 1rem;
+                    color: white;
+                }
+                .profile-title {
+                    font-size: 1.1rem;
+                    font-weight: bold;
+                    margin-bottom: 0.5rem;
+                }
+                .profile-info {
+                    display: flex;
+                    gap: 1rem;
+                    margin: 0.5rem 0;
+                }
+                .profile-badge {
+                    background: rgba(255,255,255,0.2);
+                    padding: 0.3rem 0.6rem;
+                    border-radius: 6px;
+                    font-size: 0.9rem;
+                }
+                .safety-optimal {
+                    color: #10b981;
+                    font-weight: bold;
+                }
+                .safety-warning {
+                    color: #fbbf24;
+                    font-weight: bold;
+                }
+                .safety-danger {
+                    color: #ef4444;
+                    font-weight: bold;
+                }
+                </style>
+                """, unsafe_allow_html=True)
+                
+                type_color = "🟢" if model_profile["type"] == "Instruct" else "🔵"
+                st.markdown(f"""
+                <div class="profile-card">
+                    <div class="profile-title">📊 MODEL PROFILE</div>
+                    <div class="profile-info">
+                        <span class="profile-badge">{type_color} {model_profile["type"]}</span>
+                        <span class="profile-badge">📏 {model_profile["size"]}</span>
+                        <span class="profile-badge">⚡ {model_profile["quantization"]}</span>
+                    </div>
+                    <div style="font-size: 0.85rem; margin-top: 0.5rem;">
+                        {'✅ Optimized for fine-tuning' if model_profile["type"] == "Instruct" else '⚠️ Base model - needs careful tuning'}
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
+            
             st.markdown("""
             <style>
             /* Compact futuristic slider styling */
@@ -1279,6 +1813,18 @@ def main():
             
             st.subheader("⚙️ Training Parameters")
             
+            # Auto-Apply Recommended Settings Button
+            if recommended_params:
+                if st.button("✨ Use Recommended Settings", type="primary", use_container_width=True):
+                    st.session_state.smart_epochs = recommended_params["epochs"]
+                    st.session_state.smart_batch_size = recommended_params["batch_size"]
+                    st.session_state.smart_lora_r = recommended_params["lora_r"]
+                    st.session_state.smart_lora_alpha = recommended_params["lora_alpha"]
+                    st.session_state.smart_lora_dropout = recommended_params["lora_dropout"]
+                    st.session_state.smart_grad_accum = recommended_params["grad_accum"]
+                    st.session_state.smart_max_seq = recommended_params["max_seq_length"]
+                    st.rerun()
+            
             # Model Name Input
             model_display_name = st.text_input(
                 "📝 Model Name",
@@ -1289,22 +1835,49 @@ def main():
             
             col_a, col_b = st.columns(2)
             with col_a:
-                epochs = st.slider("Epochs", 1, 10, 3, help="Number of training epochs")
-                lora_r = st.slider("LoRA R", 4, 64, 8, step=4, help="LoRA rank")
-                max_seq_length = st.number_input("Max Seq Length", 512, 4096, 2048, step=256)
+                # Epochs with safety indicator
+                epochs = st.slider(
+                    "Epochs", 1, 10, 
+                    st.session_state.get("smart_epochs", 1),
+                    help="Number of training epochs"
+                )
+                if recommended_params:
+                    status, msg = check_parameter_safety("epochs", epochs, recommended_params["epochs"], model_profile)
+                    if status == "optimal":
+                        st.markdown(f'<span class="safety-optimal">{msg}</span>', unsafe_allow_html=True)
+                    elif status == "warning":
+                        st.markdown(f'<span class="safety-warning">{msg}</span>', unsafe_allow_html=True)
+                    elif status == "danger":
+                        st.markdown(f'<span class="safety-danger">{msg}</span>', unsafe_allow_html=True)
+                
+                lora_r = st.slider("LoRA R", 4, 64, st.session_state.get("smart_lora_r", 8), step=4, help="LoRA rank")
+                max_seq_length = st.number_input("Max Seq Length", 512, 4096, st.session_state.get("smart_max_seq", 2048), step=256)
             
             with col_b:
-                batch_size = st.slider("Batch Size", 1, 8, 1, help="⚠️ Use 1 for 8B models")
-                lora_alpha = st.slider("LoRA Alpha", 8, 128, 16, step=8, help="LoRA alpha scaling")
-                grad_accum = st.slider("Grad Accum", 1, 32, 8, help="Gradient accumulation steps")
-            
-            if batch_size > 1:
-                st.warning(f"⚠️ Batch size {batch_size} may cause OOM with large models")
+                # Batch Size with safety indicator
+                batch_size = st.slider(
+                    "Batch Size", 1, 8, 
+                    st.session_state.get("smart_batch_size", 1),
+                    help="⚠️ Use 1 for 8B models"
+                )
+                if recommended_params:
+                    status, msg = check_parameter_safety("batch_size", batch_size, recommended_params["batch_size"], model_profile)
+                    if status == "warning":
+                        st.markdown(f'<span class="safety-warning">{msg}</span>', unsafe_allow_html=True)
+                    elif status == "optimal":
+                        st.markdown(f'<span class="safety-optimal">{msg}</span>', unsafe_allow_html=True)
+                
+                lora_alpha = st.slider("LoRA Alpha", 8, 128, st.session_state.get("smart_lora_alpha", 16), step=8, help="LoRA alpha scaling")
+                grad_accum = st.slider("Grad Accum", 1, 32, st.session_state.get("smart_grad_accum", 8), help="Gradient accumulation steps")
             
             # Advanced in expander
             with st.expander("🔧 Advanced Settings"):
-                lora_dropout = st.slider("LoRA Dropout", 0.0, 0.5, 0.05, step=0.01)
+                lora_dropout = st.slider("LoRA Dropout", 0.0, 0.5, st.session_state.get("smart_lora_dropout", 0.05), step=0.01)
                 max_examples = st.number_input("Max Examples (0 = all)", 0, 10000, 0)
+                
+                # Show learning rate info
+                if recommended_params:
+                    st.info(f"💡 Recommended Learning Rate: {recommended_params['learning_rate']:.1e}")
             
             # Device info
             st.divider()
