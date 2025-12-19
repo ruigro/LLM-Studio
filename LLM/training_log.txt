@@ -1,21 +1,21 @@
-Training started at 2025-12-19 10:23:55
+Training started at 2025-12-19 14:23:59
 ============================================================
-Command: C:\1_GitHome\Local-LLM-Server\LLM\.venv\Scripts\python.exe -u train_basic.py --model-name C:\1_GitHome\Local-LLM-Server\LLM\models\unsloth_llama-3.1-8b-instruct-unsloth-bnb-4bit --data-path train_data.jsonl --output-dir ./fine_tuned_adapter --epochs 1 --batch-size 3 --lora-r 8 --lora-alpha 16 --lora-dropout 0.05 --grad-accum 8 --max-seq-length 2048
+Command: C:\1_GitHome\Local-LLM-Server\LLM\.venv\Scripts\python.exe -u train_basic.py --model-name C:\1_GitHome\Local-LLM-Server\LLM\models\unsloth_llama-3.1-8b-instruct-unsloth-bnb-4bit --data-path train_data.jsonl --output-dir ./models_trained/My_Model_1219_20251219_142359 --epochs 3 --batch-size 1 --lora-r 8 --lora-alpha 16 --lora-dropout 0.05 --grad-accum 8 --max-seq-length 2048
 Working directory: C:\1_GitHome\Local-LLM-Server\LLM
 Python executable: C:\1_GitHome\Local-LLM-Server\LLM\.venv\Scripts\python.exe
 Finetune script: C:\1_GitHome\Local-LLM-Server\LLM\train_basic.py
 Dataset: train_data.jsonl
 Model: C:\1_GitHome\Local-LLM-Server\LLM\models\unsloth_llama-3.1-8b-instruct-unsloth-bnb-4bit
-Epochs: 1
+Epochs: 3
 Attempting to start subprocess...
-Process started with PID: 11176
+Process started with PID: 33604
 Process is running, starting output reader...
 Configuration:
   Model: C:\1_GitHome\Local-LLM-Server\LLM\models\unsloth_llama-3.1-8b-instruct-unsloth-bnb-4bit
   Dataset: train_data.jsonl
-  Output: ./fine_tuned_adapter
-  Epochs: 1
-  Batch Size: 3
+  Output: ./models_trained/My_Model_1219_20251219_142359
+  Epochs: 3
+  Batch Size: 1
   LoRA R: 8
   LoRA Alpha: 16
   LoRA Dropout: 0.05
@@ -30,71 +30,43 @@ Preparing model for training...
 Adding LoRA adapters...
 Loading dataset...
 Generating train split: 0 examples [00:00, ? examples/s]
-Generating train split: 10 examples [00:00, 2520.16 examples/s]
+Generating train split: 10 examples [00:00, 2500.03 examples/s]
 Map:   0%|          | 0/10 [00:00<?, ? examples/s]
-Map: 100%|██████████| 10/10 [00:00<00:00, 833.34 examples/s]
+Map: 100%|██████████| 10/10 [00:00<00:00, 908.53 examples/s]
 Map:   0%|          | 0/10 [00:00<?, ? examples/s]
-Map: 100%|██████████| 10/10 [00:00<00:00, 499.98 examples/s]
+Map: 100%|██████████| 10/10 [00:00<00:00, 499.99 examples/s]
 Training...
-  0%|          | 0/1 [00:00<?, ?it/s]`use_cache=True` is incompatible with gradient checkpointing. Setting `use_cache=False`.
+  0%|          | 0/6 [00:00<?, ?it/s]`use_cache=True` is incompatible with gradient checkpointing. Setting `use_cache=False`.
 C:\1_GitHome\Local-LLM-Server\LLM\.venv\Lib\site-packages\torch\_dynamo\eval_frame.py:632: UserWarning: torch.utils.checkpoint: the use_reentrant parameter should be passed explicitly. In version 2.5 we will raise an exception if use_reentrant is not passed. use_reentrant=False is recommended, but if you need to preserve the current default behavior, you can pass use_reentrant=True. Refer to docs for more details on the differences between the two variants.
   return fn(*args, **kwargs)
 ⏳ Waiting for output from training process...
-Traceback (most recent call last):
-  File "C:\1_GitHome\Local-LLM-Server\LLM\train_basic.py", line 131, in <module>
-    trainer.train()
-  File "C:\1_GitHome\Local-LLM-Server\LLM\.venv\Lib\site-packages\transformers\trainer.py", line 2328, in train
-    return inner_training_loop(
-           ^^^^^^^^^^^^^^^^^^^^
-  File "C:\1_GitHome\Local-LLM-Server\LLM\.venv\Lib\site-packages\transformers\trainer.py", line 2672, in _inner_training_loop
-    tr_loss_step = self.training_step(model, inputs, num_items_in_batch)
-                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "C:\1_GitHome\Local-LLM-Server\LLM\.venv\Lib\site-packages\transformers\trainer.py", line 4009, in training_step
-    loss = self.compute_loss(model, inputs, num_items_in_batch=num_items_in_batch)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "C:\1_GitHome\Local-LLM-Server\LLM\.venv\Lib\site-packages\transformers\trainer.py", line 4099, in compute_loss
-    outputs = model(**inputs)
-              ^^^^^^^^^^^^^^^
-  File "C:\1_GitHome\Local-LLM-Server\LLM\.venv\Lib\site-packages\torch\nn\modules\module.py", line 1736, in _wrapped_call_impl
-    return self._call_impl(*args, **kwargs)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "C:\1_GitHome\Local-LLM-Server\LLM\.venv\Lib\site-packages\torch\nn\modules\module.py", line 1747, in _call_impl
-    return forward_call(*args, **kwargs)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "C:\1_GitHome\Local-LLM-Server\LLM\.venv\Lib\site-packages\accelerate\utils\operations.py", line 819, in forward
-    return model_forward(*args, **kwargs)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "C:\1_GitHome\Local-LLM-Server\LLM\.venv\Lib\site-packages\accelerate\utils\operations.py", line 807, in __call__
-    return convert_to_fp32(self.model_forward(*args, **kwargs))
-                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "C:\1_GitHome\Local-LLM-Server\LLM\.venv\Lib\site-packages\torch\amp\autocast_mode.py", line 44, in decorate_autocast
-    return func(*args, **kwargs)
-           ^^^^^^^^^^^^^^^^^^^^^
-  File "C:\1_GitHome\Local-LLM-Server\LLM\.venv\Lib\site-packages\peft\peft_model.py", line 1923, in forward
-    return self.base_model(
-           ^^^^^^^^^^^^^^^^
-  File "C:\1_GitHome\Local-LLM-Server\LLM\.venv\Lib\site-packages\torch\nn\modules\module.py", line 1736, in _wrapped_call_impl
-    return self._call_impl(*args, **kwargs)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "C:\1_GitHome\Local-LLM-Server\LLM\.venv\Lib\site-packages\torch\nn\modules\module.py", line 1747, in _call_impl
-    return forward_call(*args, **kwargs)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "C:\1_GitHome\Local-LLM-Server\LLM\.venv\Lib\site-packages\peft\tuners\tuners_utils.py", line 308, in forward
-    return self.model.forward(*args, **kwargs)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "C:\1_GitHome\Local-LLM-Server\LLM\.venv\Lib\site-packages\accelerate\hooks.py", line 175, in new_forward
-    output = module._old_forward(*args, **kwargs)
-             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "C:\1_GitHome\Local-LLM-Server\LLM\.venv\Lib\site-packages\transformers\utils\generic.py", line 940, in wrapper
-    output = func(self, *args, **kwargs)
-             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "C:\1_GitHome\Local-LLM-Server\LLM\.venv\Lib\site-packages\transformers\models\llama\modeling_llama.py", line 477, in forward
-    loss = self.loss_function(logits=logits, labels=labels, vocab_size=self.config.vocab_size, **kwargs)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "C:\1_GitHome\Local-LLM-Server\LLM\.venv\Lib\site-packages\transformers\loss\loss_utils.py", line 55, in ForCausalLMLoss
-    logits = logits.float()
-             ^^^^^^^^^^^^^^
-torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 2.94 GiB. GPU 1 has a total capacity of 11.24 GiB of which 0 bytes is free. Of the allocated memory 9.50 GiB is allocated by PyTorch, and 877.72 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)
-  0%|          | 0/1 [00:06<?, ?it/s]
+ 17%|█▋        | 1/6 [00:56<04:41, 56.39s/it]
+{'loss': 15.9479, 'grad_norm': 0.05165012925863266, 'learning_rate': 0.0, 'epoch': 0.8}
+⏳ Waiting for output from training process...
+ 17%|█▋        | 1/6 [00:56<04:41, 56.39s/it]
+ 33%|███▎      | 2/6 [01:10<02:05, 31.43s/it]
+{'loss': 16.0065, 'grad_norm': 0.05549032986164093, 'learning_rate': 5e-06, 'epoch': 1.0}
+⏳ Waiting for output from training process...
+ 33%|███▎      | 2/6 [01:10<02:05, 31.43s/it]
+ 50%|█████     | 3/6 [02:06<02:08, 42.73s/it]
+{'loss': 15.9703, 'grad_norm': 0.05282403156161308, 'learning_rate': 1e-05, 'epoch': 1.8}
+⏳ Waiting for output from training process...
+ 50%|█████     | 3/6 [02:06<02:08, 42.73s/it]
+ 67%|██████▋   | 4/6 [02:20<01:02, 31.48s/it]
+{'loss': 15.9161, 'grad_norm': 0.05700143799185753, 'learning_rate': 1.5e-05, 'epoch': 2.0}
+⏳ Waiting for output from training process...
+ 67%|██████▋   | 4/6 [02:20<01:02, 31.48s/it]
+ 83%|████████▎ | 5/6 [03:17<00:40, 40.74s/it]
+{'loss': 15.9944, 'grad_norm': 0.05169973149895668, 'learning_rate': 2e-05, 'epoch': 2.8}
+⏳ Waiting for output from training process...
+ 83%|████████▎ | 5/6 [03:17<00:40, 40.74s/it]
+100%|██████████| 6/6 [03:32<00:00, 31.79s/it]
+{'loss': 15.8166, 'grad_norm': 0.06836117804050446, 'learning_rate': 2.5e-05, 'epoch': 3.0}
+100%|██████████| 6/6 [03:32<00:00, 31.79s/it]
+{'train_runtime': 212.5134, 'train_samples_per_second': 0.141, 'train_steps_per_second': 0.028, 'train_loss': 15.941963195800781, 'epoch': 3.0}
+100%|██████████| 6/6 [03:32<00:00, 31.79s/it]
+100%|██████████| 6/6 [03:32<00:00, 35.42s/it]
+Saving model...
+Done! Model saved to ./models_trained/My_Model_1219_20251219_142359
 ============================================================
-❌ Training failed with exit code 1
+✅ Training completed successfully!

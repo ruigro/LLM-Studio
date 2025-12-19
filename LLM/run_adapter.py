@@ -25,12 +25,33 @@ except Exception:
 
 
 def load_model(base_model, adapter_dir, use_4bit=True, offload=True):
+    import os
+    
     tokenizer = None
+    
+    # Check if adapter_dir is a checkpoint subdirectory and use parent if so
+    if "checkpoint-" in adapter_dir and os.path.basename(adapter_dir).startswith("checkpoint-"):
+        print(f"[INFO] Detected checkpoint subdirectory, using parent: {os.path.dirname(adapter_dir)}")
+        adapter_dir = os.path.dirname(adapter_dir)
+    
+    # Try loading tokenizer from adapter dir first, then base model
     try:
-        # Prefer tokenizer from adapter dir if it contains one
-        tokenizer = AutoTokenizer.from_pretrained(adapter_dir, use_fast=False, fix_mistral_regex=True)
-    except Exception:
-        tokenizer = AutoTokenizer.from_pretrained(base_model, use_fast=False, fix_mistral_regex=True)
+        print(f"[INFO] Loading tokenizer from adapter dir: {adapter_dir}")
+        tokenizer = AutoTokenizer.from_pretrained(adapter_dir)
+        print("[OK] Tokenizer loaded from adapter dir")
+    except Exception as e:
+        print(f"[WARN] Could not load tokenizer from adapter dir: {e}")
+        print(f"[INFO] Loading tokenizer from base model: {base_model}")
+        try:
+            tokenizer = AutoTokenizer.from_pretrained(base_model)
+            print("[OK] Tokenizer loaded from base model")
+        except Exception as e2:
+            raise RuntimeError(f"Failed to load tokenizer from both adapter dir and base model: {e2}")
+    
+    # Ensure pad token is set
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+        print(f"[INFO] Set pad_token to eos_token: {tokenizer.eos_token}")
 
     # Load base model without device_map to avoid accelerate compatibility issues
     if use_4bit:
@@ -166,11 +187,18 @@ def main():
     # convert literal "\n" sequences into real newlines (allows shell-friendly prompts)
     prompt = args.prompt.replace("\\n", "\n").strip()
 
-    print("Loading tokenizer and model (this may take a few minutes)...")
+    # Set UTF-8 encoding for Windows console
+    import sys
+    if sys.platform == 'win32':
+        import io
+        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+        sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
+    
+    print("[INFO] Loading tokenizer and model (this may take a few minutes)...")
     tokenizer, model = load_model(args.base_model, args.adapter_dir, use_4bit=args.use_4bit, offload=args.offload)
 
     # Generate and print only the new text (no prompt echo)
-    print("Generating...")
+    print("[INFO] Generating...")
     out = generate_text(tokenizer, model, prompt, max_new_tokens=args.max_new_tokens, temperature=args.temperature)
     print("\n--- OUTPUT ---\n")
     print(out)

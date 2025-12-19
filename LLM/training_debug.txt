@@ -1,5 +1,5 @@
-Starting training thread at 2025-12-19 10:23:55
-Config: {'model_name': 'C:\\1_GitHome\\Local-LLM-Server\\LLM\\models\\unsloth_llama-3.1-8b-instruct-unsloth-bnb-4bit', 'data_path': 'train_data.jsonl', 'output_dir': './fine_tuned_adapter', 'epochs': 1, 'batch_size': 3, 'lora_r': 8, 'lora_alpha': 16, 'lora_dropout': 0.05, 'grad_accum': 8, 'max_seq_length': 2048, 'max_examples': None}
+Starting training thread at 2025-12-19 14:23:59
+Config: {'model_name': 'C:\\1_GitHome\\Local-LLM-Server\\LLM\\models\\unsloth_llama-3.1-8b-instruct-unsloth-bnb-4bit', 'model_display_name': 'My_Model_1219', 'data_path': 'train_data.jsonl', 'output_dir': './models_trained/My_Model_1219_20251219_142359', 'epochs': 3, 'batch_size': 1, 'lora_r': 8, 'lora_alpha': 16, 'lora_dropout': 0.05, 'grad_accum': 8, 'max_seq_length': 2048, 'max_examples': None, 'timestamp': '20251219_142359'}
 Python: C:\1_GitHome\Local-LLM-Server\LLM\.venv\Scripts\python.exe
 Working dir: C:\1_GitHome\Local-LLM-Server\LLM
 train_basic.py exists: True

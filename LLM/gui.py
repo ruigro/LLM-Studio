@@ -10,6 +10,7 @@ import subprocess
 import threading
 import time
 from pathlib import Path
+from datetime import datetime
 import pandas as pd
 
 # Import system detector
@@ -74,29 +75,32 @@ st.markdown("""
         gap: 0.75rem;
     }
     .nav-item {
-        color: white;
-        text-decoration: none;
-        padding: 0.6rem 1.2rem;
-        border-radius: 0.5rem;
-        transition: all 0.3s ease;
-        font-weight: 500;
-        cursor: pointer;
-        border: 2px solid transparent;
-        background: rgba(255,255,255,0.1);
-        backdrop-filter: blur(10px);
+        color: #ffffff !important;
+        text-decoration: none !important;
+        padding: 0.6rem 1.2rem !important;
+        border-radius: 0.5rem !important;
+        transition: all 0.3s ease !important;
+        font-weight: 700 !important;
+        cursor: pointer !important;
+        border: 2px solid rgba(255,255,255,0.4) !important;
+        background: rgba(255,255,255,0.2) !important;
+        backdrop-filter: blur(10px) !important;
+        text-shadow: 0 2px 4px rgba(0,0,0,0.5) !important;
+        font-size: 1rem !important;
     }
     .nav-item:hover {
-        background-color: rgba(255,255,255,0.25);
-        transform: translateY(-2px);
-        border-color: rgba(255,255,255,0.5);
-        box-shadow: 0 4px 8px rgba(0,0,0,0.2);
+        background-color: rgba(255,255,255,0.3) !important;
+        transform: translateY(-2px) !important;
+        border-color: rgba(255,255,255,0.6) !important;
+        box-shadow: 0 4px 8px rgba(0,0,0,0.3) !important;
     }
     .nav-item.active {
-        background-color: rgba(255,255,255,0.9);
-        color: #667eea;
-        border-color: white;
-        font-weight: bold;
-        box-shadow: 0 4px 12px rgba(255,255,255,0.3);
+        background-color: #ffffff !important;
+        color: #1e293b !important;
+        border-color: #ffffff !important;
+        font-weight: 900 !important;
+        box-shadow: 0 4px 12px rgba(255,255,255,0.6) !important;
+        text-shadow: none !important;
     }
     
     .main-header {
@@ -147,6 +151,7 @@ st.markdown("""
     }
     .success-box {
         background-color: #d4edda;
+        color: #155724;
         padding: 0.4rem 0.6rem;
         border-radius: 0.5rem;
         border-left: 4px solid #10b981;
@@ -156,6 +161,9 @@ st.markdown("""
         max-width: 100%;
         line-height: 1.3;
         font-size: 0.9em;
+    }
+    .success-box strong {
+        color: #155724;
     }
     .warning-box {
         background-color: #fff3cd;
@@ -271,25 +279,54 @@ MODEL_PRESETS = {
 }
 
 def load_trained_models():
-    """Load list of trained model checkpoints"""
-    output_dir = "./fine_tuned_adapter"
+    """Load list of trained model checkpoints with metadata"""
+    models_dir = "./models_trained"
     models = []
     
-    # Check if the main output dir has a trained model
-    if os.path.exists(output_dir):
-        adapter_file = os.path.join(output_dir, "adapter_model.safetensors")
-        if os.path.exists(adapter_file):
-            models.append("fine_tuned_adapter")  # The main trained model
-        
-        # Also check for checkpoint subdirectories
-        for item in os.listdir(output_dir):
-            item_path = os.path.join(output_dir, item)
-            if os.path.isdir(item_path) and ("checkpoint" in item.lower() or "Checkpoint" in item):
-                # Verify it has adapter files
-                if os.path.exists(os.path.join(item_path, "adapter_model.safetensors")):
-                    models.append(f"fine_tuned_adapter/{item}")
+    # Check new models_trained directory first
+    if os.path.exists(models_dir):
+        for item in os.listdir(models_dir):
+            item_path = os.path.join(models_dir, item)
+            if os.path.isdir(item_path):
+                # Check if it has adapter files
+                adapter_file = os.path.join(item_path, "adapter_model.safetensors")
+                metadata_file = os.path.join(item_path, "training_metadata.json")
+                
+                if os.path.exists(adapter_file):
+                    # Try to load metadata
+                    display_name = item
+                    base_model = "Unknown"
+                    
+                    if os.path.exists(metadata_file):
+                        try:
+                            with open(metadata_file, "r") as f:
+                                metadata = json.load(f)
+                                display_name = metadata.get("model_display_name", item)
+                                base_model = metadata.get("model_name", "Unknown")
+                                timestamp = metadata.get("timestamp", "")
+                                if timestamp:
+                                    formatted_time = f"{timestamp[:4]}-{timestamp[4:6]}-{timestamp[6:8]} {timestamp[9:11]}:{timestamp[11:13]}"
+                                    display_name = f"{display_name} ({formatted_time})"
+                        except:
+                            pass
+                    
+                    models.append((item_path, display_name, base_model))
     
-    return sorted(models, reverse=True)
+    # Also check legacy fine_tuned_adapter directory
+    legacy_dir = "./fine_tuned_adapter"
+    if os.path.exists(legacy_dir):
+        adapter_file = os.path.join(legacy_dir, "adapter_model.safetensors")
+        if os.path.exists(adapter_file):
+            models.append((legacy_dir, "Legacy Model", "Unknown"))
+        
+        # Check for checkpoint subdirectories
+        for item in os.listdir(legacy_dir):
+            item_path = os.path.join(legacy_dir, item)
+            if os.path.isdir(item_path) and ("checkpoint" in item.lower()):
+                if os.path.exists(os.path.join(item_path, "adapter_model.safetensors")):
+                    models.append((item_path, f"Checkpoint: {item}", "Unknown"))
+    
+    return sorted(models, key=lambda x: x[0], reverse=True)
 
 def load_downloaded_models():
     """Load list of downloaded models"""
@@ -428,25 +465,38 @@ def render_navbar():
     # Add custom CSS for active navbar button styling
     st.markdown("""
     <style>
+    /* FORCE WHITE TEXT IN ALL BUTTONS */
+    button {
+        color: #ffffff !important;
+    }
+    button span, button p, button div {
+        color: #ffffff !important;
+    }
     /* Style active navbar buttons */
     div[data-testid*="stButton"] > button[kind="primary"] {
         background: linear-gradient(90deg, #ff7f0e 0%, #ff4500 100%) !important;
-        color: white !important;
+        color: #ffffff !important;
         font-weight: bold !important;
         border: 2px solid #ff7f0e !important;
         box-shadow: 0 4px 8px rgba(255, 127, 14, 0.3) !important;
         transform: scale(1.02);
     }
+    div[data-testid*="stButton"] > button[kind="primary"] * {
+        color: #ffffff !important;
+    }
     /* Style inactive navbar buttons */
     div[data-testid*="stButton"] > button[kind="secondary"] {
-        background-color: #f0f0f0 !important;
-        color: #666 !important;
-        border: 2px solid #ddd !important;
+        background-color: rgba(102, 126, 234, 0.4) !important;
+        color: #ffffff !important;
+        border: 2px solid rgba(255,255,255,0.4) !important;
+    }
+    div[data-testid*="stButton"] > button[kind="secondary"] * {
+        color: #ffffff !important;
     }
     div[data-testid*="stButton"] > button[kind="secondary"]:hover {
-        background-color: #e0e0e0 !important;
-        border-color: #1f77b4 !important;
-        color: #1f77b4 !important;
+        background-color: rgba(102, 126, 234, 0.6) !important;
+        border-color: #ffffff !important;
+        color: #ffffff !important;
     }
     </style>
     """, unsafe_allow_html=True)
@@ -744,9 +794,10 @@ def run_training(config):
                     log_file.write("⏳ Waiting for output from training process...\n")
                     log_file.flush()
                 elif timeout_count >= max_timeout:
-                    log_file.write("⚠️ No output received for 60 seconds. Process may be stuck.\n")
+                    log_file.write("⚠️ No output for 60s. Model may be saving (this is normal at the end)...\n")
                     log_file.flush()
-                    break
+                    # DON'T break - let the process finish naturally!
+                    # Model saving is silent and can take time
         
         stop_reading.set()
         
@@ -1207,30 +1258,62 @@ def main():
                     st.metric("Total Examples", total_lines)
         
         with col2:
+            st.markdown("""
+            <style>
+            /* Compact futuristic slider styling */
+            .stSlider > div > div > div {
+                background: linear-gradient(90deg, #667eea 0%, #764ba2 100%);
+            }
+            .stSlider > div > div > div > div {
+                background-color: white;
+                border: 2px solid #667eea;
+            }
+            .stNumberInput > div > div > input {
+                background-color: rgba(102, 126, 234, 0.1);
+                border: 1px solid #667eea;
+                border-radius: 8px;
+                padding: 0.5rem;
+            }
+            </style>
+            """, unsafe_allow_html=True)
+            
             st.subheader("⚙️ Training Parameters")
             
-            epochs = st.slider("Epochs", 1, 10, 3, help="Number of training epochs")
-            batch_size = st.slider("Batch Size", 1, 8, 1, help="Training batch size per device")
+            # Model Name Input
+            model_display_name = st.text_input(
+                "📝 Model Name",
+                value=f"My_Model_{datetime.now().strftime('%m%d')}",
+                help="Give your model a memorable name",
+                placeholder="e.g., CustomerService_Bot_v1"
+            )
             
-            st.markdown("### 🎛️ LoRA Parameters")
-            lora_r = st.slider("LoRA R", 4, 64, 8, step=4, help="LoRA rank")
-            lora_alpha = st.slider("LoRA Alpha", 8, 128, 16, step=8, help="LoRA alpha scaling")
-            lora_dropout = st.slider("LoRA Dropout", 0.0, 0.5, 0.05, step=0.01, help="LoRA dropout rate")
+            col_a, col_b = st.columns(2)
+            with col_a:
+                epochs = st.slider("Epochs", 1, 10, 3, help="Number of training epochs")
+                lora_r = st.slider("LoRA R", 4, 64, 8, step=4, help="LoRA rank")
+                max_seq_length = st.number_input("Max Seq Length", 512, 4096, 2048, step=256)
             
-            st.markdown("### 🔧 Advanced")
-            max_seq_length = st.number_input("Max Sequence Length", 512, 4096, 2048, step=256)
-            grad_accum = st.slider("Gradient Accumulation", 1, 32, 8, help="Gradient accumulation steps")
-            max_examples = st.number_input("Max Examples (for testing)", 0, 10000, 0, 
-                                         help="0 = use all examples. Limit for quick test runs.")
+            with col_b:
+                batch_size = st.slider("Batch Size", 1, 8, 1, help="⚠️ Use 1 for 8B models")
+                lora_alpha = st.slider("LoRA Alpha", 8, 128, 16, step=8, help="LoRA alpha scaling")
+                grad_accum = st.slider("Grad Accum", 1, 32, 8, help="Gradient accumulation steps")
+            
+            if batch_size > 1:
+                st.warning(f"⚠️ Batch size {batch_size} may cause OOM with large models")
+            
+            # Advanced in expander
+            with st.expander("🔧 Advanced Settings"):
+                lora_dropout = st.slider("LoRA Dropout", 0.0, 0.5, 0.05, step=0.01)
+                max_examples = st.number_input("Max Examples (0 = all)", 0, 10000, 0)
             
             # Device info
-            st.markdown("### 💻 Device")
+            st.divider()
             if not TORCH_AVAILABLE:
                 st.error("⚠️ PyTorch error - Training will use CPU")
             elif st.session_state.gpu_available:
-                st.success(f"✅ Training on: {st.session_state.gpu_name}")
+                st.success(f"✅ GPU: {st.session_state.gpu_name}")
             else:
-                st.warning("⚠️ Training on: CPU")
+                st.warning("⚠️ CPU Mode")
         
         # Training button and status
         st.divider()
@@ -1253,10 +1336,20 @@ def main():
                 </div>
                 """, unsafe_allow_html=True)
             else:
+                # Generate output directory with custom name
+                # Sanitize model name (remove special chars, replace spaces with underscores)
+                safe_name = "".join(c if c.isalnum() or c in ('_', '-') else '_' for c in model_display_name)
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                output_dir = f"./models_trained/{safe_name}_{timestamp}"
+                
+                # Create models_trained directory if it doesn't exist
+                os.makedirs("./models_trained", exist_ok=True)
+                
                 config = {
                     "model_name": model_name,
+                    "model_display_name": model_display_name,
                     "data_path": data_path,
-                    "output_dir": "./fine_tuned_adapter",
+                    "output_dir": output_dir,
                     "epochs": epochs,
                     "batch_size": batch_size,
                     "lora_r": lora_r,
@@ -1265,79 +1358,86 @@ def main():
                     "grad_accum": grad_accum,
                     "max_seq_length": max_seq_length,
                     "max_examples": max_examples if max_examples > 0 else None,
+                    "timestamp": timestamp,
                 }
+                
+                # Save metadata JSON
+                metadata_file = os.path.join(output_dir, "training_metadata.json")
+                os.makedirs(output_dir, exist_ok=True)
+                with open(metadata_file, "w") as f:
+                    json.dump(config, f, indent=2)
                 
                 # Check if training is already running
                 if st.session_state.training_status == "training":
                     st.warning("⚠️ Training is already in progress. Please stop it first.")
                 else:
-                    # Pre-flight checks
-                    import sys
-                    python_exe = sys.executable
-                    train_script_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "train_basic.py")
-                    
-                    # Verify files exist
-                    checks_passed = True
-                    if not os.path.exists(train_script_path):
-                        st.error(f"❌ train_basic.py not found at: {train_script_path}")
-                        checks_passed = False
-                    if not os.path.exists(data_path):
-                        st.error(f"❌ Dataset not found at: {data_path}")
-                        checks_passed = False
-                    if not os.path.exists(python_exe):
-                        st.error(f"❌ Python executable not found at: {python_exe}")
-                        checks_passed = False
-                    
-                    if not checks_passed:
-                        st.stop()
-                    
-                    st.session_state.training_status = "training"
-                    st.session_state.training_logs = []
-                    st.session_state.training_logs.append("=" * 60)
-                    st.session_state.training_logs.append("🚀 Starting training...")
-                    st.session_state.training_logs.append(f"Python: {python_exe}")
-                    st.session_state.training_logs.append(f"Script: {train_script_path}")
-                    st.session_state.training_logs.append(f"Model: {model_name}")
-                    st.session_state.training_logs.append(f"Dataset: {data_path}")
-                    st.session_state.training_logs.append(f"Epochs: {epochs}")
-                    st.session_state.training_logs.append(f"Device: {'GPU' if st.session_state.gpu_available else 'CPU'}")
-                    st.session_state.training_logs.append("=" * 60)
-                    
-                    # Write debug info before starting thread
-                    debug_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "training_debug.txt")
-                    try:
-                        with open(debug_file, 'w', encoding='utf-8') as f:
-                            f.write(f"Starting training thread at {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
-                            f.write(f"Config: {config}\n")
-                            f.write(f"Python: {sys.executable}\n")
-                            f.write(f"Working dir: {os.path.dirname(os.path.abspath(__file__))}\n")
-                            f.write(f"train_basic.py exists: {os.path.exists(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'train_basic.py'))}\n")
-                            f.write(f"Dataset exists: {os.path.exists(data_path)}\n")
-                    except Exception as e:
-                        st.error(f"Failed to write debug file: {e}")
-                    
-                    # Start training in background with safe wrapper
-                    thread = threading.Thread(target=run_training_safe, args=(config,), name="TrainingThread")
-                    thread.daemon = True
-                    thread.start()
-                    st.session_state.training_thread = thread
-                    
-                    # Verify thread started
-                    time.sleep(0.1)
-                    if not thread.is_alive():
-                        error_msg = "❌ Training thread died immediately! Check training_error.txt"
-                        st.error(error_msg)
-                        st.session_state.training_status = "failed"
-                        st.session_state.training_logs.append(error_msg)
-                    
-                    st.markdown(f"""
-                    <div class="success-box">
-                        ✅ Training started! Device: <strong>{'GPU' if st.session_state.gpu_available else 'CPU'}</strong><br>
-                        Check the logs below for real-time progress.
-                    </div>
-                    """, unsafe_allow_html=True)
-                    st.balloons()
-                    st.rerun()
+                        # Pre-flight checks
+                        import sys
+                        python_exe = sys.executable
+                        train_script_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "train_basic.py")
+                        
+                        # Verify files exist
+                        checks_passed = True
+                        if not os.path.exists(train_script_path):
+                            st.error(f"❌ train_basic.py not found at: {train_script_path}")
+                            checks_passed = False
+                        if not os.path.exists(data_path):
+                            st.error(f"❌ Dataset not found at: {data_path}")
+                            checks_passed = False
+                        if not os.path.exists(python_exe):
+                            st.error(f"❌ Python executable not found at: {python_exe}")
+                            checks_passed = False
+                        
+                        if not checks_passed:
+                            st.stop()
+                        
+                        st.session_state.training_status = "training"
+                        st.session_state.training_logs = []
+                        st.session_state.training_logs.append("=" * 60)
+                        st.session_state.training_logs.append("🚀 Starting training...")
+                        st.session_state.training_logs.append(f"Python: {python_exe}")
+                        st.session_state.training_logs.append(f"Script: {train_script_path}")
+                        st.session_state.training_logs.append(f"Model: {model_name}")
+                        st.session_state.training_logs.append(f"Dataset: {data_path}")
+                        st.session_state.training_logs.append(f"Epochs: {epochs}")
+                        st.session_state.training_logs.append(f"Device: {'GPU' if st.session_state.gpu_available else 'CPU'}")
+                        st.session_state.training_logs.append("=" * 60)
+                        
+                        # Write debug info before starting thread
+                        debug_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "training_debug.txt")
+                        try:
+                            with open(debug_file, 'w', encoding='utf-8') as f:
+                                f.write(f"Starting training thread at {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+                                f.write(f"Config: {config}\n")
+                                f.write(f"Python: {sys.executable}\n")
+                                f.write(f"Working dir: {os.path.dirname(os.path.abspath(__file__))}\n")
+                                f.write(f"train_basic.py exists: {os.path.exists(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'train_basic.py'))}\n")
+                                f.write(f"Dataset exists: {os.path.exists(data_path)}\n")
+                        except Exception as e:
+                            st.error(f"Failed to write debug file: {e}")
+                        
+                        # Start training in background with safe wrapper
+                        thread = threading.Thread(target=run_training_safe, args=(config,), name="TrainingThread")
+                        thread.daemon = True
+                        thread.start()
+                        st.session_state.training_thread = thread
+                        
+                        # Verify thread started
+                        time.sleep(0.1)
+                        if not thread.is_alive():
+                            error_msg = "❌ Training thread died immediately! Check training_error.txt"
+                            st.error(error_msg)
+                            st.session_state.training_status = "failed"
+                            st.session_state.training_logs.append(error_msg)
+                        
+                        st.markdown(f"""
+                        <div class="success-box">
+                            ✅ Training started! Device: <strong>{'GPU' if st.session_state.gpu_available else 'CPU'}</strong><br>
+                            Check the logs below for real-time progress.
+                        </div>
+                        """, unsafe_allow_html=True)
+                        st.balloons()
+                        st.rerun()
         
         # Show training status
         if st.session_state.training_status == "training":
@@ -1358,70 +1458,33 @@ def main():
             # Read and display logs
             if os.path.exists(log_file):
                 try:
-                    with open(log_file, 'r', encoding='utf-8') as f:
+                    with open(log_file, 'r', encoding='utf-8', errors='replace') as f:
                         logs = f.read()
+                        
+                        # Show log length for debugging
+                        st.caption(f"📄 Log file size: {len(logs)} characters | Last updated: {time.strftime('%H:%M:%S')}")
+                        
                         st.text_area("Training Logs", logs, height=500, key="live_logs")
                         
-                        # Check if training finished
-                        if "Training completed successfully" in logs:
+                        # Check if training finished or had OOM error
+                        if "✅ Training completed successfully" in logs or "Done! Model saved" in logs:
                             st.session_state.training_status = "completed"
                             st.success("✅ Training completed!")
                             st.rerun()
-                        elif "Training failed" in logs:
+                        elif "❌ Training failed" in logs or "OutOfMemoryError" in logs or "CUDA out of memory" in logs:
                             st.session_state.training_status = "failed"
-                            st.error("❌ Training failed")
+                            st.error("❌ Training failed - Check logs for details")
+                            if "OutOfMemoryError" in logs or "CUDA out of memory" in logs:
+                                st.error("💡 **Out of Memory!** Reduce batch size to 1, or reduce max sequence length to 1024")
                             st.rerun()
                 except Exception as e:
                     st.error(f"Error reading logs: {e}")
+            else:
+                st.warning("⚠️ Log file not found yet. Waiting for training to start...")
             
             # Auto-refresh every 2 seconds
             time.sleep(2)
             st.rerun()
-            
-            with st.expander("📋 View Training Logs (Live)", expanded=True):
-                if st.session_state.training_logs:
-                    # Show last 300 lines for better visibility
-                    log_text = "\n".join(st.session_state.training_logs[-300:])
-                    st.text_area("", log_text, height=500, disabled=True, key="training_logs_display")
-                    
-                    # Auto-scroll to bottom
-                    st.markdown("""
-                    <script>
-                    setTimeout(function() {
-                        var textarea = document.querySelector('textarea[data-testid*="training_logs_display"]');
-                        if (textarea) {
-                            textarea.scrollTop = textarea.scrollHeight;
-                        }
-                    }, 100);
-                    </script>
-                    """, unsafe_allow_html=True)
-                    
-                    col1, col2 = st.columns([1, 1])
-                    with col1:
-                        if st.button("🔄 Refresh Logs", key="refresh_train_logs"):
-                            st.rerun()
-                    with col2:
-                        if st.button("🛑 Stop Training", key="stop_training_expander"):
-                            stop_training()
-                            st.rerun()
-                else:
-                    st.info("Waiting for training logs...")
-                    st.caption("If logs don't appear, check that finetune.py is running correctly.")
-                    
-                    # Check if log file exists and read from it as backup
-                    log_file_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "training_log.txt")
-                    if os.path.exists(log_file_path):
-                        try:
-                            with open(log_file_path, 'r', encoding='utf-8') as f:
-                                lines = f.readlines()
-                                if lines:
-                                    # Update logs from file
-                                    file_logs = [line.rstrip() for line in lines if line.strip()]
-                                    if file_logs:
-                                        st.session_state.training_logs = file_logs[-100:]
-                                        st.rerun()
-                        except Exception as e:
-                            st.caption(f"Error reading log file: {e}")
             
             # Show process status and diagnostics
             st.markdown("### 🔍 Process Status & Diagnostics")
@@ -1560,7 +1623,11 @@ def main():
             st.session_state.training_status = "idle"
     
     elif page == "🧪 Test Model":
-        st.header("🧪 Test Your Fine-tuned Model")
+        st.header("💬 Chat with Your Model")
+        
+        # Initialize chat history in session state
+        if "chat_history" not in st.session_state:
+            st.session_state.chat_history = []
         
         trained_models = load_trained_models()
         
@@ -1571,57 +1638,191 @@ def main():
             </div>
             """, unsafe_allow_html=True)
         else:
-            col1, col2 = st.columns([1, 2])
-            
-            with col1:
+            # Sidebar for settings
+            with st.sidebar:
                 st.subheader("📦 Model Selection")
-                selected_model = st.selectbox("Select Trained Model", trained_models)
                 
-                # Get base model from model_map.json if available
-                model_map_path = "./fine_tuned_adapter/model_map.json"
-                base_model = "unsloth/llama-3.2-3b-instruct-unsloth-bnb-4bit"
-                if os.path.exists(model_map_path):
-                    with open(model_map_path, "r") as f:
-                        model_map = json.load(f)
-                        # Reverse lookup
-                        for k, v in model_map.items():
-                            if selected_model.startswith(v):
-                                base_model = k
-                                break
+                if not trained_models:
+                    st.warning("No trained models found")
+                else:
+                    # Build display mapping with metadata
+                    model_options = []
+                    model_data = {}
+                    for path, display_name, base_model in trained_models:
+                        model_options.append(display_name)
+                        model_data[display_name] = {"path": path, "base": base_model}
+                    
+                    selected_display = st.selectbox("Select Model", model_options)
+                    selected_model = model_data[selected_display]["path"]
+                    base_model = model_data[selected_display]["base"]
+                    
+                    # Show model info
+                    st.markdown(f"**Base:** `{base_model.split('/')[-1] if '/' in base_model else base_model}`")
+                    st.markdown(f"**Path:** `{selected_model}`")
+                    
+                    # Delete button
+                    st.divider()
+                    if st.button("🗑️ Delete This Model", type="secondary", use_container_width=True):
+                        try:
+                            import shutil
+                            shutil.rmtree(selected_model)
+                            st.success(f"✅ Deleted: {selected_display}")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"❌ Error deleting model: {e}")
+                st.markdown(f"**Adapter:** `{selected_display}`")
                 
-                st.markdown(f"""
-                <div class="info-box">
-                    <strong>Base Model:</strong><br>
-                    <code>{base_model}</code><br><br>
-                    <strong>Adapter:</strong><br>
-                    <code>{selected_model}</code>
-                </div>
-                """, unsafe_allow_html=True)
-                
+                st.divider()
                 st.subheader("⚙️ Generation Settings")
                 max_tokens = st.slider("Max Tokens", 32, 512, 128)
-                temperature = st.slider("Temperature", 0.0, 2.0, 0.7, step=0.1, 
-                                       help="Higher = more creative, Lower = more focused")
-            
-            with col2:
-                st.subheader("💬 Test Prompt")
-                prompt = st.text_area(
-                    "Enter your prompt",
-                    value="### Instruction:\nSay hello\n\n### Response:\n",
-                    height=150,
-                    help="Use the format: ### Instruction:\\nYour question\\n\\n### Response:\\n"
-                )
+                temperature = st.slider("Temperature", 0.0, 2.0, 0.7, step=0.1)
                 
-                if st.button("🚀 Generate Response", type="primary", use_container_width=True):
-                    adapter_dir = f"./fine_tuned_adapter/{selected_model}"
+                st.divider()
+                if st.button("🗑️ Clear Chat", use_container_width=True):
+                    st.session_state.chat_history = []
+                    st.rerun()
+            
+            # Chat CSS for custom HTML bubbles
+            st.markdown("""
+            <style>
+            .chat-container {
+                padding: 20px 0;
+            }
+            .user-message-wrapper {
+                display: flex;
+                justify-content: flex-end;
+                margin-bottom: 1rem;
+                width: 100%;
+            }
+            .user-message {
+                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                color: white;
+                padding: 1rem 1.2rem;
+                border-radius: 18px;
+                max-width: 90%;
+                box-shadow: 0 2px 8px rgba(102, 126, 234, 0.3);
+                word-wrap: break-word;
+            }
+            .ai-message-wrapper {
+                display: flex;
+                justify-content: flex-start;
+                margin-bottom: 1rem;
+                width: 100%;
+            }
+            .ai-message {
+                background: linear-gradient(135deg, #ff7f0e 0%, #ff4500 100%);
+                color: white;
+                padding: 1rem 1.2rem;
+                border-radius: 18px;
+                max-width: 90%;
+                box-shadow: 0 2px 8px rgba(255, 127, 14, 0.3);
+                border-left: 4px solid #ff6b00;
+                word-wrap: break-word;
+            }
+            .message-label {
+                font-size: 0.75rem;
+                font-weight: bold;
+                margin-bottom: 5px;
+                opacity: 0.8;
+            }
+            /* FORCE visible text in ALL inputs */
+            div[data-testid="stForm"] input[type="text"],
+            div[data-testid="stTextInput"] input,
+            .stTextInput input,
+            input[type="text"] {
+                color: #ffffff !important;
+                background-color: #2d2d2d !important;
+                border: 1px solid #555 !important;
+            }
+            div[data-testid="stForm"] input[type="text"]::placeholder,
+            div[data-testid="stTextInput"] input::placeholder,
+            .stTextInput input::placeholder,
+            input[type="text"]::placeholder {
+                color: #aaaaaa !important;
+            }
+            </style>
+            """, unsafe_allow_html=True)
+            
+            # Display chat history using custom HTML
+            if not st.session_state.chat_history:
+                st.markdown('<div style="text-align:center; color:#888; padding:50px;">Start a conversation! 👇</div>', unsafe_allow_html=True)
+            else:
+                import html as html_module
+                for msg in st.session_state.chat_history:
+                    # Unescape any HTML entities, then escape to prevent injection, then convert newlines
+                    content = html_module.unescape(msg["content"])
+                    content = html_module.escape(content)
+                    content = content.replace('\n', '<br>')
                     
-                    with st.spinner("🔄 Generating response..."):
+                    if msg["role"] == "user":
+                        st.markdown(f'''
+                        <div class="user-message-wrapper">
+                            <div class="user-message">
+                                <div class="message-label">You</div>
+                                {content}
+                            </div>
+                        </div>
+                        ''', unsafe_allow_html=True)
+                    else:
+                        st.markdown(f'''
+                        <div class="ai-message-wrapper">
+                            <div class="ai-message">
+                                <div class="message-label">AI Assistant</div>
+                                {content}
+                            </div>
+                        </div>
+                        ''', unsafe_allow_html=True)
+            
+            # Chat input at bottom
+            with st.form(key="chat_form", clear_on_submit=True):
+                col1, col2 = st.columns([5, 1])
+                with col1:
+                    user_input = st.text_input(
+                        "Message",
+                        placeholder="Type your message here...",
+                        label_visibility="collapsed"
+                    )
+                with col2:
+                    send_button = st.form_submit_button("Send", use_container_width=True, type="primary")
+            
+            if send_button and user_input.strip():
+                # Add user message to history and show it immediately
+                st.session_state.chat_history.append({"role": "user", "content": user_input})
+                
+                # Set flag to generate response
+                st.session_state.generating = True
+                st.rerun()  # Immediately show user message
+                
+            # Generate response if flag is set
+            if st.session_state.get("generating", False):
+                st.session_state.generating = False
+                
+                # Get the last user message
+                user_input = None
+                for msg in reversed(st.session_state.chat_history):
+                    if msg["role"] == "user":
+                        user_input = msg["content"]
+                        break
+                
+                if user_input:
+                    # Construct adapter path
+                    if selected_model.startswith("./"):
+                        adapter_dir = selected_model
+                    else:
+                        adapter_dir = f"./{selected_model}"
+                    
+                    # Format prompt properly
+                    formatted_prompt = f"### Instruction:\n{user_input}\n\n### Response:\n"
+                    
+                    with st.spinner("🤔 Thinking..."):
                         try:
+                            import sys
+                            python_exe = sys.executable
                             cmd = [
-                                "python", "run_adapter.py",
+                                python_exe, "run_adapter.py",
                                 "--adapter-dir", adapter_dir,
                                 "--base-model", base_model,
-                                "--prompt", prompt,
+                                "--prompt", formatted_prompt,
                                 "--max-new-tokens", str(max_tokens),
                                 "--temperature", str(temperature),
                             ]
@@ -1630,29 +1831,65 @@ def main():
                                 cmd,
                                 capture_output=True,
                                 text=True,
-                                timeout=120,
-                                cwd=os.path.dirname(os.path.abspath(__file__))
+                                timeout=180,
+                                cwd=os.path.dirname(os.path.abspath(__file__)),
+                                encoding='utf-8',
+                                errors='replace'
                             )
                             
                             if result.returncode == 0:
-                                # Extract output from stdout
-                                output = result.stdout
-                                st.markdown("""
-                                <div class="success-box">
-                                    ✅ Generation Complete!
-                                </div>
-                                """, unsafe_allow_html=True)
-                                st.text_area("Generated Response", output, height=200, key="generated_output")
+                                output = result.stdout.strip()
+                                if "--- OUTPUT ---" in output:
+                                    output = output.split("--- OUTPUT ---", 1)[1].strip()
+                                
+                                # Clean up output - ONLY remove actual training artifacts
+                                # Remove instruction markers at the very start if present
+                                if output.startswith("### Instruction:"):
+                                    if "### Response:" in output:
+                                        output = output.split("### Response:", 1)[1].strip()
+                                
+                                # ONLY stop at clear training markers that shouldn't be in responses
+                                # Be VERY conservative - don't break legitimate content
+                                stop_markers = [
+                                    "\n\n### Instruction:",  # New instruction block
+                                    "\n\n### Response:",    # New response block  
+                                    "\n\n### Note:",        # Training notes
+                                    "\n\n(Note:",           # Parenthetical notes
+                                ]
+                                for marker in stop_markers:
+                                    if marker in output:
+                                        output = output.split(marker)[0].strip()
+                                        break
+                                
+                                # Remove trailing whitespace
+                                output = output.rstrip()
+                                
+                                if output and len(output) > 0:
+                                    # Add AI response to history
+                                    st.session_state.chat_history.append({"role": "assistant", "content": output})
+                                else:
+                                    st.session_state.chat_history.append({
+                                        "role": "assistant", 
+                                        "content": "⚠️ I couldn't generate a response. Please try again."
+                                    })
                             else:
-                                st.markdown(f"""
-                                <div class="error-box">
-                                    ❌ Error: {result.stderr[:500]}
-                                </div>
-                                """, unsafe_allow_html=True)
+                                error_msg = result.stderr if result.stderr else "Unknown error"
+                                st.session_state.chat_history.append({
+                                    "role": "assistant",
+                                    "content": f"❌ Error: {error_msg[:200]}"
+                                })
                         except subprocess.TimeoutExpired:
-                            st.error("⏱️ Generation timed out. Try reducing max tokens.")
+                            st.session_state.chat_history.append({
+                                "role": "assistant",
+                                "content": "⏱️ Response timed out. Please try again with a shorter message."
+                            })
                         except Exception as e:
-                            st.error(f"❌ Error: {str(e)}")
+                            st.session_state.chat_history.append({
+                                "role": "assistant",
+                                "content": f"❌ Error: {str(e)[:200]}"
+                            })
+                    
+                    st.rerun()
     
     elif page == "✅ Validate Model":
         st.header("✅ Validate Model Performance")

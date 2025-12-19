@@ -122,9 +122,11 @@ trainer = Trainer(
         gradient_accumulation_steps=GRAD_ACCUM,
         logging_steps=1,
         save_steps=100,
-        learning_rate=2e-4,
+        learning_rate=5e-5,  # Much lower for instruct models! Was 2e-4
         fp16=True,
         report_to="none",  # Disable wandb
+        warmup_steps=10,  # Add warmup
+        lr_scheduler_type="cosine",  # Better learning rate schedule
     ),
 )
 
