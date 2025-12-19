@@ -1,28 +1,100 @@
-Training started at 2025-12-19 00:17:13
+Training started at 2025-12-19 10:23:55
 ============================================================
-Command: C:\1_GitHome\Local-LLM-Server\LLM\.venv\Scripts\python.exe -u finetune.py --model-name unsloth/llama-3.2-3b-instruct-unsloth-bnb-4bit --data-path train_data.jsonl --output-dir ./fine_tuned_adapter --epochs 3 --batch-size 1 --lora-r 8 --lora-alpha 16 --lora-dropout 0.05 --grad-accum 8 --max-seq-length 2048
+Command: C:\1_GitHome\Local-LLM-Server\LLM\.venv\Scripts\python.exe -u train_basic.py --model-name C:\1_GitHome\Local-LLM-Server\LLM\models\unsloth_llama-3.1-8b-instruct-unsloth-bnb-4bit --data-path train_data.jsonl --output-dir ./fine_tuned_adapter --epochs 1 --batch-size 3 --lora-r 8 --lora-alpha 16 --lora-dropout 0.05 --grad-accum 8 --max-seq-length 2048
 Working directory: C:\1_GitHome\Local-LLM-Server\LLM
 Python executable: C:\1_GitHome\Local-LLM-Server\LLM\.venv\Scripts\python.exe
-Finetune script: C:\1_GitHome\Local-LLM-Server\LLM\finetune.py
+Finetune script: C:\1_GitHome\Local-LLM-Server\LLM\train_basic.py
 Dataset: train_data.jsonl
-Model: unsloth/llama-3.2-3b-instruct-unsloth-bnb-4bit
-Epochs: 3
+Model: C:\1_GitHome\Local-LLM-Server\LLM\models\unsloth_llama-3.1-8b-instruct-unsloth-bnb-4bit
+Epochs: 1
 Attempting to start subprocess...
-Process started with PID: 27920
+Process started with PID: 11176
 Process is running, starting output reader...
-🦥 Unsloth: Will patch your computer to enable 2x faster free finetuning.
-⚙️  Running in WANDB offline mode
-🦥 Unsloth Zoo will now patch everything to make training faster!
-Loading model and tokenizer in 4-bit...
+Configuration:
+  Model: C:\1_GitHome\Local-LLM-Server\LLM\models\unsloth_llama-3.1-8b-instruct-unsloth-bnb-4bit
+  Dataset: train_data.jsonl
+  Output: ./fine_tuned_adapter
+  Epochs: 1
+  Batch Size: 3
+  LoRA R: 8
+  LoRA Alpha: 16
+  LoRA Dropout: 0.05
+  Gradient Accumulation: 8
+  Max Seq Length: 2048
+Loading model...
+`torch_dtype` is deprecated! Use `dtype` instead!
+The `load_in_4bit` and `load_in_8bit` arguments are deprecated and will be removed in the future versions. Please, pass a `BitsAndBytesConfig` object in `quantization_config` argument instead.
+C:\1_GitHome\Local-LLM-Server\LLM\.venv\Lib\site-packages\transformers\quantizers\auto.py:239: UserWarning: You passed `quantization_config` or equivalent parameters to `from_pretrained` but the model you're loading already has a `quantization_config` attribute. The `quantization_config` from the model will be used.
+  warnings.warn(warning_msg)
+Preparing model for training...
+Adding LoRA adapters...
+Loading dataset...
+Generating train split: 0 examples [00:00, ? examples/s]
+Generating train split: 10 examples [00:00, 2520.16 examples/s]
+Map:   0%|          | 0/10 [00:00<?, ? examples/s]
+Map: 100%|██████████| 10/10 [00:00<00:00, 833.34 examples/s]
+Map:   0%|          | 0/10 [00:00<?, ? examples/s]
+Map: 100%|██████████| 10/10 [00:00<00:00, 499.98 examples/s]
+Training...
+  0%|          | 0/1 [00:00<?, ?it/s]`use_cache=True` is incompatible with gradient checkpointing. Setting `use_cache=False`.
+C:\1_GitHome\Local-LLM-Server\LLM\.venv\Lib\site-packages\torch\_dynamo\eval_frame.py:632: UserWarning: torch.utils.checkpoint: the use_reentrant parameter should be passed explicitly. In version 2.5 we will raise an exception if use_reentrant is not passed. use_reentrant=False is recommended, but if you need to preserve the current default behavior, you can pass use_reentrant=True. Refer to docs for more details on the differences between the two variants.
+  return fn(*args, **kwargs)
+⏳ Waiting for output from training process...
 Traceback (most recent call last):
-  File "C:\1_GitHome\Local-LLM-Server\LLM\finetune.py", line 167, in <module>
-    main()
-  File "C:\1_GitHome\Local-LLM-Server\LLM\finetune.py", line 63, in main
-    model, tokenizer = FastLanguageModel.from_pretrained(
-                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "C:\1_GitHome\Local-LLM-Server\LLM\.venv\Lib\site-packages\unsloth\models\loader.py", line 332, in from_pretrained
-    model_types = get_transformers_model_type(
-                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-TypeError: get_transformers_model_type() got an unexpected keyword argument 'trust_remote_code'
+  File "C:\1_GitHome\Local-LLM-Server\LLM\train_basic.py", line 131, in <module>
+    trainer.train()
+  File "C:\1_GitHome\Local-LLM-Server\LLM\.venv\Lib\site-packages\transformers\trainer.py", line 2328, in train
+    return inner_training_loop(
+           ^^^^^^^^^^^^^^^^^^^^
+  File "C:\1_GitHome\Local-LLM-Server\LLM\.venv\Lib\site-packages\transformers\trainer.py", line 2672, in _inner_training_loop
+    tr_loss_step = self.training_step(model, inputs, num_items_in_batch)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\1_GitHome\Local-LLM-Server\LLM\.venv\Lib\site-packages\transformers\trainer.py", line 4009, in training_step
+    loss = self.compute_loss(model, inputs, num_items_in_batch=num_items_in_batch)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\1_GitHome\Local-LLM-Server\LLM\.venv\Lib\site-packages\transformers\trainer.py", line 4099, in compute_loss
+    outputs = model(**inputs)
+              ^^^^^^^^^^^^^^^
+  File "C:\1_GitHome\Local-LLM-Server\LLM\.venv\Lib\site-packages\torch\nn\modules\module.py", line 1736, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\1_GitHome\Local-LLM-Server\LLM\.venv\Lib\site-packages\torch\nn\modules\module.py", line 1747, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\1_GitHome\Local-LLM-Server\LLM\.venv\Lib\site-packages\accelerate\utils\operations.py", line 819, in forward
+    return model_forward(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\1_GitHome\Local-LLM-Server\LLM\.venv\Lib\site-packages\accelerate\utils\operations.py", line 807, in __call__
+    return convert_to_fp32(self.model_forward(*args, **kwargs))
+                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\1_GitHome\Local-LLM-Server\LLM\.venv\Lib\site-packages\torch\amp\autocast_mode.py", line 44, in decorate_autocast
+    return func(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^
+  File "C:\1_GitHome\Local-LLM-Server\LLM\.venv\Lib\site-packages\peft\peft_model.py", line 1923, in forward
+    return self.base_model(
+           ^^^^^^^^^^^^^^^^
+  File "C:\1_GitHome\Local-LLM-Server\LLM\.venv\Lib\site-packages\torch\nn\modules\module.py", line 1736, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\1_GitHome\Local-LLM-Server\LLM\.venv\Lib\site-packages\torch\nn\modules\module.py", line 1747, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\1_GitHome\Local-LLM-Server\LLM\.venv\Lib\site-packages\peft\tuners\tuners_utils.py", line 308, in forward
+    return self.model.forward(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\1_GitHome\Local-LLM-Server\LLM\.venv\Lib\site-packages\accelerate\hooks.py", line 175, in new_forward
+    output = module._old_forward(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\1_GitHome\Local-LLM-Server\LLM\.venv\Lib\site-packages\transformers\utils\generic.py", line 940, in wrapper
+    output = func(self, *args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\1_GitHome\Local-LLM-Server\LLM\.venv\Lib\site-packages\transformers\models\llama\modeling_llama.py", line 477, in forward
+    loss = self.loss_function(logits=logits, labels=labels, vocab_size=self.config.vocab_size, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\1_GitHome\Local-LLM-Server\LLM\.venv\Lib\site-packages\transformers\loss\loss_utils.py", line 55, in ForCausalLMLoss
+    logits = logits.float()
+             ^^^^^^^^^^^^^^
+torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 2.94 GiB. GPU 1 has a total capacity of 11.24 GiB of which 0 bytes is free. Of the allocated memory 9.50 GiB is allocated by PyTorch, and 877.72 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)
+  0%|          | 0/1 [00:06<?, ?it/s]
 ============================================================
 ❌ Training failed with exit code 1

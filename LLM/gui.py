@@ -58,46 +58,51 @@ st.markdown("""
     button[title="Deploy this app"] {display: none;}
     button[kind="header"] {display: none;}
     
-    /* Custom Navbar Styles */
+    /* Custom Navbar Styles - Improved Colors */
     .navbar {
-        background: linear-gradient(90deg, #1f77b4 0%, #ff7f0e 100%);
-        padding: 0.75rem 1rem;
-        border-radius: 0.5rem;
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        padding: 1rem 1.5rem;
+        border-radius: 0.75rem;
         margin-bottom: 2rem;
-        box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+        box-shadow: 0 4px 12px rgba(0,0,0,0.15);
     }
     .navbar-container {
         display: flex;
         justify-content: space-around;
         align-items: center;
         flex-wrap: wrap;
-        gap: 0.5rem;
+        gap: 0.75rem;
     }
     .nav-item {
         color: white;
         text-decoration: none;
-        padding: 0.5rem 1rem;
+        padding: 0.6rem 1.2rem;
         border-radius: 0.5rem;
         transition: all 0.3s ease;
         font-weight: 500;
         cursor: pointer;
         border: 2px solid transparent;
+        background: rgba(255,255,255,0.1);
+        backdrop-filter: blur(10px);
     }
     .nav-item:hover {
-        background-color: rgba(255,255,255,0.2);
+        background-color: rgba(255,255,255,0.25);
         transform: translateY(-2px);
-        border-color: rgba(255,255,255,0.3);
+        border-color: rgba(255,255,255,0.5);
+        box-shadow: 0 4px 8px rgba(0,0,0,0.2);
     }
     .nav-item.active {
-        background-color: rgba(255,255,255,0.3);
+        background-color: rgba(255,255,255,0.9);
+        color: #667eea;
         border-color: white;
         font-weight: bold;
+        box-shadow: 0 4px 12px rgba(255,255,255,0.3);
     }
     
     .main-header {
         font-size: 2.5rem;
         font-weight: bold;
-        background: linear-gradient(90deg, #1f77b4 0%, #ff7f0e 100%);
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
         -webkit-background-clip: text;
         -webkit-text-fill-color: transparent;
         text-align: center;
@@ -107,7 +112,7 @@ st.markdown("""
     }
     .stButton>button {
         width: 100%;
-        background: linear-gradient(90deg, #1f77b4 0%, #ff7f0e 100%);
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
         color: white;
         font-weight: bold;
         border: none;
@@ -126,13 +131,13 @@ st.markdown("""
         color: white;
         text-align: center;
         margin: 0.5rem 0;
-        box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+        box-shadow: 0 4px 8px rgba(102, 126, 234, 0.3);
     }
     .info-box {
         background-color: #e8f4f8;
         padding: 0.4rem 0.6rem;
         border-radius: 0.5rem;
-        border-left: 4px solid #1f77b4;
+        border-left: 4px solid #667eea;
         margin: 0.3rem 0;
         display: inline-block;
         width: auto;
@@ -144,7 +149,7 @@ st.markdown("""
         background-color: #d4edda;
         padding: 0.4rem 0.6rem;
         border-radius: 0.5rem;
-        border-left: 4px solid #28a745;
+        border-left: 4px solid #10b981;
         margin: 0.3rem 0;
         display: inline-block;
         width: auto;
@@ -269,11 +274,21 @@ def load_trained_models():
     """Load list of trained model checkpoints"""
     output_dir = "./fine_tuned_adapter"
     models = []
+    
+    # Check if the main output dir has a trained model
     if os.path.exists(output_dir):
+        adapter_file = os.path.join(output_dir, "adapter_model.safetensors")
+        if os.path.exists(adapter_file):
+            models.append("fine_tuned_adapter")  # The main trained model
+        
+        # Also check for checkpoint subdirectories
         for item in os.listdir(output_dir):
             item_path = os.path.join(output_dir, item)
-            if os.path.isdir(item_path) and "Checkpoint" in item:
-                models.append(item)
+            if os.path.isdir(item_path) and ("checkpoint" in item.lower() or "Checkpoint" in item):
+                # Verify it has adapter files
+                if os.path.exists(os.path.join(item_path, "adapter_model.safetensors")):
+                    models.append(f"fine_tuned_adapter/{item}")
+    
     return sorted(models, reverse=True)
 
 def load_downloaded_models():
@@ -499,7 +514,7 @@ def run_training(config):
     # Use Python with -u flag for unbuffered output
     python_exe = sys.executable
     cmd = [
-        python_exe, "-u", "finetune.py",  # -u flag for unbuffered output
+        python_exe, "-u", "train_basic.py",  # Use the working training script
         "--model-name", config["model_name"],
         "--data-path", config["data_path"],
         "--output-dir", config["output_dir"],
@@ -512,6 +527,7 @@ def run_training(config):
         "--max-seq-length", str(config["max_seq_length"]),
     ]
     
+    # Add optional max_examples if specified
     if config.get("max_examples"):
         cmd.extend(["--max-examples", str(config["max_examples"])])
     
@@ -534,9 +550,9 @@ def run_training(config):
     
     try:
         # Verify finetune.py exists
-        finetune_path = os.path.join(working_dir, "finetune.py")
+        finetune_path = os.path.join(working_dir, "train_basic.py")
         if not os.path.exists(finetune_path):
-            error_msg = f"❌ Error: finetune.py not found at {finetune_path}"
+            error_msg = f"❌ Error: train_basic.py not found at {finetune_path}"
             log_file.write(error_msg + "\n")
             log_file.flush()
             log_file.close()
@@ -740,13 +756,18 @@ def run_training(config):
             return_code = 0
         
         # Add final status message to log file BEFORE closing
-        log_file.write("=" * 60 + "\n")
-        if return_code == 0:
-            log_file.write("✅ Training completed successfully!\n")
-        else:
-            log_file.write(f"❌ Training failed with exit code {return_code}\n")
-        log_file.flush()
-        log_file.close()
+        try:
+            if not log_file.closed:
+                log_file.write("=" * 60 + "\n")
+                if return_code == 0:
+                    log_file.write("✅ Training completed successfully!\n")
+                else:
+                    log_file.write(f"❌ Training failed with exit code {return_code}\n")
+                log_file.flush()
+                log_file.close()
+        except ValueError:
+            # File already closed, that's okay
+            pass
     
     except Exception as e:
         error_msg = f"❌ Error starting training: {str(e)}"
@@ -1253,12 +1274,12 @@ def main():
                     # Pre-flight checks
                     import sys
                     python_exe = sys.executable
-                    finetune_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "finetune.py")
+                    train_script_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "train_basic.py")
                     
                     # Verify files exist
                     checks_passed = True
-                    if not os.path.exists(finetune_path):
-                        st.error(f"❌ finetune.py not found at: {finetune_path}")
+                    if not os.path.exists(train_script_path):
+                        st.error(f"❌ train_basic.py not found at: {train_script_path}")
                         checks_passed = False
                     if not os.path.exists(data_path):
                         st.error(f"❌ Dataset not found at: {data_path}")
@@ -1275,7 +1296,7 @@ def main():
                     st.session_state.training_logs.append("=" * 60)
                     st.session_state.training_logs.append("🚀 Starting training...")
                     st.session_state.training_logs.append(f"Python: {python_exe}")
-                    st.session_state.training_logs.append(f"Script: {finetune_path}")
+                    st.session_state.training_logs.append(f"Script: {train_script_path}")
                     st.session_state.training_logs.append(f"Model: {model_name}")
                     st.session_state.training_logs.append(f"Dataset: {data_path}")
                     st.session_state.training_logs.append(f"Epochs: {epochs}")
@@ -1290,7 +1311,7 @@ def main():
                             f.write(f"Config: {config}\n")
                             f.write(f"Python: {sys.executable}\n")
                             f.write(f"Working dir: {os.path.dirname(os.path.abspath(__file__))}\n")
-                            f.write(f"Finetune.py exists: {os.path.exists(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'finetune.py'))}\n")
+                            f.write(f"train_basic.py exists: {os.path.exists(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'train_basic.py'))}\n")
                             f.write(f"Dataset exists: {os.path.exists(data_path)}\n")
                     except Exception as e:
                         st.error(f"Failed to write debug file: {e}")
