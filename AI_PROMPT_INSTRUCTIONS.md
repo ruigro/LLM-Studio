@@ -137,6 +137,24 @@ Assistant: "Laser hair removal costs vary by treatment area! Small areas like up
 ✓ Appropriate use of questions to engage
 ✓ Logical flow of information
 
+#### Grammar Variety Guidelines
+To maximize linguistic diversity and create more natural training data:
+
+**Customer Message Variations:**
+- Opening phrases: Mix "I'm looking for", "I'm searching for", "I need help with", "Can you help me find"
+- Problem statements: Alternate "I have", "I've got", "I'm dealing with", "I'm experiencing"
+- Observations: Vary "I've noticed", "I noticed", "Lately I've seen", "I've observed"
+- Intent expressions: Switch between "I want to", "I'd like to", "I'm hoping to", "I need to"
+- Questions: Use "Can you", "Could you", "Would you", "Are you able to"
+
+**Assistant Response Variations:**
+- Acknowledgments: "I'd be happy to help", "I'm here to help", "Let me help", "Great question"
+- Recommendations: "I'd recommend", "I'd suggest", "Consider trying", "You might want to try", "Check out"
+- Closing questions: "Would you like to know", "Want to know", "Interested in learning", "Curious about"
+- Transitions: "Additionally" → "Also", "Furthermore", "Plus"; "However" → "Though", "That said", "But"
+
+**Key Principle:** Vary phrasing while preserving meaning, tone, and professionalism. Avoid repetitive patterns across interactions.
+
 ### Content Quality
 ✓ **Accurate**: All information must be factually correct
 ✓ **Specific**: Reference actual products/treatments from datasets
