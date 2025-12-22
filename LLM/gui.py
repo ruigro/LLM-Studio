@@ -35,10 +35,16 @@ except ImportError:
 try:
     import torch
     TORCH_AVAILABLE = True
+    # Debug: Print torch info to console
+    print(f"[DEBUG] PyTorch version: {torch.__version__}")
+    print(f"[DEBUG] CUDA available: {torch.cuda.is_available()}")
+    if torch.cuda.is_available():
+        print(f"[DEBUG] GPU: {torch.cuda.get_device_name(0)}")
 except Exception as e:
     TORCH_AVAILABLE = False
     torch = None
     TORCH_ERROR = str(e)
+    print(f"[DEBUG] PyTorch import failed: {e}")
 
 # Page configuration
 st.set_page_config(
@@ -238,23 +244,32 @@ if 'training_process' not in st.session_state:
     st.session_state.training_process = None
 if 'training_thread' not in st.session_state:
     st.session_state.training_thread = None
-if 'gpu_available' not in st.session_state:
-    if TORCH_AVAILABLE and torch is not None:
-        try:
-            st.session_state.gpu_available = torch.cuda.is_available()
-        except:
-            st.session_state.gpu_available = False
-    else:
-        st.session_state.gpu_available = False
-
-if 'gpu_name' not in st.session_state:
-    if st.session_state.gpu_available and TORCH_AVAILABLE and torch is not None:
-        try:
-            st.session_state.gpu_name = torch.cuda.get_device_name(0)
-        except:
+# Always re-check GPU availability (don't cache, in case PyTorch was updated)
+# This ensures GPU detection works even after PyTorch is upgraded from CPU to CUDA version
+if TORCH_AVAILABLE and torch is not None:
+    try:
+        gpu_available = torch.cuda.is_available()
+        print(f"[DEBUG] GPU check - TORCH_AVAILABLE: {TORCH_AVAILABLE}, torch: {torch is not None}, gpu_available: {gpu_available}")
+        st.session_state.gpu_available = gpu_available
+        if gpu_available:
+            try:
+                gpu_name = torch.cuda.get_device_name(0)
+                st.session_state.gpu_name = gpu_name
+                print(f"[DEBUG] GPU name set to: {gpu_name}")
+            except Exception as e:
+                st.session_state.gpu_name = "GPU (Unknown)"
+                print(f"[DEBUG] Failed to get GPU name: {e}")
+        else:
             st.session_state.gpu_name = "CPU Only"
-    else:
+            print(f"[DEBUG] GPU not available, setting CPU Only")
+    except Exception as e:
+        st.session_state.gpu_available = False
         st.session_state.gpu_name = "CPU Only"
+        print(f"[DEBUG] Exception during GPU check: {e}")
+else:
+    st.session_state.gpu_available = False
+    st.session_state.gpu_name = "CPU Only"
+    print(f"[DEBUG] PyTorch not available - TORCH_AVAILABLE: {TORCH_AVAILABLE}, torch: {torch is not None}")
 
 if 'current_page' not in st.session_state:
     st.session_state.current_page = "🏠 Home"
@@ -1476,6 +1491,28 @@ def main():
         
         with col2:
             st.markdown("### 📊 System Status")
+            
+            # Force refresh GPU detection button
+            if st.button("🔄 Refresh GPU Detection", help="Re-detect GPU availability"):
+                # Force re-check GPU
+                if TORCH_AVAILABLE and torch is not None:
+                    try:
+                        gpu_available = torch.cuda.is_available()
+                        st.session_state.gpu_available = gpu_available
+                        if gpu_available:
+                            try:
+                                st.session_state.gpu_name = torch.cuda.get_device_name(0)
+                            except:
+                                st.session_state.gpu_name = "GPU (Unknown)"
+                        else:
+                            st.session_state.gpu_name = "CPU Only"
+                    except Exception as e:
+                        st.session_state.gpu_available = False
+                        st.session_state.gpu_name = "CPU Only"
+                else:
+                    st.session_state.gpu_available = False
+                    st.session_state.gpu_name = "CPU Only"
+                st.rerun()
             
             # Device info
             if not TORCH_AVAILABLE:
