@@ -1277,6 +1277,16 @@ class MainWindow(QMainWindow):
         self.train_log.setMaximumBlockCount(10000)
         self.train_log.setMaximumHeight(300)
         self.train_log.setVisible(False)
+        self.train_log.setStyleSheet("""
+            QPlainTextEdit {
+                background-color: #1a1a1a;
+                color: #00ff00;
+                font-family: 'Consolas', 'Courier New', monospace;
+                font-size: 11pt;
+                border: 1px solid #333;
+                border-radius: 4px;
+            }
+        """)
         right_layout.addWidget(self.train_log)
         
         right_layout.addStretch(1)
@@ -1486,16 +1496,41 @@ class MainWindow(QMainWindow):
 
         cmd = build_finetune_cmd(cfg)
 
+        # Show logs immediately
+        if not self.train_log.isVisible():
+            self.logs_expand_btn.setChecked(True)
+            self.train_log.setVisible(True)
+            self.logs_expand_btn.setText("▲ Hide Logs")
+
         proc = QProcess(self)
         proc.setProgram(cmd[0])
         proc.setArguments(cmd[1:])
         proc.setWorkingDirectory(str(self.root))
         proc.setProcessChannelMode(QProcess.MergedChannels)
         proc.readyReadStandardOutput.connect(lambda: self._append_proc_output(proc, self.train_log))
+        proc.errorOccurred.connect(lambda err: self._on_training_error(proc, err))
         proc.finished.connect(self._train_finished)
 
-        self.train_log.appendPlainText(">> " + " ".join(cmd))
+        self.train_log.clear()
+        self.train_log.appendPlainText("=== Starting Training ===")
+        self.train_log.appendPlainText(f"Command: {' '.join(cmd)}")
+        self.train_log.appendPlainText("=" * 50)
+        
+        # Enable/disable buttons
+        self.train_start.setEnabled(False)
+        self.train_stop.setEnabled(True)
+        
+        # Start process
         proc.start()
+        
+        if not proc.waitForStarted(3000):
+            self.train_log.appendPlainText("\n[ERROR] Failed to start training process!")
+            self.train_start.setEnabled(True)
+            self.train_stop.setEnabled(False)
+            return
+            
+        self.train_proc = proc
+        self.train_log.appendPlainText("[INFO] Training process started successfully")
         if not proc.waitForStarted(5000):
             QMessageBox.critical(self, "Training", "Failed to start training process.")
             return
@@ -1503,6 +1538,21 @@ class MainWindow(QMainWindow):
         self.train_proc = proc
         self.train_start.setEnabled(False)
         self.train_stop.setEnabled(True)
+
+    def _on_training_error(self, proc, error):
+        """Handle training process errors"""
+        error_msgs = {
+            QProcess.FailedToStart: "Failed to start (check if Python is installed)",
+            QProcess.Crashed: "Process crashed",
+            QProcess.Timedout: "Process timed out",
+            QProcess.WriteError: "Write error",
+            QProcess.ReadError: "Read error",
+            QProcess.UnknownError: "Unknown error"
+        }
+        error_msg = error_msgs.get(error, f"Error code: {error}")
+        self.train_log.appendPlainText(f"\n[ERROR] {error_msg}")
+        self.train_start.setEnabled(True)
+        self.train_stop.setEnabled(False)
 
     def _stop_training(self) -> None:
         if self.train_proc is None:
