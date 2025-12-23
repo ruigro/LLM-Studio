@@ -54,93 +54,185 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Custom CSS for beautiful styling
+# Custom CSS - Modular Architecture
 st.markdown("""
 <style>
-    /* FORCE 30px top spacing - multiple selectors for maximum specificity */
-    section.main > div.block-container {
-        padding-top: 30px !important;
-        margin-top: 0 !important;
+    /* ============================================
+       SECTION A: HIDE STREAMLIT DEFAULT ELEMENTS
+       ============================================ */
+    
+    /* Collapse Streamlit's default header to 0px and remove ALL top padding/margin */
+    html, body {
+        margin: 0 !important;
+        padding: 0 !important;
     }
-    .stApp section.main > div {
-        padding-top: 30px !important;
-        margin-top: 0 !important;
+    header[data-testid="stHeader"] {
+        height: 0 !important;
+        min-height: 0 !important;
+        max-height: 0 !important;
+        padding: 0 !important;
+        margin: 0 !important;
+        visibility: hidden !important;
+        display: block !important;
+        overflow: hidden !important;
     }
-    div.block-container {
-        padding-top: 30px !important;
+    /* Remove ALL top spacing/padding */
+    .stApp, .stAppViewContainer, .main, .block-container {
         margin-top: 0 !important;
+        padding-top: 0 !important;
     }
-    section[data-testid="stMain"] > div {
-        padding-top: 30px !important;
-        margin-top: 0 !important;
+    /* Pull the first block up further to kill residual gap */
+    .main .block-container > div:first-child {
+        margin-top: -2.5rem !important;
+        padding-top: 0 !important;
     }
-    .main > div:first-child {
-        padding-top: 30px !important;
+    section[data-testid="stSidebar"] + div {
+        padding-top: 0 !important;
         margin-top: 0 !important;
     }
     
-    /* Hide Streamlit deploy button and menu but keep sidebar toggle */
+    /* Hide Streamlit menu and footer */
     #MainMenu {visibility: hidden;}
     footer {visibility: hidden;}
-    header[data-testid="stHeader"] {
-        visibility: visible !important;
-        display: block !important;
-    }
     button[title="View app source"] {display: none;}
     button[title="Deploy this app"] {display: none;}
-    button[kind="header"] {display: none;}
-    /* Keep sidebar toggle button visible */
-    button[kind="header"][data-testid*="baseButton-header"] {
-        display: block !important;
-    }
+    
+    /* Keep sidebar toggle button ALWAYS visible and functional */
     [data-testid="collapsedControl"] {
-        display: block !important;
+        display: flex !important;
+        align-items: center !important;
+        justify-content: center !important;
         visibility: visible !important;
+        z-index: 999999 !important;
+        opacity: 1 !important;
+        position: fixed !important;
+        left: 8px !important;
+        top: 50% !important;
+        transform: translateY(-50%) !important;
+        pointer-events: auto !important;
+        width: 32px !important;
+        height: 72px !important;
+        background: rgba(102, 126, 234, 0.95) !important;
+        color: white !important;
+        border-radius: 8px !important;
+        border: 1px solid rgba(255,255,255,0.3) !important;
+        box-shadow: 0 4px 10px rgba(0,0,0,0.35) !important;
     }
     
-    /* Custom Navbar Styles - Improved Colors */
-    .navbar {
+    /* Ensure sidebar toggle button is visible when collapsed */
+    button[kind="header"][data-testid="baseButton-header"] {
+        display: block !important;
+        visibility: visible !important;
+        z-index: 999999 !important;
+    }
+    
+    /* Fix sidebar toggle arrow visibility */
+    [data-testid="stSidebarNav"] button,
+    button[aria-label*="sidebar"] {
+        display: block !important;
+        visibility: visible !important;
+        z-index: 999999 !important;
+    }
+    
+    
+    /* ============================================
+       SECTION B: CUSTOM NAVBAR STYLING
+       ============================================ */
+    
+    /* Fixed navbar container at top - adjusts for sidebar */
+    .custom-navbar {
+        position: relative;
+        top: 0;
+        left: 0;
+        right: 0;
+        width: 100%;
+        height: 70px;
         background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-        padding: 1rem 1.5rem;
-        border-radius: 0.75rem;
-        margin-bottom: 2rem;
-        box-shadow: 0 4px 12px rgba(0,0,0,0.15);
-    }
-    .navbar-container {
         display: flex;
-        justify-content: space-around;
         align-items: center;
-        flex-wrap: wrap;
-        gap: 0.75rem;
+        padding: 0 2rem 0 1rem;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.25);
+        z-index: 999999;
+        transition: padding-left 0.3s ease;
     }
-    .nav-item {
-        color: #ffffff !important;
-        text-decoration: none !important;
-        padding: 0.6rem 1.2rem !important;
-        border-radius: 0.5rem !important;
-        transition: all 0.3s ease !important;
-        font-weight: 700 !important;
-        cursor: pointer !important;
-        border: 2px solid rgba(255,255,255,0.4) !important;
-        background: rgba(255,255,255,0.2) !important;
-        backdrop-filter: blur(10px) !important;
-        text-shadow: 0 2px 4px rgba(0,0,0,0.5) !important;
-        font-size: 1rem !important;
+    
+    /* Adjust navbar when sidebar is open */
+    section[data-testid="stSidebar"]:not([aria-hidden="true"]) ~ div .custom-navbar {
+        padding-left: calc(21rem + 1rem);
     }
-    .nav-item:hover {
-        background-color: rgba(255,255,255,0.3) !important;
-        transform: translateY(-2px) !important;
-        border-color: rgba(255,255,255,0.6) !important;
-        box-shadow: 0 4px 8px rgba(0,0,0,0.3) !important;
+    
+    /* Navbar title styling - beautiful and prominent */
+    .navbar-title {
+        color: white;
+        font-size: 1.75rem;
+        font-weight: 800;
+        margin-right: 2rem;
+        text-shadow: 0 3px 6px rgba(0,0,0,0.4);
+        white-space: nowrap;
+        letter-spacing: 0.5px;
+        background: linear-gradient(to right, #ffffff, #f0f0ff);
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+        background-clip: text;
     }
-    .nav-item.active {
-        background-color: #ffffff !important;
-        color: #1e293b !important;
-        border-color: #ffffff !important;
-        font-weight: 900 !important;
-        box-shadow: 0 4px 12px rgba(255,255,255,0.6) !important;
-        text-shadow: none !important;
+    
+    /* Navigation buttons container with exact 6px spacing */
+    .navbar-buttons {
+        display: flex;
+        gap: 6px;
+        align-items: center;
+        flex-wrap: nowrap;
     }
+    
+    /* Adjust main content padding to account for fixed navbar */
+    .main > div.block-container {
+        padding-top: 90px !important;
+    }
+    
+    
+    /* ============================================
+       SECTION C: NAVBAR BUTTON STYLING
+       ============================================ */
+    
+    /* Base button style - modern and sleek */
+    .navbar-btn {
+        padding: 0.5rem 1rem;
+        border-radius: 0.75rem;
+        background: rgba(255,255,255,0.15);
+        border: 2px solid rgba(255,255,255,0.3);
+        color: white;
+        font-weight: 700;
+        cursor: pointer;
+        transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+        text-shadow: 0 2px 3px rgba(0,0,0,0.4);
+        font-size: 0.95rem;
+        white-space: nowrap;
+        backdrop-filter: blur(8px);
+    }
+    
+    /* Button hover state - smooth and elegant */
+    .navbar-btn:hover {
+        background: rgba(255,255,255,0.25);
+        transform: translateY(-2px);
+        border-color: rgba(255,255,255,0.5);
+        box-shadow: 0 4px 12px rgba(0,0,0,0.2);
+    }
+    
+    /* Active button state - clear and prominent */
+    .navbar-btn.active {
+        background: linear-gradient(135deg, #ffffff 0%, #f8f9fa 100%);
+        color: #667eea;
+        border-color: white;
+        font-weight: 900;
+        box-shadow: 0 4px 16px rgba(255,255,255,0.4);
+        text-shadow: none;
+        transform: translateY(-1px);
+    }
+    
+    
+    /* ============================================
+       SECTION D: GENERAL PAGE STYLING
+       ============================================ */
     
     .main-header {
         font-size: 2.5rem;
@@ -150,9 +242,11 @@ st.markdown("""
         -webkit-text-fill-color: transparent;
         text-align: center;
         margin-bottom: 1rem;
-        margin-top: 0;
+        margin-top: -10px !important;
         padding: 0.5rem 1rem;
+        padding-top: 0 !important;
     }
+    
     .stButton>button {
         width: 100%;
         background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
@@ -163,10 +257,12 @@ st.markdown("""
         padding: 0.5rem 1rem;
         transition: all 0.3s ease;
     }
+    
     .stButton>button:hover {
         transform: translateY(-2px);
         box-shadow: 0 4px 8px rgba(0,0,0,0.2);
     }
+    
     .metric-card {
         background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
         padding: 1.5rem;
@@ -176,6 +272,7 @@ st.markdown("""
         margin: 0.5rem 0;
         box-shadow: 0 4px 8px rgba(102, 126, 234, 0.3);
     }
+    
     .info-box {
         background-color: #e8f4f8;
         padding: 0.4rem 0.6rem;
@@ -188,6 +285,7 @@ st.markdown("""
         line-height: 1.3;
         font-size: 0.9em;
     }
+    
     .success-box {
         background-color: #d4edda;
         color: #155724;
@@ -201,9 +299,11 @@ st.markdown("""
         line-height: 1.3;
         font-size: 0.9em;
     }
+    
     .success-box strong {
         color: #155724;
     }
+    
     .warning-box {
         background-color: #fff3cd;
         padding: 1rem;
@@ -211,6 +311,7 @@ st.markdown("""
         border-left: 4px solid #ffc107;
         margin: 1rem 0;
     }
+    
     .error-box {
         background-color: #f8d7da;
         padding: 1rem;
@@ -218,6 +319,7 @@ st.markdown("""
         border-left: 4px solid #dc3545;
         margin: 1rem 0;
     }
+    
     .model-card {
         border: 1px solid #ddd;
         border-radius: 0.5rem;
@@ -226,6 +328,7 @@ st.markdown("""
         background-color: #f9f9f9;
         transition: all 0.3s ease;
     }
+    
     .model-card:hover {
         box-shadow: 0 4px 8px rgba(0,0,0,0.1);
         transform: translateY(-2px);
@@ -308,28 +411,32 @@ MODEL_PRESETS = {
         "size": "~35 GB",
         "description": "Latest Llama 3.3 70B model with enhanced capabilities",
         "tags": ["llama", "70b", "instruct", "4-bit"],
-        "category": "newest"
+        "category": "newest",
+        "capabilities": ["text"]
     },
     "Qwen2.5 72B Instruct (4-bit)": {
         "id": "unsloth/Qwen2.5-72B-Instruct-bnb-4bit",
         "size": "~36 GB",
         "description": "State-of-the-art Qwen 2.5 72B model",
         "tags": ["qwen", "72b", "instruct", "4-bit", "multilingual"],
-        "category": "newest"
+        "category": "newest",
+        "capabilities": ["text", "reasoning"]
     },
     "Gemma 2 27B Instruct (4-bit)": {
         "id": "unsloth/gemma-2-27b-it-bnb-4bit",
         "size": "~14 GB",
         "description": "Google's Gemma 2 27B instruction-tuned model",
         "tags": ["gemma", "27b", "instruct", "4-bit"],
-        "category": "newest"
+        "category": "newest",
+        "capabilities": ["text"]
     },
     "Phi-4 14B (4-bit)": {
         "id": "unsloth/Phi-4-bnb-4bit",
         "size": "~7 GB",
         "description": "Microsoft's latest Phi-4 14B model",
         "tags": ["phi", "14b", "4-bit"],
-        "category": "newest"
+        "category": "newest",
+        "capabilities": ["text"]
     },
     
     # === 20 MOST POPULAR MODELS ===
@@ -337,25 +444,29 @@ MODEL_PRESETS = {
         "id": "unsloth/llama-3.2-1b-instruct-unsloth-bnb-4bit",
         "size": "~800 MB",
         "description": "Ultra-lightweight 1B model, fastest training",
-        "tags": ["llama", "1b", "instruct", "4-bit"]
+        "tags": ["llama", "1b", "instruct", "4-bit"],
+        "capabilities": ["text"]
     },
     "Llama 3.2 3B Instruct (4-bit)": {
         "id": "unsloth/llama-3.2-3b-instruct-unsloth-bnb-4bit",
         "size": "~2.5 GB",
         "description": "Fast 3B parameter model, great for quick experiments",
-        "tags": ["llama", "3b", "instruct", "4-bit"]
+        "tags": ["llama", "3b", "instruct", "4-bit"],
+        "capabilities": ["text"]
     },
     "Llama 3.1 8B Instruct (4-bit)": {
         "id": "unsloth/llama-3.1-8b-instruct-unsloth-bnb-4bit",
         "size": "~5 GB",
         "description": "Powerful 8B model with better performance",
-        "tags": ["llama", "8b", "instruct", "4-bit"]
+        "tags": ["llama", "8b", "instruct", "4-bit"],
+        "capabilities": ["text"]
     },
     "Llama 3.1 70B Instruct (4-bit)": {
         "id": "unsloth/Meta-Llama-3.1-70B-Instruct-bnb-4bit",
         "size": "~35 GB",
         "description": "Powerful Llama 3.1 70B model",
-        "tags": ["llama", "70b", "instruct", "4-bit"]
+        "tags": ["llama", "70b", "instruct", "4-bit"],
+        "capabilities": ["text"]
     },
     "Mistral 7B Instruct v0.3 (4-bit)": {
         "id": "unsloth/mistral-7b-instruct-v0.3-bnb-4bit",
@@ -385,13 +496,15 @@ MODEL_PRESETS = {
         "id": "unsloth/Qwen2.5-14B-Instruct-bnb-4bit",
         "size": "~8 GB",
         "description": "Qwen 2.5 14B with strong reasoning",
-        "tags": ["qwen", "14b", "instruct", "4-bit", "multilingual"]
+        "tags": ["qwen", "14b", "instruct", "4-bit", "multilingual"],
+        "capabilities": ["text", "reasoning"]
     },
     "Qwen 2.5 32B Instruct (4-bit)": {
         "id": "unsloth/Qwen2.5-32B-Instruct-bnb-4bit",
         "size": "~18 GB",
         "description": "Large Qwen 2.5 32B model",
-        "tags": ["qwen", "32b", "instruct", "4-bit", "multilingual"]
+        "tags": ["qwen", "32b", "instruct", "4-bit", "multilingual"],
+        "capabilities": ["text", "reasoning"]
     },
     "Gemma 2 2B Instruct (4-bit)": {
         "id": "unsloth/gemma-2-2b-it-bnb-4bit",
@@ -427,7 +540,8 @@ MODEL_PRESETS = {
         "id": "unsloth/DeepSeek-V2.5-bnb-4bit",
         "size": "~10 GB",
         "description": "DeepSeek V2.5 with enhanced reasoning",
-        "tags": ["deepseek", "v2.5", "4-bit"]
+        "tags": ["deepseek", "v2.5", "4-bit"],
+        "capabilities": ["text", "reasoning"]
     },
     "Mixtral 8x7B Instruct (4-bit)": {
         "id": "unsloth/Mixtral-8x7B-Instruct-v0.1-bnb-4bit",
@@ -809,7 +923,7 @@ def check_parameter_safety(param_name, value, recommended_value, model_profile):
     return "acceptable", "Within acceptable range"
 
 def detect_model_capabilities(model_id=None, model_name=None, model_path=None):
-    """Detect model capabilities (vision, tools, text) from model ID, name, or config"""
+    """Detect model capabilities (vision, tools, text, reasoning) from model ID, name, or config"""
     capabilities = []
     
     # Check model path if provided
@@ -831,6 +945,10 @@ def detect_model_capabilities(model_id=None, model_name=None, model_path=None):
                     # Tools detection
                     if any(keyword in model_type + arch_str for keyword in ["tool", "function", "agent"]):
                         capabilities.append("tools")
+                    
+                    # Reasoning detection
+                    if any(keyword in model_type + arch_str for keyword in ["reasoning", "r1", "o1", "deepseek", "cot"]):
+                        capabilities.append("reasoning")
             except Exception:
                 pass
     
@@ -842,12 +960,16 @@ def detect_model_capabilities(model_id=None, model_name=None, model_path=None):
         check_str += model_name.lower() + " "
     
     # Vision keywords
-    if not "vision" in capabilities and any(keyword in check_str for keyword in ["vision", "vl", "multimodal", "llava", "clip"]):
+    if "vision" not in capabilities and any(keyword in check_str for keyword in ["vision", "vl", "multimodal", "llava", "clip"]):
         capabilities.append("vision")
     
     # Tools keywords
-    if not "tools" in capabilities and any(keyword in check_str for keyword in ["tool", "function-calling", "function_calling", "agent"]):
+    if "tools" not in capabilities and any(keyword in check_str for keyword in ["tool", "function-calling", "function_calling", "agent"]):
         capabilities.append("tools")
+    
+    # Reasoning keywords
+    if "reasoning" not in capabilities and any(keyword in check_str for keyword in ["reasoning", "r1", "deepseek-r1", "o1", "chain-of-thought", "cot", "-reasoning"]):
+        capabilities.append("reasoning")
     
     # Default to text if no special capabilities
     if not capabilities:
@@ -862,9 +984,66 @@ def get_capability_icons(capabilities):
         icons.append("👁️")
     if "tools" in capabilities:
         icons.append("🔧")
+    if "reasoning" in capabilities:
+        icons.append("🧠")
     if "text" in capabilities and len(capabilities) == 1:
         icons.append("📝")
     return " ".join(icons) if icons else "📝"
+
+def fetch_hf_model_overview(model_id):
+    """Fetch model overview from HuggingFace"""
+    if not HF_HUB_AVAILABLE or not model_id:
+        return None
+    
+    try:
+        # Use HfApi to get model info
+        api = HfApi()
+        model_info = api.model_info(model_id, timeout=5.0)
+        
+        overview = {
+            "description": "",
+            "tags": [],
+            "downloads": 0,
+            "likes": 0
+        }
+        
+        # Get model card text (first 500 chars)
+        if hasattr(model_info, 'cardData') and model_info.cardData:
+            card_data = model_info.cardData
+            if isinstance(card_data, dict):
+                overview["description"] = str(card_data.get("model_description", ""))[:500]
+        
+        # Get tags
+        if hasattr(model_info, 'tags') and model_info.tags:
+            overview["tags"] = model_info.tags[:10]  # Limit to 10 tags
+        
+        # Get downloads and likes
+        if hasattr(model_info, 'downloads'):
+            overview["downloads"] = model_info.downloads
+        if hasattr(model_info, 'likes'):
+            overview["likes"] = model_info.likes
+        
+        # Try to get README for description if not in card data
+        if not overview["description"]:
+            try:
+                # Get model card content
+                from huggingface_hub import hf_hub_download
+                readme_path = hf_hub_download(repo_id=model_id, filename="README.md", repo_type="model")
+                with open(readme_path, 'r', encoding='utf-8') as f:
+                    readme_content = f.read()
+                    # Extract first paragraph after headers
+                    lines = readme_content.split('\n')
+                    for line in lines:
+                        if line.strip() and not line.startswith('#') and not line.startswith('---') and len(line) > 50:
+                            overview["description"] = line[:500]
+                            break
+            except:
+                pass
+        
+        return overview
+    except Exception as e:
+        print(f"[DEBUG] Error fetching HF model info: {e}")
+        return None
 
 def load_downloaded_models():
     """Load list of downloaded models"""
@@ -1021,68 +1200,122 @@ def stop_training():
         st.warning("⚠️ No training process found to stop")
         st.session_state.training_status = "idle"
 
+def render_custom_navbar(pages, current_page):
+    """
+    Render custom fixed navbar with title and navigation buttons
+    
+    Args:
+        pages: List of tuples (icon, label, page_id)
+        current_page: Currently active page identifier
+    """
+    import streamlit.components.v1 as components
+    
+    # Generate button HTML for each page
+    buttons_html = ""
+    for idx, (icon, label, page_id) in enumerate(pages):
+        # Determine if this button is active
+        active_class = "active" if page_id == current_page else ""
+        # Create button with data attribute for index
+        buttons_html += f'<button class="navbar-btn {active_class}" data-page-index="{idx}">{icon} {label}</button>'
+    
+    # Render navbar HTML in an iframe that breaks out to fix itself to the parent window
+    navbar_html = f'''
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <style>
+            body {{
+                margin: 0;
+                padding: 0;
+                overflow: hidden;
+            }}
+        </style>
+    </head>
+    <body>
+        <script>
+        (function() {{
+            // Create navbar in parent document
+            const parentDoc = window.parent.document;
+            
+            // Remove any existing navbar
+            const existingNavbar = parentDoc.querySelector('#custom-navbar-container');
+            if (existingNavbar) {{
+                existingNavbar.remove();
+            }}
+            
+            // Create navbar container
+            const navbarContainer = parentDoc.createElement('div');
+            navbarContainer.id = 'custom-navbar-container';
+            navbarContainer.style.cssText = 'position: fixed; top: 0; left: 0; right: 0; width: 100%; height: 70px; z-index: 999998;';
+            
+            navbarContainer.innerHTML = `
+                <div class="custom-navbar">
+                    <div class="navbar-title">🤖 LLM Fine-tuning Studio</div>
+                    <div class="navbar-buttons">
+                        {buttons_html}
+                    </div>
+                </div>
+            `;
+            
+            // Insert at the beginning of the body
+            parentDoc.body.insertBefore(navbarContainer, parentDoc.body.firstChild);
+            
+            // Hide the Streamlit navigation buttons (CLEAN approach - just hide them with CSS)
+            const hideNavStyle = parentDoc.createElement('style');
+            hideNavStyle.textContent = `
+                /* Hide ALL Streamlit nav buttons in main content area */
+                div[data-nav-buttons="true"] + div[data-testid="stHorizontalBlock"],
+                div[data-nav-buttons="true"] ~ div[data-testid="stHorizontalBlock"],
+                div[data-nav-buttons="true"] + div,
+                div[data-nav-buttons="true"] ~ div[data-testid="stHorizontalBlock"] {{
+                    display: none !important;
+                    visibility: hidden !important;
+                    height: 0 !important;
+                    overflow: hidden !important;
+                }}
+                
+                /* Also hide the column container that comes right after the marker */
+                div[data-nav-buttons="true"] + * {{
+                    display: none !important;
+                }}
+            `;
+            parentDoc.head.appendChild(hideNavStyle);
+            
+            // Add click handlers - find hidden Streamlit buttons by looking for invisible buttons
+            const navButtons = navbarContainer.querySelectorAll('.navbar-btn');
+            navButtons.forEach((btn, index) => {{
+                btn.onclick = function(e) {{
+                    e.preventDefault();
+                    e.stopPropagation();
+                    
+                    // Find all buttons and filter for hidden ones (offsetHeight === 0)
+                    const allButtons = Array.from(parentDoc.querySelectorAll('button'));
+                    const hiddenButtons = allButtons.filter(b => b.offsetHeight === 0 && b.offsetWidth === 0);
+                    
+                    // Click the hidden button at the corresponding index
+                    if (hiddenButtons[index]) {{
+                        hiddenButtons[index].click();
+                        
+                        // Update active state after a short delay
+                        setTimeout(() => {{
+                            navButtons.forEach(nb => nb.classList.remove('active'));
+                            btn.classList.add('active');
+                        }}, 100);
+                    }}
+                }};
+            }});
+        }})();
+        </script>
+    </body>
+    </html>
+    '''
+    
+    # Use st.components.html with minimal height (iframe will inject into parent)
+    components.html(navbar_html, height=0)
+
+
 def render_navbar():
     """Render custom navigation navbar"""
-    pages = [
-        ("🏠", "Home", "🏠 Home"),
-        ("🎯", "Train", "🎯 Train Model"),
-        ("📥", "Download", "📥 Download Models"),
-        ("🧪", "Test", "🧪 Test Model"),
-        ("✅", "Validate", "✅ Validate Model"),
-        ("📊", "History", "📊 Training History")
-    ]
-    
-    # Add custom CSS for active navbar button styling
-    st.markdown("""
-    <style>
-    /* FORCE WHITE TEXT IN ALL BUTTONS */
-    button {
-        color: #ffffff !important;
-    }
-    button span, button p, button div {
-        color: #ffffff !important;
-    }
-    /* Style active navbar buttons */
-    div[data-testid*="stButton"] > button[kind="primary"] {
-        background: linear-gradient(90deg, #ff7f0e 0%, #ff4500 100%) !important;
-        color: #ffffff !important;
-        font-weight: bold !important;
-        border: 2px solid #ff7f0e !important;
-        box-shadow: 0 4px 8px rgba(255, 127, 14, 0.3) !important;
-        transform: scale(1.02);
-    }
-    div[data-testid*="stButton"] > button[kind="primary"] * {
-        color: #ffffff !important;
-    }
-    /* Style inactive navbar buttons */
-    div[data-testid*="stButton"] > button[kind="secondary"] {
-        background-color: rgba(102, 126, 234, 0.4) !important;
-        color: #ffffff !important;
-        border: 2px solid rgba(255,255,255,0.4) !important;
-    }
-    div[data-testid*="stButton"] > button[kind="secondary"] * {
-        color: #ffffff !important;
-    }
-    div[data-testid*="stButton"] > button[kind="secondary"]:hover {
-        background-color: rgba(102, 126, 234, 0.6) !important;
-        border-color: #ffffff !important;
-        color: #ffffff !important;
-    }
-    </style>
-    """, unsafe_allow_html=True)
-    
-    # Create horizontal navigation using columns
-    cols = st.columns(len(pages))
-    for idx, (icon, label, page_id) in enumerate(pages):
-        with cols[idx]:
-            is_active = st.session_state.current_page == page_id
-            button_type = "primary" if is_active else "secondary"
-            button_label = f"{icon} {label}"
-            
-            if st.button(button_label, key=f"nav_{page_id}", use_container_width=True, type=button_type):
-                st.session_state.current_page = page_id
-                st.rerun()
-
 def run_training_safe(config):
     """Wrapper to catch and log any thread errors"""
     # Create error file immediately in case thread crashes
@@ -1109,24 +1342,40 @@ def run_training_safe(config):
             pass
 
 def run_training(config):
-    """Run training in background thread"""
+    """Run training in background thread - with robust logging even on crashes"""
     import sys
+    import traceback
     
-    # Create log file IMMEDIATELY at the start so errors can be logged
+    # Create log file IMMEDIATELY at the start - use multiple fallbacks
     log_file_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "training_log.txt")
     error_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "training_error.txt")
+    log_file = None
     
-    # Open log file immediately and write startup info
+    # CRITICAL: Wrap EVERYTHING in try-except to ensure logging even on crashes
     try:
-        log_file = open(log_file_path, 'w', encoding='utf-8', buffering=1)
-        log_file.write(f"Training started at {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
-        log_file.write("=" * 60 + "\n")
-        log_file.flush()
-    except Exception as e:
-        # If we can't even create the log file, write to error file
+        # Open log file immediately and write startup info
         try:
-            with open(error_file, 'w', encoding='utf-8') as f:
-                f.write(f"Failed to create log file: {str(e)}\n")
+            log_file = open(log_file_path, 'w', encoding='utf-8', buffering=1)
+            log_file.write(f"=== Training Session Started ===\n")
+            log_file.write(f"Time: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+            log_file.write("=" * 60 + "\n")
+            log_file.flush()
+            print(f"[DEBUG] Log file created successfully at {log_file_path}")
+        except Exception as log_err:
+            # If we can't even create the log file, write to error file
+            try:
+                with open(error_file, 'w', encoding='utf-8') as f:
+                    f.write(f"CRITICAL: Failed to create log file: {str(log_err)}\n")
+                    f.write(f"Traceback:\n{traceback.format_exc()}\n")
+            except:
+                pass
+            return
+    except Exception as critical_err:
+        # Last resort error logging
+        try:
+            with open(error_file, 'a', encoding='utf-8') as f:
+                f.write(f"CRITICAL ERROR in run_training init: {str(critical_err)}\n")
+                f.write(f"Traceback:\n{traceback.format_exc()}\n")
         except:
             pass
         return
@@ -1255,34 +1504,36 @@ def run_training(config):
                 log_file.flush()
                 log_file.close()
                 return
-            
+        
         except FileNotFoundError as e:
             error_msg = f"❌ Error: Python executable not found: {python_exe}"
-            log_file.write(error_msg + "\n")
-            log_file.write(f"Error details: {str(e)}\n")
-            log_file.flush()
-            log_file.close()
+            if log_file and not log_file.closed:
+                log_file.write(error_msg + "\n")
+                log_file.write(f"Error details: {str(e)}\n")
+                log_file.flush()
+                log_file.close()
             return
         except Exception as e:
             error_msg = f"❌ Error starting process: {str(e)}"
-            import traceback
-            tb = traceback.format_exc()
-            log_file.write(error_msg + "\n")
-            log_file.write(tb + "\n")
-            log_file.flush()
-            log_file.close()
+            if log_file and not log_file.closed:
+                log_file.write(error_msg + "\n")
+                log_file.write(f"Traceback:\n{traceback.format_exc()}\n")
+                log_file.flush()
+                log_file.close()
             return
         
         # Verify process is still running before starting output reading
         if process is None or process.poll() is not None:
             error_msg = "❌ Process is None or already finished before output reading started"
-            log_file.write(error_msg + "\n")
-            log_file.flush()
-            log_file.close()
+            if log_file and not log_file.closed:
+                log_file.write(error_msg + "\n")
+                log_file.flush()
+                log_file.close()
             return
         
-        log_file.write("Process is running, starting output reader...\n")
-        log_file.flush()
+        if log_file and not log_file.closed:
+            log_file.write("Process is running, starting output reader...\n")
+            log_file.flush()
         
         # Read output line by line in real-time using a separate thread
         import queue
@@ -1347,7 +1598,7 @@ def run_training(config):
                 line = output_queue.get(timeout=1.0)
                 if line is None:
                     break  # End of output
-                if line:
+                if line and log_file and not log_file.closed:
                     log_file.write(line + "\n")
                     log_file.flush()
                     timeout_count = 0  # Reset timeout on successful read
@@ -1360,7 +1611,7 @@ def run_training(config):
                             line = output_queue.get_nowait()
                             if line is None:
                                 break
-                            if line:
+                            if line and log_file and not log_file.closed:
                                 log_file.write(line + "\n")
                                 log_file.flush()
                     except queue.Empty:
@@ -1370,11 +1621,13 @@ def run_training(config):
                 # If no output for a while, add a status message
                 timeout_count += 1
                 if timeout_count == 5:  # After 5 seconds
-                    log_file.write("⏳ Waiting for output from training process...\n")
-                    log_file.flush()
+                    if log_file and not log_file.closed:
+                        log_file.write("⏳ Waiting for output from training process...\n")
+                        log_file.flush()
                 elif timeout_count >= max_timeout:
-                    log_file.write("⚠️ No output for 60s. Model may be saving (this is normal at the end)...\n")
-                    log_file.flush()
+                    if log_file and not log_file.closed:
+                        log_file.write("⚠️ No output for 60s. Model may be saving (this is normal at the end)...\n")
+                        log_file.flush()
                     # DON'T break - let the process finish naturally!
                     # Model saving is silent and can take time
         
@@ -1387,7 +1640,7 @@ def run_training(config):
         
         # Add final status message to log file BEFORE closing
         try:
-            if not log_file.closed:
+            if log_file and not log_file.closed:
                 log_file.write("=" * 60 + "\n")
                 if return_code == 0:
                     log_file.write("✅ Training completed successfully!\n")
@@ -1395,67 +1648,173 @@ def run_training(config):
                     log_file.write(f"❌ Training failed with exit code {return_code}\n")
                 log_file.flush()
                 log_file.close()
-        except ValueError:
-            # File already closed, that's okay
+        except (ValueError, AttributeError):
+            # File already closed or doesn't exist, that's okay
             pass
     
     except Exception as e:
-        error_msg = f"❌ Error starting training: {str(e)}"
-        import traceback
+        # CRITICAL: Ensure all errors are logged
+        error_msg = f"❌ CRITICAL ERROR in training: {str(e)}"
         tb = traceback.format_exc()
         
         # Write to log file (should exist since we create it at start)
         try:
-            if 'log_file' in locals() and not log_file.closed:
+            if log_file and not log_file.closed:
+                log_file.write("\n" + "=" * 60 + "\n")
                 log_file.write(error_msg + "\n")
                 log_file.write(tb + "\n")
+                log_file.write("=" * 60 + "\n")
                 log_file.flush()
                 log_file.close()
-            else:
-                # If log file doesn't exist or is closed, write to error file
-                with open(error_file, 'w', encoding='utf-8') as f:
-                    f.write(error_msg + "\n")
-                    f.write(tb + "\n")
         except:
-            # Last resort: write to error file
-            try:
-                with open(error_file, 'w', encoding='utf-8') as f:
-                    f.write(error_msg + "\n")
-                    f.write(tb + "\n")
-            except:
-                pass
+            pass
+        
+        # Also write to error file as backup
+        try:
+            with open(error_file, 'w', encoding='utf-8') as f:
+                f.write(error_msg + "\n")
+                f.write(tb + "\n")
+        except:
+            pass
+        
+        print(f"[DEBUG] Training failed with exception: {error_msg}")
+    
+    finally:
+        # ENSURE log file is always closed
+        try:
+            if log_file and not log_file.closed:
+                log_file.write("\n=== Training Session Ended ===\n")
+                log_file.flush()
+                log_file.close()
+        except:
+            pass
 
 def main():
-    # JavaScript to force top padding as fallback
-    st.components.v1.html("""
-    <script>
-        // Force 30px top padding on page load
-        window.addEventListener('load', function() {
-            setTimeout(function() {
-                const selectors = [
-                    'section.main > div.block-container',
-                    '.stApp section.main > div',
-                    'div.block-container',
-                    'section[data-testid="stMain"] > div'
-                ];
-                selectors.forEach(function(selector) {
-                    const elements = document.querySelectorAll(selector);
-                    elements.forEach(function(el) {
-                        el.style.paddingTop = '30px';
-                        el.style.marginTop = '0px';
-                    });
-                });
-            }, 100);
-        });
-    </script>
-    """, height=0)
+    # Dark/Light mode toggle
+    if 'dark_mode' not in st.session_state:
+        st.session_state.dark_mode = True
     
-    st.markdown('<h1 class="main-header">🤖 LLM Fine-tuning Studio</h1>', unsafe_allow_html=True)
+    # Apply dark/light mode CSS (including sidebar)
+    bg_color = "#0e1117" if st.session_state.dark_mode else "#ffffff"
+    text_color = "#fafafa" if st.session_state.dark_mode else "#262730"
+    sidebar_bg = "#262730" if st.session_state.dark_mode else "#f0f2f6"
+    sidebar_text = "#fafafa" if st.session_state.dark_mode else "#262730"
     
-    # Render custom navbar
-    render_navbar()
+    st.markdown(f"""
+    <style>
+        /* Dark/Light mode colors */
+        .stApp {{
+            background-color: {bg_color} !important;
+            color: {text_color} !important;
+        }}
+        .main {{
+            background-color: {bg_color} !important;
+        }}
+        /* Sidebar styling with readable colors */
+        section[data-testid="stSidebar"] {{
+            background-color: {sidebar_bg} !important;
+        }}
+        section[data-testid="stSidebar"] * {{
+            color: {sidebar_text} !important;
+        }}
+        /* Fix any bright backgrounds in sidebar */
+        section[data-testid="stSidebar"] div[data-testid="stMarkdownContainer"],
+        section[data-testid="stSidebar"] .element-container,
+        section[data-testid="stSidebar"] [data-testid="stMetricValue"] {{
+            background-color: transparent !important;
+            color: {sidebar_text} !important;
+        }}
+        /* CRITICAL: Show sidebar toggle button always */
+        button[kind="header"] {{
+            display: block !important;
+            visibility: visible !important;
+            z-index: 999999 !important;
+            opacity: 1 !important;
+        }}
+        [data-testid="collapsedControl"] {{
+            display: block !important;
+            visibility: visible !important;
+            z-index: 999999 !important;
+            left: 0 !important;
+        }}
+    </style>
+    """, unsafe_allow_html=True)
     
-    # Sidebar with system info (keep for reference, but navigation is in navbar)
+    # Title bar with embedded theme toggle button (absolute positioned inside)
+    mode_icon = "🌙" if st.session_state.dark_mode else "☀️"
+    st.markdown(f"""
+    <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); 
+                padding: 1rem 1.5rem; 
+                border-radius: 0.5rem 0.5rem 0 0; 
+                margin-bottom: 0;
+                position: relative;
+                box-shadow: 0 4px 12px rgba(0,0,0,0.15);">
+        <h1 style="color: white; margin: 0; text-align: center; font-size: 1.8rem;">🤖 LLM Fine-tuning Studio</h1>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    # Theme toggle button positioned right after title (on the same line visually via CSS)
+    st.markdown("""<style>
+    /* Position the theme button to overlap with title bar */
+    div[data-testid="column"]:has(button[key="theme_toggle"]) {
+        position: absolute;
+        right: 1.5rem;
+        top: 1rem;
+        z-index: 1000;
+    }
+    </style>""", unsafe_allow_html=True)
+    
+    col1, col2 = st.columns([20, 1])
+    with col2:
+        if st.button(mode_icon, key="theme_toggle", help="Toggle Dark/Light Mode"):
+            st.session_state.dark_mode = not st.session_state.dark_mode
+            st.rerun()
+    
+    # Navigation buttons - no spacing between them
+    pages = [
+        ("🏠", "Home", "🏠 Home"),
+        ("🎯", "Train", "🎯 Train Model"),
+        ("📥", "Download", "📥 Download Models"),
+        ("🧪", "Test", "🧪 Test Model"),
+        ("✅", "Validate", "✅ Validate Model"),
+        ("📊", "History", "📊 Training History")
+    ]
+    
+    # Custom CSS for zero-gap buttons attached to title
+    st.markdown("""
+    <style>
+        /* Remove all spacing between navigation buttons */
+        div[data-testid="column"] {
+            padding: 0 !important;
+        }
+        div[data-testid="stHorizontalBlock"] {
+            gap: 0 !important;
+            margin-top: 0 !important;
+        }
+        /* Make buttons full width with no margin, attach to title */
+        .stButton button {
+            width: 100%;
+            margin: 0 !important;
+            border-radius: 0 !important;
+            border-top: none !important;
+        }
+        /* Remove space between title and buttons */
+        .element-container {
+            margin-bottom: 0 !important;
+        }
+    </style>
+    """, unsafe_allow_html=True)
+    
+    # Render nav bar immediately after title container, zero gap
+    nav_cols = st.columns(len(pages))
+    for idx, (icon, label, page_id) in enumerate(pages):
+        with nav_cols[idx]:
+            if st.button(f"{icon} {label}", key=f"nav_{page_id}", use_container_width=True, 
+                        type="primary" if st.session_state.current_page == page_id else "secondary"):
+                st.session_state.current_page = page_id
+                st.rerun()
+    
+    # Sidebar with system info
     with st.sidebar:
         st.markdown("### 🖥️ System Information")
         
@@ -2138,6 +2497,12 @@ def main():
                 """, unsafe_allow_html=True)
                 
                 type_color = "🟢" if model_profile["type"] == "Instruct" else "🔵"
+                
+                # Detect model capabilities
+                capabilities = detect_model_capabilities(model_id=model_name, model_name=model_name)
+                capability_icons = get_capability_icons(capabilities)
+                capability_text = ", ".join([c.title() for c in capabilities])
+                
                 st.markdown(f"""
                 <div class="profile-card">
                     <div class="profile-title">📊 MODEL PROFILE</div>
@@ -2146,11 +2511,35 @@ def main():
                         <span class="profile-badge">📏 {model_profile["size"]}</span>
                         <span class="profile-badge">⚡ {model_profile["quantization"]}</span>
                     </div>
+                    <div class="profile-info">
+                        <span class="profile-badge">{capability_icons} {capability_text}</span>
+                    </div>
                     <div style="font-size: 0.85rem; margin-top: 0.5rem;">
                         {'✅ Optimized for fine-tuning' if model_profile["type"] == "Instruct" else '⚠️ Base model - needs careful tuning'}
                     </div>
                 </div>
                 """, unsafe_allow_html=True)
+                
+                # Fetch and display HuggingFace model overview - EXPANDED by default
+                st.markdown("---")  # Divider
+                st.markdown("### 📚 Model Details")
+                hf_overview = fetch_hf_model_overview(model_name)
+                if hf_overview:
+                    if hf_overview["description"]:
+                        st.markdown(f"**Description:** {hf_overview['description']}")
+                        st.markdown("")  # Spacing
+                    if hf_overview["tags"]:
+                        tags_str = ", ".join([f"`{tag}`" for tag in hf_overview["tags"][:8]])
+                        st.markdown(f"**Tags:** {tags_str}")
+                    col_a, col_b = st.columns(2)
+                    with col_a:
+                        st.metric("📥 Downloads", f"{hf_overview['downloads']:,}" if hf_overview['downloads'] > 0 else "N/A")
+                    with col_b:
+                        st.metric("❤️ Likes", f"{hf_overview['likes']:,}" if hf_overview['likes'] > 0 else "N/A")
+                    st.markdown(f"[🔗 View Full Details on HuggingFace](https://huggingface.co/{model_name})")
+                else:
+                    st.info("📝 Model overview not available from HuggingFace. The model will still work for training.")
+                st.markdown("---")  # Divider
             
             st.markdown("""
             <style>
@@ -2185,12 +2574,32 @@ def main():
                     st.session_state.smart_max_seq = recommended_params["max_seq_length"]
                     st.rerun()
             
-            # Model Name Input
+            # Model Name Input - Auto-generate based on date, model, dataset, time
+            # Extract model name from selected model
+            model_short_name = "Unknown"
+            if model_name:
+                # Extract last part of model path/ID
+                model_short_name = model_name.split("/")[-1].replace("_", "-")
+                # Shorten if too long
+                if len(model_short_name) > 20:
+                    model_short_name = model_short_name[:20]
+            
+            # Extract dataset name from path
+            dataset_short_name = "data"
+            if data_path:
+                dataset_short_name = os.path.splitext(os.path.basename(data_path))[0]
+                # Shorten if too long
+                if len(dataset_short_name) > 15:
+                    dataset_short_name = dataset_short_name[:15]
+            
+            # Generate auto name: YYmmdd_modelname_datasetname_HHmm
+            auto_name = f"{datetime.now().strftime('%y%m%d')}_{model_short_name}_{dataset_short_name}_{datetime.now().strftime('%H%M')}"
+            
             model_display_name = st.text_input(
                 "📝 Model Name",
-                value=f"My_Model_{datetime.now().strftime('%m%d')}",
-                help="Give your model a memorable name",
-                placeholder="e.g., CustomerService_Bot_v1"
+                value=auto_name,
+                help="Auto-generated: YYmmdd_modelname_datasetname_HHmm",
+                placeholder="e.g., 241223_llama3-8b_customer-data_1430"
             )
             
             col_a, col_b = st.columns(2)
@@ -2392,8 +2801,15 @@ def main():
                         st.balloons()
                         st.rerun()
         
-        # Show training status
-        if st.session_state.training_status == "training":
+        # Show training status and visualization
+        # Show visualization dashboard on Train page whenever dataset and model are configured
+        show_viz = (
+            st.session_state.training_status == "training" or 
+            st.session_state.get("show_training_viz", False) or
+            (model_name and data_path and os.path.exists(data_path if isinstance(data_path, str) else "train_data.jsonl"))
+        )
+        
+        if show_viz:
             # FUTURISTIC TRAINING VISUALIZATION
             
             # CSS for futuristic design
@@ -2462,19 +2878,24 @@ def main():
                 border-radius: 8px;
                 box-shadow: 0 0 15px rgba(102, 126, 234, 0.6);
             }
+            .placeholder-text {
+                color: #a0a0ff;
+                font-style: italic;
+                opacity: 0.7;
+            }
             </style>
             """, unsafe_allow_html=True)
             
             # Training Status Banner
-            st.markdown("""
+            status_text = "⚡ TRAINING IN PROGRESS" if st.session_state.training_status == "training" else "⏳ WAITING FOR TRAINING TO START"
+            st.markdown(f"""
             <div class="training-banner">
-                <div class="training-status">⚡ TRAINING IN PROGRESS</div>
+                <div class="training-status">{status_text}</div>
             </div>
             """, unsafe_allow_html=True)
             
             # Read progress from JSON file
             progress_file = os.path.join(st.session_state.get("output_dir", "./fine_tuned_adapter"), "training_progress.json")
-            st.caption(f"📂 Looking for progress at: {progress_file}")
             progress_data = None
             
             if os.path.exists(progress_file):
@@ -2484,84 +2905,113 @@ def main():
                 except:
                     pass
             
-            if progress_data:
-                # Progress bars
-                epoch = progress_data.get("epoch", 0)
-                total_epochs = progress_data.get("total_epochs", 1)
-                step = progress_data.get("step", 0)
-                total_steps = progress_data.get("total_steps", 1)
-                
-                epoch_progress = epoch / total_epochs if total_epochs > 0 else 0
-                step_progress = step / total_steps if total_steps > 0 else 0
-                
-                # Epoch Progress
-                st.markdown(f"### 🔄 Epoch {int(epoch)}/{int(total_epochs)}")
-                st.progress(epoch_progress)
-                
-                # Step Progress
-                st.markdown(f"### 📊 Step {step}/{total_steps} ({int(step_progress * 100)}%)")
-                st.progress(step_progress)
-                
-                # Time info
-                elapsed = progress_data.get("elapsed_time", 0)
-                eta = progress_data.get("eta_seconds", 0)
-                elapsed_str = f"{elapsed // 60:02d}:{elapsed % 60:02d}"
-                eta_str = f"{eta // 60:02d}:{eta % 60:02d}"
-                
-                col_time1, col_time2 = st.columns(2)
-                with col_time1:
-                    st.metric("⏱️ Elapsed", elapsed_str)
-                with col_time2:
-                    st.metric("⏳ ETA", eta_str)
-                
-                # Metric Cards in 2x2 grid
-                st.markdown("### 📈 Live Metrics")
-                col1, col2 = st.columns(2)
-                
-                with col1:
-                    loss = progress_data.get("loss", 0)
-                    # Color based on loss (red if high, green if low)
-                    loss_color = "#10b981" if loss < 1.0 else ("#ff7f0e" if loss < 2.0 else "#ff4500")
-                    st.markdown(f"""
-                    <div class="metric-card">
-                        <div class="metric-label">Current Loss</div>
-                        <div class="metric-value" style="color: {loss_color};">{loss:.4f}</div>
-                    </div>
-                    """, unsafe_allow_html=True)
-                    
-                    lr = progress_data.get("learning_rate", 0)
-                    st.markdown(f"""
-                    <div class="metric-card">
-                        <div class="metric-label">Learning Rate</div>
-                        <div class="metric-value">{lr:.2e}</div>
-                    </div>
-                    """, unsafe_allow_html=True)
-                
-                with col2:
-                    speed = progress_data.get("samples_per_second", 0)
-                    st.markdown(f"""
-                    <div class="metric-card">
-                        <div class="metric-label">🚀 Speed</div>
-                        <div class="metric-value">{speed:.2f} samples/s</div>
-                    </div>
-                    """, unsafe_allow_html=True)
-                    
-                    gpu_used = progress_data.get("gpu_memory_used_gb", 0)
-                    gpu_total = progress_data.get("gpu_memory_total_gb", 1)
-                    gpu_percent = (gpu_used / gpu_total * 100) if gpu_total > 0 else 0
-                    st.markdown(f"""
-                    <div class="metric-card">
-                        <div class="metric-label">🎮 GPU Memory</div>
-                        <div class="metric-value">{gpu_used:.1f} / {gpu_total:.1f} GB</div>
-                        <div style="margin-top: 0.5rem;">
-                            <div style="background: rgba(255,255,255,0.1); border-radius: 5px; height: 10px;">
-                                <div style="background: linear-gradient(90deg, #667eea, #764ba2); width: {gpu_percent}%; height: 100%; border-radius: 5px;"></div>
-                            </div>
+            # Metrics Grid - show placeholders if no data yet
+            col1, col2, col3, col4 = st.columns(4)
+            
+            with col1:
+                epoch_current = progress_data.get("epoch", 0) if progress_data else 0
+                epoch_total = progress_data.get("total_epochs", 1) if progress_data else 1
+                epoch_display = f"{epoch_current:.1f}/{epoch_total}" if progress_data else "0/0"
+                st.markdown(f"""
+                <div class="metric-card">
+                    <div class="metric-label">📚 Epoch</div>
+                    <div class="metric-value {'placeholder-text' if not progress_data else ''}">{epoch_display}</div>
+                </div>
+                """, unsafe_allow_html=True)
+            
+            with col2:
+                step_current = progress_data.get("step", 0) if progress_data else 0
+                step_total = progress_data.get("total_steps", 0) if progress_data else 0
+                step_display = f"{step_current}/{step_total}" if progress_data else "0/0"
+                st.markdown(f"""
+                <div class="metric-card">
+                    <div class="metric-label">👣 Steps</div>
+                    <div class="metric-value {'placeholder-text' if not progress_data else ''}">{step_display}</div>
+                </div>
+                """, unsafe_allow_html=True)
+            
+            with col3:
+                loss_val = progress_data.get("loss", 0) if progress_data else 0
+                loss_display = f"{loss_val:.4f}" if progress_data else "-.----"
+                st.markdown(f"""
+                <div class="metric-card">
+                    <div class="metric-label">📉 Loss</div>
+                    <div class="metric-value {'placeholder-text' if not progress_data else ''}">{loss_display}</div>
+                </div>
+                """, unsafe_allow_html=True)
+            
+            with col4:
+                eta_seconds = progress_data.get("eta_seconds", 0) if progress_data else 0
+                if progress_data and eta_seconds > 0:
+                    eta_mins = eta_seconds // 60
+                    eta_secs = eta_seconds % 60
+                    eta_display = f"{eta_mins}m {eta_secs}s"
+                else:
+                    eta_display = "--m --s"
+                st.markdown(f"""
+                <div class="metric-card">
+                    <div class="metric-label">⏱️ ETA</div>
+                    <div class="metric-value {'placeholder-text' if not progress_data else ''}">{eta_display}</div>
+                </div>
+                """, unsafe_allow_html=True)
+            
+            # Progress Bar
+            if progress_data and step_total > 0:
+                progress_percent = (step_current / step_total) * 100
+            else:
+                progress_percent = 0
+            
+            st.markdown(f"""
+            <div class="progress-container">
+                <div class="futuristic-progress" style="width: {progress_percent}%;"></div>
+            </div>
+            <div style="text-align: center; color: #a0a0ff; font-size: 1.2rem; margin-top: 0.5rem;">
+                {progress_percent:.1f}% Complete
+            </div>
+            """, unsafe_allow_html=True)
+            
+            # Additional Metrics Grid
+            col5, col6, col7 = st.columns(3)
+            
+            with col5:
+                lr_val = progress_data.get("learning_rate", 0) if progress_data else 0
+                lr_display = f"{lr_val:.2e}" if progress_data else "-.--e-0"
+                st.markdown(f"""
+                <div class="metric-card">
+                    <div class="metric-label">📊 Learning Rate</div>
+                    <div class="metric-value {'placeholder-text' if not progress_data else ''}" style="font-size: 1.8rem;">{lr_display}</div>
+                </div>
+                """, unsafe_allow_html=True)
+            
+            with col6:
+                speed_val = progress_data.get("samples_per_second", 0) if progress_data else 0
+                speed_display = f"{speed_val:.2f}" if progress_data else "-.--"
+                st.markdown(f"""
+                <div class="metric-card">
+                    <div class="metric-label">🚀 Speed</div>
+                    <div class="metric-value {'placeholder-text' if not progress_data else ''}" style="font-size: 1.8rem;">{speed_display} samp/s</div>
+                </div>
+                """, unsafe_allow_html=True)
+            
+            with col7:
+                gpu_used = progress_data.get("gpu_memory_used_gb", 0) if progress_data else 0
+                gpu_total = progress_data.get("gpu_memory_total_gb", 24) if progress_data else 24
+                gpu_percent = (gpu_used / gpu_total * 100) if gpu_total > 0 and progress_data else 0
+                gpu_display = f"{gpu_used:.1f}/{gpu_total:.1f} GB" if progress_data else "--/-- GB"
+                st.markdown(f"""
+                <div class="metric-card">
+                    <div class="metric-label">🎮 GPU Memory</div>
+                    <div class="metric-value {'placeholder-text' if not progress_data else ''}" style="font-size: 1.5rem;">{gpu_display}</div>
+                    <div style="margin-top: 0.5rem;">
+                        <div style="background: rgba(255,255,255,0.1); border-radius: 5px; height: 10px;">
+                            <div style="background: linear-gradient(90deg, #667eea, #764ba2); width: {gpu_percent}%; height: 100%; border-radius: 5px;"></div>
                         </div>
                     </div>
-                    """, unsafe_allow_html=True)
-                
-                # Loss History Graph
+                </div>
+                """, unsafe_allow_html=True)
+            
+            # Loss History Graph
+            if progress_data:
                 loss_history = progress_data.get("loss_history", [])
                 if loss_history:
                     st.markdown("### 📉 Loss Over Time")
@@ -2569,13 +3019,17 @@ def main():
                     df = pd.DataFrame(loss_history)
                     st.line_chart(df.set_index("step")["loss"])
             else:
-                st.info("⏳ Waiting for training data...")
+                # Show placeholder chart
+                st.markdown("### 📉 Loss Over Time")
+                st.markdown('<div class="placeholder-text" style="text-align: center; padding: 2rem;">Loss chart will appear here once training starts...</div>', unsafe_allow_html=True)
             
             # Stop button
-            if st.button("🛑 Stop Training", key="stop_training_main", type="primary"):
-                st.session_state.training_status = "idle"
-                st.warning("Training stopped by user")
-                st.rerun()
+            if st.session_state.training_status == "training":
+                if st.button("🛑 Stop Training", key="stop_training_main", type="primary"):
+                    st.session_state.training_status = "idle"
+                    st.session_state.show_training_viz = False
+                    st.warning("Training stopped by user")
+                    st.rerun()
             
             # Read logs from file and display
             log_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "training_log.txt")
