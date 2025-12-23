@@ -3,7 +3,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QProcess, QTimer, QThread, Signal
+from PySide6.QtCore import Qt, QProcess, QTimer, QThread, Signal, QProcessEnvironment
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QTabWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QLineEdit, QPushButton, QFileDialog, QComboBox, QTextEdit, QPlainTextEdit,
@@ -1777,6 +1777,13 @@ class MainWindow(QMainWindow):
         proc.setArguments(cmd[1:])
         proc.setWorkingDirectory(str(self.root))
         proc.setProcessChannelMode(QProcess.MergedChannels)
+        
+        # Set UTF-8 encoding for Windows to handle emojis in transformers/unsloth output
+        env = QProcessEnvironment.systemEnvironment()
+        env.insert("PYTHONIOENCODING", "utf-8")
+        env.insert("PYTHONUTF8", "1")
+        proc.setProcessEnvironment(env)
+        
         proc.readyReadStandardOutput.connect(lambda: self._append_proc_output(proc, self.train_log))
         proc.errorOccurred.connect(lambda err: self._on_training_error(proc, err))
         proc.finished.connect(self._train_finished)
