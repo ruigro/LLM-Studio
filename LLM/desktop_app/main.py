@@ -2237,17 +2237,22 @@ class MainWindow(QMainWindow):
         # Refresh downloaded models display
         self._refresh_models()
         
-        # Get ONLY DOWNLOADED models from the hf_models directory (actual model weights)
-        hf_models_dir = self.root / "hf_models"
+        # Get downloaded models from the models directory (where downloads actually go)
+        models_dir = self.root / "models"
         downloaded_models = []
         
-        if hf_models_dir.exists():
-            for model_dir in sorted(hf_models_dir.iterdir()):
+        if models_dir.exists():
+            for model_dir in sorted(models_dir.iterdir()):
                 if model_dir.is_dir():
-                    # Use the folder name directly (e.g., meta-llama__Llama-3.2-1B)
-                    downloaded_models.append(model_dir.name)
+                    # Check if it has actual model weights (not just config files)
+                    has_weights = any(
+                        (model_dir / f).exists() 
+                        for f in ["model.safetensors", "pytorch_model.bin", "model.safetensors.index.json"]
+                    )
+                    if has_weights or len(list(model_dir.glob("*.safetensors"))) > 0:
+                        downloaded_models.append(model_dir.name)
         
-        # Update Train tab: Select Base Model dropdown with ONLY downloaded models
+        # Update Train tab: Select Base Model dropdown with downloaded models
         current_train = self.train_base_model.currentText()
         self.train_base_model.clear()
         
