@@ -252,22 +252,42 @@ if TORCH_AVAILABLE and torch is not None:
         print(f"[DEBUG] GPU check - TORCH_AVAILABLE: {TORCH_AVAILABLE}, torch: {torch is not None}, gpu_available: {gpu_available}")
         st.session_state.gpu_available = gpu_available
         if gpu_available:
-            try:
-                gpu_name = torch.cuda.get_device_name(0)
-                st.session_state.gpu_name = gpu_name
-                print(f"[DEBUG] GPU name set to: {gpu_name}")
-            except Exception as e:
-                st.session_state.gpu_name = "GPU (Unknown)"
-                print(f"[DEBUG] Failed to get GPU name: {e}")
+            # Detect ALL GPUs
+            gpu_count = torch.cuda.device_count()
+            st.session_state.gpu_count = gpu_count
+            gpu_names = []
+            for i in range(gpu_count):
+                try:
+                    gpu_name = torch.cuda.get_device_name(i)
+                    gpu_names.append(f"GPU {i}: {gpu_name}")
+                    print(f"[DEBUG] Detected GPU {i}: {gpu_name}")
+                except Exception as e:
+                    gpu_names.append(f"GPU {i}: Unknown")
+                    print(f"[DEBUG] Failed to get GPU {i} name: {e}")
+            
+            st.session_state.gpu_names = gpu_names
+            # Default to first GPU if not set
+            if 'selected_gpu' not in st.session_state:
+                st.session_state.selected_gpu = 0
+            
+            # For backward compatibility, keep gpu_name as the selected GPU
+            st.session_state.gpu_name = gpu_names[st.session_state.selected_gpu] if gpu_names else "GPU (Unknown)"
+            print(f"[DEBUG] GPU name set to: {st.session_state.gpu_name}")
         else:
+            st.session_state.gpu_count = 0
+            st.session_state.gpu_names = []
             st.session_state.gpu_name = "CPU Only"
             print(f"[DEBUG] GPU not available, setting CPU Only")
     except Exception as e:
         st.session_state.gpu_available = False
+        st.session_state.gpu_count = 0
+        st.session_state.gpu_names = []
         st.session_state.gpu_name = "CPU Only"
         print(f"[DEBUG] Exception during GPU check: {e}")
 else:
     st.session_state.gpu_available = False
+    st.session_state.gpu_count = 0
+    st.session_state.gpu_names = []
     st.session_state.gpu_name = "CPU Only"
     print(f"[DEBUG] PyTorch not available - TORCH_AVAILABLE: {TORCH_AVAILABLE}, torch: {torch is not None}")
 
@@ -1136,6 +1156,15 @@ def run_training(config):
     env['PYTHONUNBUFFERED'] = '1'
     env['PYTHONIOENCODING'] = 'utf-8'
     
+    # Set CUDA_VISIBLE_DEVICES to restrict training to selected GPU
+    # This ensures only the selected GPU is used, preventing multi-GPU issues
+    if config.get('selected_gpu') is not None:
+        env['CUDA_VISIBLE_DEVICES'] = str(config['selected_gpu'])
+        print(f"[DEBUG] Setting CUDA_VISIBLE_DEVICES={config['selected_gpu']}")
+    elif 'selected_gpu' in st.session_state:
+        env['CUDA_VISIBLE_DEVICES'] = str(st.session_state.selected_gpu)
+        print(f"[DEBUG] Setting CUDA_VISIBLE_DEVICES={st.session_state.selected_gpu} from session state")
+    
     # Log the command being run
     cmd_str = " ".join(cmd)
     working_dir = os.path.dirname(os.path.abspath(__file__))
@@ -1558,31 +1587,59 @@ def main():
                         gpu_available = torch.cuda.is_available()
                         st.session_state.gpu_available = gpu_available
                         if gpu_available:
-                            try:
-                                st.session_state.gpu_name = torch.cuda.get_device_name(0)
-                            except:
-                                st.session_state.gpu_name = "GPU (Unknown)"
+                            # Detect ALL GPUs
+                            gpu_count = torch.cuda.device_count()
+                            st.session_state.gpu_count = gpu_count
+                            gpu_names = []
+                            for i in range(gpu_count):
+                                try:
+                                    gpu_name = torch.cuda.get_device_name(i)
+                                    gpu_names.append(f"GPU {i}: {gpu_name}")
+                                except:
+                                    gpu_names.append(f"GPU {i}: Unknown")
+                            st.session_state.gpu_names = gpu_names
+                            # Update selected GPU name
+                            selected_gpu = st.session_state.get('selected_gpu', 0)
+                            st.session_state.gpu_name = gpu_names[selected_gpu] if selected_gpu < len(gpu_names) else "GPU (Unknown)"
                         else:
+                            st.session_state.gpu_count = 0
+                            st.session_state.gpu_names = []
                             st.session_state.gpu_name = "CPU Only"
                     except Exception as e:
                         st.session_state.gpu_available = False
+                        st.session_state.gpu_count = 0
+                        st.session_state.gpu_names = []
                         st.session_state.gpu_name = "CPU Only"
                 else:
                     st.session_state.gpu_available = False
+                    st.session_state.gpu_count = 0
+                    st.session_state.gpu_names = []
                     st.session_state.gpu_name = "CPU Only"
                 st.rerun()
             
-            # Device info
+            # Device info - show all GPUs
             if not TORCH_AVAILABLE:
                 st.error("⚠️ PyTorch not available - CPU mode only")
             elif st.session_state.gpu_available:
-                st.success(f"✅ GPU: {st.session_state.gpu_name}")
-                try:
-                    if torch is not None:
-                        gpu_memory = torch.cuda.get_device_properties(0).total_memory / 1024**3
-                        st.metric("GPU Memory", f"{gpu_memory:.1f} GB")
-                except:
-                    pass
+                gpu_count = st.session_state.get('gpu_count', 1)
+                if gpu_count > 1:
+                    st.success(f"✅ {gpu_count} GPUs detected")
+                    gpu_names = st.session_state.get('gpu_names', [])
+                    for i, gpu_name in enumerate(gpu_names):
+                        try:
+                            if torch is not None:
+                                gpu_memory = torch.cuda.get_device_properties(i).total_memory / 1024**3
+                                st.metric(gpu_name, f"{gpu_memory:.1f} GB")
+                        except:
+                            st.metric(gpu_name, "Unknown")
+                else:
+                    st.success(f"✅ GPU: {st.session_state.gpu_name}")
+                    try:
+                        if torch is not None:
+                            gpu_memory = torch.cuda.get_device_properties(0).total_memory / 1024**3
+                            st.metric("GPU Memory", f"{gpu_memory:.1f} GB")
+                    except:
+                        pass
             else:
                 st.warning("⚠️ CPU Mode")
             
@@ -2182,12 +2239,30 @@ def main():
                 if recommended_params:
                     st.info(f"💡 Recommended Learning Rate: {recommended_params['learning_rate']:.1e}")
             
-            # Device info
+            # Device info and GPU selector
             st.divider()
             if not TORCH_AVAILABLE:
                 st.error("⚠️ PyTorch error - Training will use CPU")
             elif st.session_state.gpu_available:
-                st.success(f"✅ GPU: {st.session_state.gpu_name}")
+                # Show all available GPUs
+                gpu_count = st.session_state.get('gpu_count', 1)
+                if gpu_count > 1:
+                    st.success(f"✅ {gpu_count} GPUs detected")
+                    
+                    # GPU selector
+                    gpu_options = st.session_state.get('gpu_names', [])
+                    selected_gpu = st.selectbox(
+                        "🎮 Select GPU for Training",
+                        options=list(range(gpu_count)),
+                        format_func=lambda x: gpu_options[x] if x < len(gpu_options) else f"GPU {x}",
+                        index=st.session_state.get('selected_gpu', 0),
+                        help="Choose which GPU to use for training. Only the selected GPU will be used."
+                    )
+                    st.session_state.selected_gpu = selected_gpu
+                    
+                    st.info(f"💡 Training will use: **{gpu_options[selected_gpu] if selected_gpu < len(gpu_options) else f'GPU {selected_gpu}'}**")
+                else:
+                    st.success(f"✅ GPU: {st.session_state.gpu_name}")
             else:
                 st.warning("⚠️ CPU Mode")
         
@@ -2235,6 +2310,7 @@ def main():
                     "max_seq_length": max_seq_length,
                     "max_examples": max_examples if max_examples > 0 else None,
                     "timestamp": timestamp,
+                    "selected_gpu": st.session_state.get('selected_gpu', 0),  # Pass selected GPU to training
                 }
                 
                 # Save metadata JSON
