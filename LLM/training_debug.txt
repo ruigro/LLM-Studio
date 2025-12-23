@@ -1,5 +1,5 @@
-Starting training thread at 2025-12-19 22:49:58
-Config: {'model_name': 'C:\\1_GitHome\\Local-LLM-Server\\LLM\\models\\unsloth_llama-3.1-8b-instruct-unsloth-bnb-4bit', 'model_display_name': 'My_Model_1219', 'data_path': 'train_data.jsonl', 'output_dir': './models_trained/My_Model_1219_20251219_224958', 'epochs': 1, 'batch_size': 1, 'lora_r': 8, 'lora_alpha': 16, 'lora_dropout': 0.03, 'grad_accum': 8, 'max_seq_length': 2048, 'max_examples': 2, 'timestamp': '20251219_224958'}
+Starting training thread at 2025-12-23 09:50:41
+Config: {'model_name': 'C:\\1_GitHome\\Local-LLM-Server\\LLM\\models\\nvidia_Llama-3.1-Nemotron-Nano-8B-v1', 'model_display_name': 'Nemotron_23', 'data_path': 'train_data.jsonl', 'output_dir': './models_trained/Nemotron_23_20251223_095041', 'epochs': 1, 'batch_size': 1, 'lora_r': 8, 'lora_alpha': 16, 'lora_dropout': 0.05, 'grad_accum': 8, 'max_seq_length': 2048, 'max_examples': None, 'timestamp': '20251223_095041'}
 Python: C:\1_GitHome\Local-LLM-Server\LLM\.venv\Scripts\python.exe
 Working dir: C:\1_GitHome\Local-LLM-Server\LLM
 train_basic.py exists: True

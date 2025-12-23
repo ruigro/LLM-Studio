@@ -788,6 +788,64 @@ def check_parameter_safety(param_name, value, recommended_value, model_profile):
     
     return "acceptable", "Within acceptable range"
 
+def detect_model_capabilities(model_id=None, model_name=None, model_path=None):
+    """Detect model capabilities (vision, tools, text) from model ID, name, or config"""
+    capabilities = []
+    
+    # Check model path if provided
+    if model_path and os.path.exists(model_path):
+        config_path = os.path.join(model_path, "config.json")
+        if os.path.exists(config_path):
+            try:
+                with open(config_path, 'r', encoding='utf-8') as f:
+                    config = json.load(f)
+                    # Check model_type
+                    model_type = config.get("model_type", "").lower()
+                    arch = config.get("architectures", [])
+                    arch_str = " ".join(arch).lower() if arch else ""
+                    
+                    # Vision detection
+                    if any(keyword in model_type + arch_str for keyword in ["vision", "vl", "multimodal", "clip", "llava"]):
+                        capabilities.append("vision")
+                    
+                    # Tools detection
+                    if any(keyword in model_type + arch_str for keyword in ["tool", "function", "agent"]):
+                        capabilities.append("tools")
+            except Exception:
+                pass
+    
+    # Check model ID or name for keywords
+    check_str = ""
+    if model_id:
+        check_str += model_id.lower() + " "
+    if model_name:
+        check_str += model_name.lower() + " "
+    
+    # Vision keywords
+    if not "vision" in capabilities and any(keyword in check_str for keyword in ["vision", "vl", "multimodal", "llava", "clip"]):
+        capabilities.append("vision")
+    
+    # Tools keywords
+    if not "tools" in capabilities and any(keyword in check_str for keyword in ["tool", "function-calling", "function_calling", "agent"]):
+        capabilities.append("tools")
+    
+    # Default to text if no special capabilities
+    if not capabilities:
+        capabilities.append("text")
+    
+    return capabilities
+
+def get_capability_icons(capabilities):
+    """Get emoji icons for model capabilities"""
+    icons = []
+    if "vision" in capabilities:
+        icons.append("👁️")
+    if "tools" in capabilities:
+        icons.append("🔧")
+    if "text" in capabilities and len(capabilities) == 1:
+        icons.append("📝")
+    return " ".join(icons) if icons else "📝"
+
 def load_downloaded_models():
     """Load list of downloaded models"""
     models_dir = "./models"
@@ -1676,12 +1734,19 @@ def main():
                                 if model_info.get("category") == "newest":
                                     category_badge = '<span class="new-badge">NEW</span>'
                                 
+                                # Get capabilities and icons - detect dynamically if not in preset
+                                capabilities = model_info.get("capabilities")
+                                if not capabilities:
+                                    # Try to detect capabilities from model ID/name
+                                    capabilities = detect_model_capabilities(model_id=model_id, model_name=model_name)
+                                capability_icons = get_capability_icons(capabilities)
+                                
                                 st.markdown(f"""
                                 <div class="model-card">
                                     <div class="model-card-content">
                                         <div class="model-main-info">
                                             <div class="model-name">{model_name}{category_badge}</div>
-                                            <div class="model-info">📦 {model_info['size']}</div>
+                                            <div class="model-info">📦 {model_info['size']} {capability_icons}</div>
                                             <div class="model-info">🆔 {model_id}</div>
                                         </div>
                                         <div class="model-description">

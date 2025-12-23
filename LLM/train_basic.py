@@ -98,9 +98,38 @@ if MAX_EXAMPLES and MAX_EXAMPLES > 0:
 
 def format_prompts(examples):
     texts = []
-    for inst, out in zip(examples["instruction"], examples["output"]):
-        text = f"### Instruction: {inst}\n\n### Response: {out}{tokenizer.eos_token}"
-        texts.append(text)
+    # Handle different dataset formats
+    # Try standard format first (instruction/output)
+    if "instruction" in examples and "output" in examples:
+        for inst, out in zip(examples["instruction"], examples["output"]):
+            text = f"### Instruction: {inst}\n\n### Response: {out}{tokenizer.eos_token}"
+            texts.append(text)
+    # Handle customer_message/assistant_response format
+    elif "customer_message" in examples and "assistant_response" in examples:
+        for msg, resp in zip(examples["customer_message"], examples["assistant_response"]):
+            text = f"### Instruction: {msg}\n\n### Response: {resp}{tokenizer.eos_token}"
+            texts.append(text)
+    # Handle input/output format
+    elif "input" in examples and "output" in examples:
+        for inp, out in zip(examples["input"], examples["output"]):
+            text = f"### Instruction: {inp}\n\n### Response: {out}{tokenizer.eos_token}"
+            texts.append(text)
+    # Handle prompt/response format
+    elif "prompt" in examples and "response" in examples:
+        for prompt, resp in zip(examples["prompt"], examples["response"]):
+            text = f"### Instruction: {prompt}\n\n### Response: {resp}{tokenizer.eos_token}"
+            texts.append(text)
+    else:
+        # Try to find any two text fields
+        keys = list(examples.keys())
+        if len(keys) >= 2:
+            # Use first two text fields found
+            key1, key2 = keys[0], keys[1]
+            for val1, val2 in zip(examples[key1], examples[key2]):
+                text = f"### Instruction: {val1}\n\n### Response: {val2}{tokenizer.eos_token}"
+                texts.append(text)
+        else:
+            raise ValueError(f"Dataset format not recognized. Available fields: {keys}. Expected: instruction/output, customer_message/assistant_response, input/output, or prompt/response")
     return {"text": texts}
 
 dataset = dataset.map(format_prompts, batched=True)
