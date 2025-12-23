@@ -13,25 +13,25 @@ class MetricCard(QFrame):
         self.is_dark = True
         self.value_label = None
         
-        self.setMinimumHeight(100)
-        self.setMaximumHeight(110)
+        self.setMinimumHeight(160)
+        # Remove setMaximumHeight to allow automatic sizing
         self.setFrameShape(QFrame.Box)
         
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(15, 10, 15, 10)
-        layout.setSpacing(5)
+        layout.setContentsMargins(15, 12, 15, 12)  # Increased vertical margins
+        layout.setSpacing(8)  # Increased spacing
         
         # Title with icon
         title_layout = QHBoxLayout()
         icon_label = QLabel(icon)
         icon_font = QFont()
-        icon_font.setPointSize(12)
+        icon_font.setPointSize(14)
         icon_label.setFont(icon_font)
         title_layout.addWidget(icon_label)
         
         title_label = QLabel(title)
         title_font = QFont()
-        title_font.setPointSize(9)
+        title_font.setPointSize(11)
         title_font.setBold(True)
         title_label.setFont(title_font)
         title_layout.addWidget(title_label)
@@ -43,7 +43,7 @@ class MetricCard(QFrame):
         # Value
         self.value_label = QLabel(value)
         value_font = QFont()
-        value_font.setPointSize(24)
+        value_font.setPointSize(26)
         value_font.setBold(True)
         self.value_label.setFont(value_font)
         self.value_label.setAlignment(Qt.AlignCenter)

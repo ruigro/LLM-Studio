@@ -23,7 +23,7 @@ class ChatBubble(QFrame):
         self.text_label.setWordWrap(True)
         self.text_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         text_font = QFont()
-        text_font.setPointSize(10)
+        text_font.setPointSize(14)
         self.text_label.setFont(text_font)
         layout.addWidget(self.text_label)
         

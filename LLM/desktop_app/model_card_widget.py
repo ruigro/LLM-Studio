@@ -17,8 +17,8 @@ class ModelCard(QFrame):
         self.is_downloaded = is_downloaded
         self.is_dark = True
         
-        self.setMinimumHeight(160)
-        self.setMaximumHeight(180)
+        self.setMinimumHeight(180)
+        # Remove setMaximumHeight to allow automatic sizing based on content
         self.setFrameShape(QFrame.Box)
         
         # Main layout
@@ -32,7 +32,7 @@ class ModelCard(QFrame):
         
         name_label = QLabel(model_name)
         name_font = QFont()
-        name_font.setPointSize(12)
+        name_font.setPointSize(14)
         name_font.setBold(True)
         name_label.setFont(name_font)
         name_label.setWordWrap(False)
@@ -46,7 +46,7 @@ class ModelCard(QFrame):
                     color: white;
                     padding: 3px 8px;
                     border-radius: 4px;
-                    font-size: 9px;
+                    font-size: 13px;
                     font-weight: bold;
                 }
             """)
@@ -60,10 +60,10 @@ class ModelCard(QFrame):
         if description:
             desc_label = QLabel(description)
             desc_font = QFont()
-            desc_font.setPointSize(9)
+            desc_font.setPointSize(13)
             desc_label.setFont(desc_font)
             desc_label.setWordWrap(True)
-            desc_label.setMaximumHeight(40)
+            # Remove setMaximumHeight to allow text to flow naturally
             layout.addWidget(desc_label)
         
         # Size and icons row
@@ -71,7 +71,7 @@ class ModelCard(QFrame):
         
         size_label = QLabel(f"📦 {size}")
         size_font = QFont()
-        size_font.setPointSize(9)
+        size_font.setPointSize(13)
         size_label.setFont(size_font)
         middle_layout.addWidget(size_label)
         
@@ -79,7 +79,7 @@ class ModelCard(QFrame):
         
         icons_label = QLabel(icons)
         icons_font = QFont()
-        icons_font.setPointSize(16)
+        icons_font.setPointSize(18)
         icons_label.setFont(icons_font)
         middle_layout.addWidget(icons_label)
         
@@ -88,7 +88,7 @@ class ModelCard(QFrame):
         # Model ID
         id_label = QLabel(f"📂 {model_id}")
         id_font = QFont()
-        id_font.setPointSize(8)
+        id_font.setPointSize(11)
         id_label.setFont(id_font)
         id_label.setStyleSheet("color: #888;")
         layout.addWidget(id_label)
@@ -158,8 +158,8 @@ class DownloadedModelCard(QFrame):
         self.model_path = model_path
         self.is_dark = True
         
-        self.setMinimumHeight(100)
-        self.setMaximumHeight(110)
+        self.setMinimumHeight(110)
+        # Remove setMaximumHeight to allow automatic sizing
         self.setFrameShape(QFrame.Box)
         self.setCursor(Qt.PointingHandCursor)
         
@@ -170,7 +170,7 @@ class DownloadedModelCard(QFrame):
         # Model name
         name_label = QLabel(model_name)
         name_font = QFont()
-        name_font.setPointSize(10)
+        name_font.setPointSize(14)
         name_font.setBold(True)
         name_label.setFont(name_font)
         name_label.setWordWrap(True)
@@ -181,7 +181,7 @@ class DownloadedModelCard(QFrame):
         
         size_label = QLabel(f"📦 {size}")
         size_font = QFont()
-        size_font.setPointSize(9)
+        size_font.setPointSize(13)
         size_label.setFont(size_font)
         bottom_layout.addWidget(size_label)
         
@@ -189,7 +189,7 @@ class DownloadedModelCard(QFrame):
         
         icons_label = QLabel(icons)
         icons_font = QFont()
-        icons_font.setPointSize(14)
+        icons_font.setPointSize(16)
         icons_label.setFont(icons_font)
         bottom_layout.addWidget(icons_label)
         

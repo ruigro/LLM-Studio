@@ -3,18 +3,19 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QProcess
+from PySide6.QtCore import Qt, QProcess, QTimer, QThread, Signal
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QTabWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QLineEdit, QPushButton, QFileDialog, QComboBox, QTextEdit, QPlainTextEdit,
-    QSpinBox, QDoubleSpinBox, QMessageBox, QListWidget, QListWidgetItem, QSplitter, QToolBar, QScrollArea, QGridLayout, QFrame
+    QSpinBox, QDoubleSpinBox, QMessageBox, QListWidget, QListWidgetItem, QSplitter, QToolBar, QScrollArea, QGridLayout, QFrame, QProgressBar
 )
-from PySide6.QtGui import QAction, QIcon
+from PySide6.QtGui import QAction, QIcon, QFont
 
 from desktop_app.model_card_widget import ModelCard, DownloadedModelCard
 from desktop_app.training_widgets import MetricCard
 from desktop_app.chat_widget import ChatWidget
 
+from system_detector import SystemDetector
 from core.models import (DEFAULT_BASE_MODELS, search_hf_models, download_hf_model, list_local_adapters, 
                          list_local_downloads, get_app_root, detect_model_capabilities, get_capability_icons, get_model_size)
 from core.training import TrainingConfig, default_output_dir, build_finetune_cmd
@@ -22,6 +23,44 @@ from core.inference import InferenceConfig, build_run_adapter_cmd
 
 
 APP_TITLE = "🤖 LLM Fine-tuning Studio"
+
+
+class DownloadThread(QThread):
+    """Thread for downloading models without freezing UI"""
+    progress = Signal(int)  # 0-100
+    finished = Signal(str)  # destination path
+    error = Signal(str)     # error message
+    
+    def __init__(self, model_id: str, target_dir: Path):
+        super().__init__()
+        self.model_id = model_id
+        self.target_dir = target_dir
+    
+    def run(self):
+        try:
+            # Import here to avoid import errors if not installed
+            from huggingface_hub import snapshot_download
+            
+            # Convert model ID to directory name (e.g., unsloth/model -> unsloth__model)
+            model_slug = self.model_id.replace("/", "__")
+            dest = self.target_dir / model_slug
+            
+            # Emit initial progress
+            self.progress.emit(5)
+            
+            # Download
+            result = snapshot_download(
+                repo_id=self.model_id,
+                local_dir=str(dest),
+                local_dir_use_symlinks=False
+            )
+            
+            self.progress.emit(100)
+            self.finished.emit(str(dest))  # Return the actual destination path
+            
+        except Exception as e:
+            self.error.emit(str(e))
+
 
 # Dark theme stylesheet with gradient accents
 DARK_THEME = """
@@ -145,55 +184,108 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle(APP_TITLE)
         self.resize(1400, 900)
+        self.setMinimumSize(800, 600)  # Allow resizing with reasonable minimum
 
         self.root = get_app_root()
         self.dark_mode = True  # Start in dark mode
-
-        # Create toolbar with theme toggle
-        toolbar = QToolBar("Main Toolbar")
-        toolbar.setMovable(False)
-        toolbar.setMinimumHeight(80)  # Make it thicker
-        self.addToolBar(toolbar)
-
-        # Theme toggle button
-        self.theme_action = QAction("🌙 Dark Mode", self)
-        self.theme_action.triggered.connect(self._toggle_theme)
-        toolbar.addAction(self.theme_action)
-
-        toolbar.addSeparator()
         
-        # Add title label to toolbar (centered)
-        title_widget = QWidget()
-        title_layout = QHBoxLayout(title_widget)
-        title_layout.setContentsMargins(0, 0, 0, 0)
+        # Detect real system info
+        self.system_info = SystemDetector().detect_all()
+
+        # Create a beautiful unified header
+        header_widget = QWidget()
+        header_widget.setMinimumHeight(80)
+        header_widget.setStyleSheet("""
+            QWidget {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, 
+                    stop:0 #667eea, stop:0.5 #764ba2, stop:1 #f093fb);
+                border: none;
+            }
+        """)
         
+        header_layout = QHBoxLayout(header_widget)
+        header_layout.setContentsMargins(20, 10, 20, 10)
+        header_layout.setSpacing(20)
+        
+        # Left: Theme toggle button
+        theme_btn = QPushButton("🌙 Dark Mode")
+        theme_btn.setMinimumHeight(50)
+        theme_btn.setStyleSheet("""
+            QPushButton {
+                background: rgba(255, 255, 255, 0.2);
+                color: white;
+                border: 2px solid rgba(255, 255, 255, 0.3);
+                border-radius: 25px;
+                padding: 10px 20px;
+                font-size: 14pt;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background: rgba(255, 255, 255, 0.3);
+                border: 2px solid rgba(255, 255, 255, 0.5);
+            }
+        """)
+        theme_btn.clicked.connect(self._toggle_theme)
+        self.theme_btn = theme_btn
+        header_layout.addWidget(theme_btn)
+        
+        # Center: App title (transparent background)
         title_label = QLabel(APP_TITLE)
-        title_label.setStyleSheet("color: white; font-size: 18px; font-weight: bold; padding: 0 15px;")
-        title_layout.addStretch(1)
-        title_layout.addWidget(title_label)
-        title_layout.addStretch(1)
+        title_label.setAlignment(Qt.AlignCenter)
+        title_label.setStyleSheet("""
+            background: transparent;
+            color: white; 
+            font-size: 24pt; 
+            font-weight: bold;
+            border: none;
+        """)
+        header_layout.addWidget(title_label, 1)
         
-        toolbar.addWidget(title_widget)
-        
-        # System info on the right
+        # Right: System info (compact)
         sys_info_widget = QWidget()
+        sys_info_widget.setStyleSheet("background: transparent; border: none;")
         sys_info_layout = QVBoxLayout(sys_info_widget)
-        sys_info_layout.setContentsMargins(10, 5, 10, 5)
-        sys_info_layout.setSpacing(2)
+        sys_info_layout.setContentsMargins(0, 0, 0, 0)
+        sys_info_layout.setSpacing(4)
         
-        python_label = QLabel("🐍 Python 3.12.7")
-        python_label.setStyleSheet("color: white; font-size: 9pt;")
+        # Get real system info
+        python_info = self.system_info.get("python", {})
+        pytorch_info = self.system_info.get("pytorch", {})
+        hardware_info = self.system_info.get("hardware", {})
+        
+        python_ver = python_info.get("version", "Unknown")
+        python_label = QLabel(f"🐍 Python {python_ver}")
+        python_label.setStyleSheet("color: white; font-size: 11pt; font-weight: bold; background: transparent;")
         sys_info_layout.addWidget(python_label)
         
-        pytorch_label = QLabel("🔥 PyTorch 2.6.0+cu124 (CUDA 12.4)")
-        pytorch_label.setStyleSheet("color: white; font-size: 9pt;")
+        # PyTorch info
+        if pytorch_info.get("found"):
+            pytorch_ver = pytorch_info.get("version", "Unknown")
+            if pytorch_info.get("cuda_available"):
+                cuda_ver = pytorch_info.get("cuda_version", "Unknown")
+                pytorch_label = QLabel(f"🔥 PyTorch {pytorch_ver} (CUDA {cuda_ver})")
+            else:
+                pytorch_label = QLabel(f"🔥 PyTorch {pytorch_ver} (CPU)")
+        else:
+            pytorch_label = QLabel("🔥 PyTorch: Not found")
+        pytorch_label.setStyleSheet("color: white; font-size: 11pt; font-weight: bold; background: transparent;")
         sys_info_layout.addWidget(pytorch_label)
         
-        ram_label = QLabel("💾 RAM: 63.8 GB")
-        ram_label.setStyleSheet("color: white; font-size: 9pt;")
+        # RAM info
+        ram_gb = hardware_info.get("ram_gb", 0)
+        ram_label = QLabel(f"💾 RAM: {ram_gb:.1f} GB")
+        ram_label.setStyleSheet("color: white; font-size: 11pt; font-weight: bold; background: transparent;")
         sys_info_layout.addWidget(ram_label)
         
-        toolbar.addWidget(sys_info_widget)
+        header_layout.addWidget(sys_info_widget)
+        
+        # Create main layout
+        main_widget = QWidget()
+        main_layout = QVBoxLayout(main_widget)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(0)
+        
+        main_layout.addWidget(header_widget)
 
         tabs = QTabWidget()
         tabs.addTab(self._build_home_tab(), "🏠 Home")
@@ -202,7 +294,8 @@ class MainWindow(QMainWindow):
         tabs.addTab(self._build_test_tab(), "🧪 Test")
         tabs.addTab(self._build_logs_tab(), "📊 Logs")
 
-        self.setCentralWidget(tabs)
+        main_layout.addWidget(tabs)
+        self.setCentralWidget(main_widget)
 
         self.train_proc: QProcess | None = None
         
@@ -223,10 +316,10 @@ class MainWindow(QMainWindow):
         """Apply the current theme"""
         if self.dark_mode:
             self.setStyleSheet(DARK_THEME)
-            self.theme_action.setText("🌙 Dark Mode")
+            self.theme_btn.setText("🌙 Dark Mode")
         else:
             self.setStyleSheet(LIGHT_THEME)
-            self.theme_action.setText("☀️ Light Mode")
+            self.theme_btn.setText("☀️ Light Mode")
         
         # Update chat widgets theme
         if hasattr(self, 'chat_widgets'):
@@ -299,94 +392,114 @@ class MainWindow(QMainWindow):
         left_layout.addStretch(1)
         content_layout.addWidget(left_widget, 3)
         
-        # RIGHT: System Status
+        # RIGHT: System Status (scrollable to prevent clipping when fonts are larger)
         right_widget = QWidget()
         right_layout = QVBoxLayout(right_widget)
-        right_layout.setSpacing(15)
-        
+        right_layout.setSpacing(8)  # Tighter spacing
+        right_layout.setContentsMargins(5, 5, 5, 5)  # Tighter margins
+
         right_layout.addWidget(QLabel("<h2>📊 System Status</h2>"))
-        
+
         # System info cards
         sys_frame = QFrame()
         sys_frame.setFrameShape(QFrame.StyledPanel)
         sys_layout = QVBoxLayout(sys_frame)
-        sys_layout.setSpacing(10)
-        
+        sys_layout.setSpacing(6)  # Tighter spacing
+        sys_layout.setContentsMargins(10, 8, 10, 8)  # Tighter margins
+
         refresh_btn = QPushButton("🔄 Refresh GPU Detection")
-        refresh_btn.setMaximumWidth(200)
+        refresh_btn.setMaximumWidth(200)  # Compact button
         sys_layout.addWidget(refresh_btn)
+
+        # Get real GPU info
+        cuda_info = self.system_info.get("cuda", {})
+        gpus = cuda_info.get("gpus", [])
         
-        gpu_status = QLabel("✅ <b>2 GPUs detected</b>")
-        gpu_status.setStyleSheet("color: #4CAF50; font-size: 12pt; padding: 10px;")
-        sys_layout.addWidget(gpu_status)
+        if gpus:
+            gpu_status = QLabel(f"✅ <b>{len(gpus)} GPU{'s' if len(gpus) > 1 else ''} detected</b>")
+            gpu_status.setStyleSheet("color: #4CAF50; font-weight: bold;")
+            sys_layout.addWidget(gpu_status)
+            
+            # Display each GPU
+            for idx, gpu in enumerate(gpus):
+                gpu_row = QHBoxLayout()
+                gpu_name = gpu.get("name", "Unknown GPU")
+                gpu_mem = gpu.get("memory", "Unknown")
+                
+                gpu_label = QLabel(f"<b>GPU {idx}:</b> {gpu_name}")
+                gpu_row.addWidget(gpu_label)
+                gpu_row.addStretch(1)
+                gpu_mem_label = QLabel(f"💾 <b>{gpu_mem}</b>")
+                gpu_row.addWidget(gpu_mem_label)
+                sys_layout.addLayout(gpu_row)
+        else:
+            gpu_status = QLabel("⚠️ <b>No GPUs detected</b>")
+            gpu_status.setStyleSheet("color: #FF9800; font-weight: bold;")
+            sys_layout.addWidget(gpu_status)
+            sys_layout.addWidget(QLabel("Training will use CPU (slower)"))
+
+        # Models stats - compact 2-column grid
+        stats_grid = QGridLayout()
+        stats_grid.setSpacing(8)
+        stats_grid.setContentsMargins(0, 0, 0, 0)
         
-        # GPU 0
-        gpu0_label = QLabel("<b>GPU 0: NVIDIA GeForce RTX 4090</b>")
-        sys_layout.addWidget(gpu0_label)
-        gpu0_mem = QLabel("💾 22.5 GB")
-        gpu0_mem.setStyleSheet("font-size: 16pt; font-weight: bold; padding: 5px 20px;")
-        sys_layout.addWidget(gpu0_mem)
+        # Row 1: Models Trained | Models Downloaded
+        stats_grid.addWidget(QLabel("<b>Models Trained</b>"), 0, 0)
+        stats_grid.addWidget(QLabel("<b>Models Downloaded</b>"), 0, 1)
         
+        # Row 2: Count values
+        models_count = QLabel("<span style='font-size: 24pt; font-weight: bold;'>7</span>")
+        models_count.setAlignment(Qt.AlignCenter)
+        stats_grid.addWidget(models_count, 1, 0)
+        
+        downloads_count = QLabel("<span style='font-size: 24pt; font-weight: bold;'>5</span>")
+        downloads_count.setAlignment(Qt.AlignCenter)
+        stats_grid.addWidget(downloads_count, 1, 1)
+        
+        sys_layout.addLayout(stats_grid)
+
         sys_layout.addWidget(QLabel("<hr>"))
-        
-        # GPU 1
-        gpu1_label = QLabel("<b>GPU 1: NVIDIA RTX A2000 12GB</b>")
-        sys_layout.addWidget(gpu1_label)
-        gpu1_mem = QLabel("💾 11.2 GB")
-        gpu1_mem.setStyleSheet("font-size: 16pt; font-weight: bold; padding: 5px 20px;")
-        sys_layout.addWidget(gpu1_mem)
-        
-        sys_layout.addWidget(QLabel("<hr>"))
-        
-        # Models stats
-        models_trained = QLabel("<b>Models Trained</b>")
-        sys_layout.addWidget(models_trained)
-        models_count = QLabel("7")
-        models_count.setStyleSheet("font-size: 24pt; font-weight: bold; padding: 5px 20px;")
-        sys_layout.addWidget(models_count)
-        
-        sys_layout.addWidget(QLabel("<hr>"))
-        
-        models_downloaded = QLabel("<b>Models Downloaded</b>")
-        sys_layout.addWidget(models_downloaded)
-        downloads_count = QLabel("5")
-        downloads_count.setStyleSheet("font-size: 24pt; font-weight: bold; padding: 5px 20px;")
-        sys_layout.addWidget(downloads_count)
-        
-        sys_layout.addWidget(QLabel("<hr>"))
-        
-        # Status
-        status_label = QLabel("<b>Status</b>")
-        sys_layout.addWidget(status_label)
-        status_val = QLabel("Ready")
-        status_val.setStyleSheet("font-size: 18pt; font-weight: bold; color: #4CAF50; padding: 5px 20px;")
-        sys_layout.addWidget(status_val)
-        
+
+        # Status - compact single line
+        status_row = QHBoxLayout()
+        status_label = QLabel("<b>Status:</b>")
+        status_row.addWidget(status_label)
+        status_val = QLabel("<span style='font-size: 16pt; font-weight: bold; color: #4CAF50;'>Ready</span>")
+        status_row.addWidget(status_val)
+        status_row.addStretch(1)
+        sys_layout.addLayout(status_row)
+
         right_layout.addWidget(sys_frame)
-        
+
         # Tips section
         right_layout.addWidget(QLabel("<h2>💡 Tips</h2>"))
-        
+
         tips_frame = QFrame()
         tips_frame.setFrameShape(QFrame.StyledPanel)
         tips_layout = QVBoxLayout(tips_frame)
-        
+        tips_layout.setSpacing(4)  # Tighter spacing
+        tips_layout.setContentsMargins(10, 8, 10, 8)  # Tighter margins
+
         tips = [
-            "• Use GPU for faster training",
-            "• Start with fewer epochs for testing",
-            "• Monitor training logs for progress",
-            "• Test models before full validation"
+            "• Use GPU for faster training  • Start with fewer epochs for testing",
+            "• Monitor training logs for progress  • Test models before full validation",
         ]
-        
+
         for tip in tips:
             tip_label = QLabel(tip)
-            tip_label.setStyleSheet("color: #2196F3; padding: 5px;")
+            tip_label.setStyleSheet("color: #2196F3; padding: 3px; font-size: 11pt;")
+            tip_label.setWordWrap(True)
             tips_layout.addWidget(tip_label)
-        
+
         right_layout.addWidget(tips_frame)
-        
         right_layout.addStretch(1)
-        content_layout.addWidget(right_widget, 2)
+
+        right_scroll = QScrollArea()
+        right_scroll.setWidgetResizable(True)
+        right_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        right_scroll.setFrameShape(QFrame.NoFrame)
+        right_scroll.setWidget(right_widget)
+        content_layout.addWidget(right_scroll, 2)
         
         layout.addLayout(content_layout)
         
@@ -434,7 +547,8 @@ class MainWindow(QMainWindow):
         downloaded_scroll.setWidgetResizable(True)
         downloaded_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         downloaded_scroll.setMinimumHeight(200)
-        downloaded_scroll.setMaximumHeight(400)
+        # Increased max height to accommodate larger fonts and more content
+        downloaded_scroll.setMaximumHeight(600)
         
         self.downloaded_container = QWidget()
         self.downloaded_layout = QVBoxLayout(self.downloaded_container)
@@ -458,7 +572,7 @@ class MainWindow(QMainWindow):
         right_layout.addLayout(search_row)
 
         self.hf_results = QListWidget()
-        self.hf_results.setMaximumHeight(250)
+        self.hf_results.setMaximumHeight(350)
         right_layout.addWidget(self.hf_results)
 
         dl_row = QHBoxLayout()
@@ -476,7 +590,7 @@ class MainWindow(QMainWindow):
         self.models_status = QPlainTextEdit()
         self.models_status.setReadOnly(True)
         self.models_status.setMaximumBlockCount(500)
-        self.models_status.setMaximumHeight(150)
+        self.models_status.setMaximumHeight(220)
         right_layout.addWidget(self.models_status)
         
         # Refresh button at bottom
@@ -488,13 +602,29 @@ class MainWindow(QMainWindow):
         # Add to splitter
         splitter.addWidget(left_widget)
         splitter.addWidget(right_widget)
-        splitter.setSizes([700, 500])
+        
+        # Right column = EXACTLY 1/4 width, Left = 3/4
+        right_widget.setMaximumWidth(400)  # Cap the right side
+        splitter.setStretchFactor(0, 3)
+        splitter.setStretchFactor(1, 1)
+        
+        # Apply actual 3:1 ratio after widget is shown
+        def _apply_download_split():
+            w = splitter.width() or 1400
+            right_w = int(w * 0.25)  # Exactly 1/4
+            left_w = w - right_w      # The rest (3/4)
+            splitter.setSizes([left_w, right_w])
+        
+        QTimer.singleShot(0, _apply_download_split)
         
         main_layout.addWidget(splitter)
         
         # Store model cards for theme updates
         self.model_cards = []
         self.downloaded_model_cards = []
+        
+        # Track active downloads
+        self.active_downloads = {}  # model_id -> (thread, card)
         
         return w
     
@@ -588,15 +718,121 @@ class MainWindow(QMainWindow):
         self._log_models(f"Selected: {model_path}")
     
     def _download_curated_model(self, model_id: str):
-        """Download a curated model"""
-        self._log_models(f"Downloading {model_id}...")
+        """Download a curated model in background thread with progress"""
+        # Check if already downloading
+        if model_id in self.active_downloads:
+            self._log_models(f"⚠ {model_id} is already downloading...")
+            return
+        
+        # Find the card
+        card = None
+        for c in self.model_cards:
+            if c.model_id == model_id:
+                card = c
+                break
+        
+        if not card:
+            return
+        
+        # IMMEDIATELY disable button to prevent double-clicks
+        card.download_btn.setEnabled(False)
+        card.download_btn.setText("⏳ Starting...")
+        
+        self._log_models(f"📥 Downloading {model_id}...")
         target = Path(self.hf_target_dir.text().strip())
-        try:
-            dest = download_hf_model(model_id, target)
-            self._log_models(f"✓ Downloaded to: {dest}")
-            self._refresh_models()
-        except Exception as e:
-            self._log_models(f"✗ Error: {e}")
+        
+        # Hide button after a moment (let user see "Starting...")
+        QTimer.singleShot(500, lambda: card.download_btn.setVisible(False))
+        
+        # Create progress bar
+        progress_bar = QProgressBar()
+        progress_bar.setMinimum(0)
+        progress_bar.setMaximum(100)
+        progress_bar.setValue(0)
+        progress_bar.setTextVisible(True)
+        progress_bar.setFormat("Downloading... %p%")
+        progress_bar.setStyleSheet("""
+            QProgressBar {
+                border: none;
+                border-radius: 4px;
+                text-align: center;
+                background-color: #262730;
+                color: white;
+                font-weight: bold;
+                height: 30px;
+            }
+            QProgressBar::chunk {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, 
+                    stop:0 #667eea, stop:1 #764ba2);
+                border-radius: 4px;
+            }
+        """)
+        
+        # Add progress bar to card layout
+        card.layout().addWidget(progress_bar)
+        
+        # Create download thread
+        thread = DownloadThread(model_id, target)
+        
+        # Mark as active BEFORE starting
+        self.active_downloads[model_id] = (thread, card)
+        
+        # Connect signals
+        thread.progress.connect(lambda p: progress_bar.setValue(p))
+        thread.finished.connect(lambda dest: self._on_download_complete(model_id, dest, card, progress_bar))
+        thread.error.connect(lambda err: self._on_download_error(model_id, err, card, progress_bar))
+        
+        # Start download
+        thread.start()
+    
+    def _on_download_complete(self, model_id: str, dest: str, card, progress_bar):
+        """Handle successful download"""
+        self._log_models(f"✓ Downloaded to: {dest}")
+        self._log_models(f"DEBUG: Checking if path exists: {Path(dest).exists()}")
+        self._log_models(f"DEBUG: Directory name: {Path(dest).name}")
+        
+        # Clean up thread first
+        if model_id in self.active_downloads:
+            thread, _ = self.active_downloads[model_id]
+            if thread.isRunning():
+                thread.quit()
+                thread.wait()
+            del self.active_downloads[model_id]
+        
+        # Remove progress bar
+        if progress_bar:
+            progress_bar.setVisible(False)
+            progress_bar.deleteLater()
+        
+        # Don't hide the card - let _refresh_models handle showing it as downloaded
+        
+        # Refresh both downloaded models list AND train dropdown
+        self._log_models(f"DEBUG: Refreshing models list...")
+        self._refresh_models()
+        self._refresh_locals()  # This updates the Train tab dropdown
+        self._log_models(f"DEBUG: Refresh complete!")
+    
+    def _on_download_error(self, model_id: str, error: str, card, progress_bar):
+        """Handle download error"""
+        self._log_models(f"✗ Error downloading {model_id}: {error}")
+        
+        # Clean up thread first
+        if model_id in self.active_downloads:
+            thread, _ = self.active_downloads[model_id]
+            if thread.isRunning():
+                thread.quit()
+                thread.wait()
+            del self.active_downloads[model_id]
+        
+        # Remove progress bar
+        if progress_bar:
+            progress_bar.setVisible(False)
+            progress_bar.deleteLater()
+        
+        # Restore button
+        card.download_btn.setVisible(True)
+        card.download_btn.setEnabled(True)
+        card.download_btn.setText("❌ Failed - Retry")
 
     def _browse_hf_target(self) -> None:
         d = QFileDialog.getExistingDirectory(self, "Select download folder", str(self.root))
@@ -669,12 +905,17 @@ class MainWindow(QMainWindow):
         self.train_base_model.setEditable(True)
         self.train_base_model.addItems(DEFAULT_BASE_MODELS)
         self.train_base_model.currentTextChanged.connect(self._on_model_selected_for_training)
+        self.train_base_model.currentTextChanged.connect(self._auto_generate_model_name)  # Auto-generate name
         config_layout.addWidget(self.train_base_model)
         
         # Model info label
         self.model_info_label = QLabel("Select a model to see details")
         self.model_info_label.setWordWrap(True)
-        self.model_info_label.setStyleSheet("color: #888; font-size: 9pt; padding: 5px;")
+        model_info_font = QFont()
+        model_info_font.setPointSize(13)
+        self.model_info_label.setFont(model_info_font)
+        self.model_info_label.setStyleSheet("color: #888;")
+        self.model_info_label.setMinimumHeight(50)
         config_layout.addWidget(self.model_info_label)
         
         left_layout.addWidget(config_frame)
@@ -692,6 +933,7 @@ class MainWindow(QMainWindow):
         self.train_data_path = QLineEdit()
         self.train_data_path.setPlaceholderText("Drag and drop file here or browse...")
         self.train_data_path.textChanged.connect(self._validate_dataset)
+        self.train_data_path.textChanged.connect(self._auto_generate_model_name)  # Auto-generate name when dataset changes
         dataset_layout.addWidget(self.train_data_path)
         
         browse_btn = QPushButton("📁 Browse Files")
@@ -701,11 +943,16 @@ class MainWindow(QMainWindow):
         # Dataset validation status
         self.dataset_status_label = QLabel("")
         self.dataset_status_label.setWordWrap(True)
+        self.dataset_status_label.setMinimumHeight(30)
         dataset_layout.addWidget(self.dataset_status_label)
         
         # Total examples count
         self.examples_label = QLabel("Total Examples: --")
-        self.examples_label.setStyleSheet("font-weight: bold; font-size: 11pt;")
+        examples_font = QFont()
+        examples_font.setPointSize(15)
+        examples_font.setBold(True)
+        self.examples_label.setFont(examples_font)
+        self.examples_label.setMinimumHeight(40)
         dataset_layout.addWidget(self.examples_label)
         
         left_layout.addWidget(dataset_frame)
@@ -833,11 +1080,24 @@ class MainWindow(QMainWindow):
         
         # GPU selection dropdown
         self.gpu_select = QComboBox()
-        self.gpu_select.addItems(["GPU 0: NVIDIA GeForce RTX 4090"])
+        
+        # Get real GPU info
+        cuda_info = self.system_info.get("cuda", {})
+        gpus = cuda_info.get("gpus", [])
+        
+        # Populate with real GPUs
+        if gpus:
+            for idx, gpu in enumerate(gpus):
+                gpu_name = gpu.get("name", "Unknown")
+                self.gpu_select.addItem(f"GPU {idx}: {gpu_name}")
+            self.training_info_label = QLabel(f"⚡ Training will use: {self.gpu_select.currentText()}")
+        else:
+            self.gpu_select.addItem("No GPUs detected - CPU mode")
+            self.training_info_label = QLabel("⚠️ Training will use CPU (slower)")
+            
         gpu_layout.addWidget(self.gpu_select)
         
         # Training info
-        self.training_info_label = QLabel("⚡ Training will use: GPU 0: NVIDIA GeForce RTX 4090")
         self.training_info_label.setStyleSheet("color: #2196F3; padding: 5px;")
         self.training_info_label.setWordWrap(True)
         gpu_layout.addWidget(self.training_info_label)
@@ -851,7 +1111,7 @@ class MainWindow(QMainWindow):
         self.train_start.clicked.connect(self._start_training)
         self.train_start.setStyleSheet("""
             QPushButton {
-                font-size: 14pt;
+                font-size: 16pt;
                 font-weight: bold;
             }
         """)
@@ -867,105 +1127,191 @@ class MainWindow(QMainWindow):
         
         left_layout.addStretch(1)
         
-        # RIGHT COLUMN: Training Visualization
+        # RIGHT COLUMN: Training Visualization - FUTURISTIC REDESIGN
         right_widget = QWidget()
         right_layout = QVBoxLayout(right_widget)
-        right_layout.setSpacing(15)
+        right_layout.setSpacing(0)  # NO GAPS - containers touch each other
+        right_layout.setContentsMargins(0, 0, 0, 0)
         
-        # Training Dashboard
-        right_layout.addWidget(QLabel("<h2>📊 Training Dashboard</h2>"))
+        # Training Dashboard Header
+        dashboard_header = QLabel("📊 TRAINING DASHBOARD")
+        dashboard_header.setAlignment(Qt.AlignCenter)
+        dashboard_header.setMinimumHeight(50)
+        dashboard_header.setStyleSheet("""
+            QLabel {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, 
+                    stop:0 #667eea, stop:1 #764ba2);
+                color: white;
+                font-size: 16pt;
+                font-weight: bold;
+                border: none;
+                border-radius: 12px;
+            }
+        """)
+        right_layout.addWidget(dashboard_header)
         
         # Status banner
-        self.training_status_banner = QLabel("⏸ WAITING FOR TRAINING TO START")
+        self.training_status_banner = QLabel("⏸ WAITING FOR TRAINING")
         self.training_status_banner.setAlignment(Qt.AlignCenter)
-        self.training_status_banner.setMinimumHeight(50)
+        self.training_status_banner.setMinimumHeight(60)
         self.training_status_banner.setStyleSheet("""
             QLabel {
                 background: #ff9800;
                 color: white;
-                font-size: 12pt;
+                font-size: 14pt;
                 font-weight: bold;
-                border-radius: 6px;
-                padding: 10px;
+                border: none;
+                border-radius: 12px;
             }
         """)
         right_layout.addWidget(self.training_status_banner)
         
-        # Metrics grid (2x2)
-        metrics_grid = QGridLayout()
-        metrics_grid.setSpacing(10)
+        # EPOCH + STEPS row (compact side by side)
+        epoch_steps_row = QWidget()
+        epoch_steps_row.setMinimumHeight(140)
+        epoch_steps_layout = QHBoxLayout(epoch_steps_row)
+        epoch_steps_layout.setSpacing(0)
+        epoch_steps_layout.setContentsMargins(0, 0, 0, 0)
         
-        self.epoch_card = MetricCard("EPOCH", "📚", "0/0")
-        self.steps_card = MetricCard("STEPS", "🔥", "0/0")
-        self.loss_card = MetricCard("LOSS", "📉", "--·----")
-        self.eta_card = MetricCard("ETA", "⏱", "--m --s")
+        self.epoch_card = self._create_compact_metric_card("EPOCH", "📚", "0/0", "#1a1f35")
+        self.steps_card = self._create_compact_metric_card("STEPS", "🔥", "0/0", "#1f1a35")
         
-        metrics_grid.addWidget(self.epoch_card, 0, 0)
-        metrics_grid.addWidget(self.steps_card, 0, 1)
-        metrics_grid.addWidget(self.loss_card, 1, 0)
-        metrics_grid.addWidget(self.eta_card, 1, 1)
+        epoch_steps_layout.addWidget(self.epoch_card)
+        epoch_steps_layout.addWidget(self.steps_card)
+        right_layout.addWidget(epoch_steps_row)
         
-        right_layout.addLayout(metrics_grid)
+        # LOSS + ETA row (compact side by side)
+        loss_eta_row = QWidget()
+        loss_eta_row.setMinimumHeight(140)
+        loss_eta_layout = QHBoxLayout(loss_eta_row)
+        loss_eta_layout.setSpacing(0)
+        loss_eta_layout.setContentsMargins(0, 0, 0, 0)
         
-        # Progress bar
+        self.loss_card = self._create_compact_metric_card("LOSS", "📉", "--·----", "#35221a")
+        self.eta_card = self._create_compact_metric_card("ETA", "⏱", "--m --s", "#1a3522")
+        
+        loss_eta_layout.addWidget(self.loss_card)
+        loss_eta_layout.addWidget(self.eta_card)
+        right_layout.addWidget(loss_eta_row)
+        
+        # Progress label
         self.progress_label = QLabel("0.0% Complete")
         self.progress_label.setAlignment(Qt.AlignCenter)
+        self.progress_label.setMinimumHeight(35)
+        self.progress_label.setStyleSheet("""
+            QLabel {
+                background: #0f0f1a;
+                color: #888;
+                font-size: 13pt;
+                border: none;
+                border-radius: 12px;
+            }
+        """)
         right_layout.addWidget(self.progress_label)
         
-        # Additional metrics (3 cards)
-        extra_metrics = QHBoxLayout()
-        extra_metrics.setSpacing(10)
+        # LEARNING RATE + SPEED + GPU MEM row (3 cards)
+        extra_row = QWidget()
+        extra_row.setMinimumHeight(140)
+        extra_layout = QHBoxLayout(extra_row)
+        extra_layout.setSpacing(0)
+        extra_layout.setContentsMargins(0, 0, 0, 0)
         
-        self.learning_rate_card = MetricCard("LEARNING RATE", "📊", "--e-0")
-        self.speed_card = MetricCard("SPEED", "🚀", "-- samp/s")
-        self.gpu_mem_card = MetricCard("GPU MEMORY", "💾", "-- GB")
+        self.learning_rate_card = self._create_compact_metric_card("LR", "📊", "--e-0", "#2a1a35")
+        self.speed_card = self._create_compact_metric_card("SPEED", "🚀", "-- s/s", "#1a2535")
+        self.gpu_mem_card = self._create_compact_metric_card("GPU", "💾", "-- GB", "#35291a")
         
-        extra_metrics.addWidget(self.learning_rate_card)
-        extra_metrics.addWidget(self.speed_card)
-        extra_metrics.addWidget(self.gpu_mem_card)
-        
-        right_layout.addLayout(extra_metrics)
+        extra_layout.addWidget(self.learning_rate_card)
+        extra_layout.addWidget(self.speed_card)
+        extra_layout.addWidget(self.gpu_mem_card)
+        right_layout.addWidget(extra_row)
         
         # Loss Over Time Section
-        right_layout.addWidget(QLabel("<h3>📉 Loss Over Time</h3>"))
+        loss_section = QWidget()
+        loss_section.setMinimumHeight(180)
+        loss_section_layout = QVBoxLayout(loss_section)
+        loss_section_layout.setContentsMargins(15, 10, 15, 10)
+        loss_section_layout.setSpacing(5)
         
-        loss_frame = QFrame()
-        loss_frame.setFrameShape(QFrame.StyledPanel)
-        loss_frame.setMinimumHeight(150)
-        loss_layout = QVBoxLayout(loss_frame)
+        loss_section_layout.addWidget(QLabel("<b>📉 Loss Over Time</b>"))
         self.loss_chart_label = QLabel("Loss chart will appear here once training starts...")
         self.loss_chart_label.setAlignment(Qt.AlignCenter)
         self.loss_chart_label.setStyleSheet("color: #888;")
-        loss_layout.addWidget(self.loss_chart_label)
-        right_layout.addWidget(loss_frame)
+        loss_section_layout.addWidget(self.loss_chart_label, 1)
+        
+        loss_section.setStyleSheet("""
+            QWidget {
+                background: #0f0f1a;
+                border: none;
+                border-radius: 12px;
+            }
+        """)
+        right_layout.addWidget(loss_section)
         
         # Training Logs
+        logs_section = QWidget()
+        logs_section.setMinimumHeight(50)
+        logs_section_layout = QVBoxLayout(logs_section)
+        logs_section_layout.setContentsMargins(15, 10, 15, 10)
+        logs_section_layout.setSpacing(5)
+        
         logs_header = QHBoxLayout()
-        logs_header.addWidget(QLabel("<h3>📋 View Detailed Logs</h3>"))
+        logs_header.addWidget(QLabel("<b>📋 Detailed Logs</b>"))
         logs_header.addStretch(1)
         self.logs_expand_btn = QPushButton("▼ Show Logs")
         self.logs_expand_btn.setCheckable(True)
         self.logs_expand_btn.clicked.connect(self._toggle_logs)
         logs_header.addWidget(self.logs_expand_btn)
-        right_layout.addLayout(logs_header)
+        logs_section_layout.addLayout(logs_header)
+        
+        logs_section.setStyleSheet("""
+            QWidget {
+                background: #0f0f1a;
+                border: none;
+                border-radius: 12px;
+            }
+        """)
+        right_layout.addWidget(logs_section)
         
         self.train_log = QPlainTextEdit()
         self.train_log.setReadOnly(True)
         self.train_log.setMaximumBlockCount(10000)
-        self.train_log.setMaximumHeight(200)
+        self.train_log.setMaximumHeight(300)
         self.train_log.setVisible(False)
         right_layout.addWidget(self.train_log)
         
         right_layout.addStretch(1)
         
         # Add to splitter
-        splitter.addWidget(left_widget)
+        # Left column is long; make it scrollable so larger fonts don't get clipped.
+        left_scroll = QScrollArea()
+        left_scroll.setWidgetResizable(True)
+        left_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        left_scroll.setFrameShape(QFrame.NoFrame)
+        left_scroll.setWidget(left_widget)
+
+        # Give each side a sensible minimum so the dashboard can't get crushed.
+        left_scroll.setMinimumWidth(520)
+        right_widget.setMinimumWidth(400)
+
+        splitter.addWidget(left_scroll)
         splitter.addWidget(right_widget)
-        splitter.setSizes([500, 700])
+
+        # Dashboard = 1/3 of width, Config = 2/3
+        splitter.setStretchFactor(0, 2)
+        splitter.setStretchFactor(1, 1)
+
+        # Important: apply the initial size AFTER the widget is shown, otherwise Qt may override it.
+        def _apply_initial_split():
+            w = splitter.width() or 1400
+            left_w = int(w * 0.67)  # Config = 2/3
+            right_w = w - left_w    # Dashboard = 1/3
+            splitter.setSizes([left_w, right_w])
+
+        QTimer.singleShot(0, _apply_initial_split)
         
         main_layout.addWidget(splitter)
         
-        # Store metric cards for theme updates
+        # Store metric cards for updates (they're now just QWidgets with value_label and set_value)
         self.metric_cards = [
             self.epoch_card, self.steps_card, self.loss_card, self.eta_card,
             self.learning_rate_card, self.speed_card, self.gpu_mem_card
@@ -979,6 +1325,32 @@ class MainWindow(QMainWindow):
             capabilities = detect_model_capabilities(model_id=model_id)
             icons = get_capability_icons(capabilities)
             self.model_info_label.setText(f"Selected: {model_id}\n{icons} Capabilities detected")
+    
+    def _auto_generate_model_name(self):
+        """Auto-generate model name based on base model and dataset"""
+        from datetime import datetime
+        
+        # Get base model name (last part after /)
+        base_model = self.train_base_model.currentText().strip()
+        if not base_model or base_model == "(No models downloaded yet)":
+            return
+        
+        model_short = base_model.split('/')[-1].replace('-bnb-4bit', '').replace('unsloth-', '')
+        
+        # Get dataset name (filename without extension)
+        dataset_path = self.train_data_path.text().strip()
+        if dataset_path:
+            dataset_short = Path(dataset_path).stem
+        else:
+            dataset_short = "dataset"
+        
+        # Generate: YYMMDD_modelname_dataset_HHMM
+        now = datetime.now()
+        auto_name = f"{now.strftime('%y%m%d')}_{model_short}_{dataset_short}_{now.strftime('%H%M')}"
+        
+        # Only set if field is empty
+        if not self.train_model_name.text().strip():
+            self.train_model_name.setText(auto_name)
     
     def _validate_dataset(self):
         """Validate and show dataset info"""
@@ -1028,6 +1400,52 @@ class MainWindow(QMainWindow):
             self.advanced_btn.setText("▼ Advanced Settings")
         else:
             self.advanced_btn.setText("▶ Advanced Settings")
+    
+    def _create_compact_metric_card(self, title: str, icon: str, value: str, bg_color: str):
+        """Create a futuristic compact metric card with fixed height"""
+        card = QWidget()
+        card.setMinimumHeight(140)
+        card.setMaximumHeight(140)
+        
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(5)
+        
+        # Title + Icon
+        header = QHBoxLayout()
+        icon_label = QLabel(icon)
+        icon_label.setStyleSheet("font-size: 14pt;")
+        header.addWidget(icon_label)
+        
+        title_label = QLabel(title)
+        title_label.setStyleSheet("font-size: 10pt; font-weight: bold; color: #888;")
+        header.addWidget(title_label)
+        header.addStretch(1)
+        layout.addLayout(header)
+        
+        layout.addStretch(1)
+        
+        # Value
+        value_label = QLabel(value)
+        value_label.setAlignment(Qt.AlignCenter)
+        value_label.setStyleSheet("font-size: 24pt; font-weight: bold; color: white;")
+        layout.addWidget(value_label)
+        
+        layout.addStretch(1)
+        
+        card.setStyleSheet(f"""
+            QWidget {{
+                background: {bg_color};
+                border: none;
+                border-radius: 12px;
+            }}
+        """)
+        
+        # Store value_label for updates
+        card.value_label = value_label
+        card.set_value = lambda v: value_label.setText(v)
+        
+        return card
     
     def _toggle_logs(self):
         """Toggle training logs visibility"""
@@ -1122,7 +1540,7 @@ class MainWindow(QMainWindow):
         
         # Header
         header_a = QLabel("🔵 <b>Model A</b>")
-        header_a.setStyleSheet("font-size: 14pt; padding: 10px; background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #667eea, stop:1 #764ba2); color: white; border-radius: 6px;")
+        header_a.setStyleSheet("font-size: 16pt; padding: 10px; background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #667eea, stop:1 #764ba2); color: white; border-radius: 6px;")
         model_a_layout.addWidget(header_a)
         
         # Model selection
@@ -1144,7 +1562,7 @@ class MainWindow(QMainWindow):
         
         # Header
         header_b = QLabel("🟢 <b>Model B</b>")
-        header_b.setStyleSheet("font-size: 14pt; padding: 10px; background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #4CAF50, stop:1 #2E7D32); color: white; border-radius: 6px;")
+        header_b.setStyleSheet("font-size: 16pt; padding: 10px; background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #4CAF50, stop:1 #2E7D32); color: white; border-radius: 6px;")
         model_b_layout.addWidget(header_b)
         
         # Model selection
@@ -1167,18 +1585,18 @@ class MainWindow(QMainWindow):
         
         self.test_prompt = QTextEdit()
         self.test_prompt.setPlaceholderText("Type your message here...")
-        self.test_prompt.setMinimumHeight(100)
-        self.test_prompt.setMaximumHeight(100)
+        self.test_prompt.setMinimumHeight(120)
+        self.test_prompt.setMaximumHeight(120)
         prompt_layout.addWidget(self.test_prompt)
         
         # Buttons row
         btn_layout = QHBoxLayout()
         self.test_send_btn = QPushButton("📤 Send")
         self.test_send_btn.clicked.connect(self._run_side_by_side_test)
-        self.test_send_btn.setMinimumHeight(40)
+        self.test_send_btn.setMinimumHeight(50)
         self.test_send_btn.setStyleSheet("""
             QPushButton {
-                font-size: 12pt;
+                font-size: 14pt;
                 font-weight: bold;
             }
         """)
@@ -1444,7 +1862,7 @@ class MainWindow(QMainWindow):
         # Refresh models
         self._refresh_models()
         
-        # Refresh test model dropdowns with ONLY DOWNLOADED models
+        # Get ONLY DOWNLOADED models from the models directory
         models_dir = self.root / "models"
         downloaded_models = []
         
@@ -1453,7 +1871,23 @@ class MainWindow(QMainWindow):
                 if model_dir.is_dir():
                     downloaded_models.append(str(model_dir))  # Full path for inference
         
-        # Update Model A dropdown
+        # Update Train tab: Select Base Model dropdown with ONLY downloaded models
+        current_train = self.train_base_model.currentText()
+        self.train_base_model.clear()
+        
+        if downloaded_models:
+            for model_path in downloaded_models:
+                model_name = Path(model_path).name
+                self.train_base_model.addItem(model_name, model_path)
+        else:
+            self.train_base_model.addItem("(No models downloaded yet)")
+        
+        if current_train:
+            idx = self.train_base_model.findText(current_train)
+            if idx >= 0:
+                self.train_base_model.setCurrentIndex(idx)
+        
+        # Update Test tab Model A dropdown with ONLY DOWNLOADED models
         current_a = self.test_model_a.currentText()
         self.test_model_a.clear()
         self.test_model_a.addItem("None")
@@ -1503,6 +1937,11 @@ class MainWindow(QMainWindow):
 
 def main() -> int:
     app = QApplication(sys.argv)
+    # Set base font size for the entire application - INCREASED to 16pt
+    app_font = QFont()
+    # Keep this modest; very large fonts require scroll areas (added above).
+    app_font.setPointSize(14)
+    app.setFont(app_font)
     win = MainWindow()
     win.show()
     return app.exec()
