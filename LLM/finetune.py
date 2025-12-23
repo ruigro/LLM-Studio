@@ -81,7 +81,119 @@ def main():
     )
 
     print("Preparing dataset...")
-    dataset = load_dataset("json", data_files=DATASET_PATH, split="train")
+    
+    # Smart dataset loader - handles multiple formats automatically
+    import json
+    import tempfile
+    
+    with open(DATASET_PATH, 'r', encoding='utf-8') as f:
+        raw_data = json.load(f)
+    
+    # Step 1: Convert to list if needed
+    if isinstance(raw_data, dict):
+        # Try common keys that contain the actual data
+        for key in ['data', 'examples', 'train', 'dataset', 'items', 'conversations']:
+            if key in raw_data and isinstance(raw_data[key], list):
+                raw_data = raw_data[key]
+                print(f"✓ Extracted data from '{key}' field")
+                break
+        else:
+            # If still a dict, treat as single example
+            raw_data = [raw_data]
+            print("✓ Converted single dict to list")
+    
+    if not isinstance(raw_data, list):
+        raise ValueError(f"Dataset must be a list or dict with data field. Got: {type(raw_data)}")
+    
+    print(f"✓ Found {len(raw_data)} examples")
+    
+    # Step 2: Normalize field names (handle various formats)
+    normalized_data = []
+    
+    # Detect format from first item
+    if len(raw_data) > 0:
+        first = raw_data[0]
+        
+        # Determine instruction/output field names
+        instruction_key = None
+        output_key = None
+        
+        # Common field name mappings
+        instruction_fields = ['instruction', 'prompt', 'input', 'question', 'query', 'text', 'user', 'human']
+        output_fields = ['output', 'response', 'completion', 'answer', 'reply', 'assistant', 'gpt', 'bot']
+        
+        # Find matching fields
+        for key in instruction_fields:
+            if key in first:
+                instruction_key = key
+                break
+        
+        for key in output_fields:
+            if key in first:
+                output_key = key
+                break
+        
+        # Handle chat/messages format (like ShareGPT, OpenAI)
+        if 'messages' in first or 'conversations' in first:
+            print("✓ Detected chat/messages format")
+            msg_key = 'messages' if 'messages' in first else 'conversations'
+            for item in raw_data:
+                messages = item[msg_key]
+                # Extract user/assistant pairs
+                instruction = ""
+                output = ""
+                for msg in messages:
+                    role = msg.get('role', msg.get('from', '')).lower()
+                    content = msg.get('content', msg.get('value', ''))
+                    if role in ['user', 'human']:
+                        instruction = content
+                    elif role in ['assistant', 'gpt', 'bot']:
+                        output = content
+                if instruction and output:
+                    normalized_data.append({'instruction': instruction, 'output': output})
+        
+        # Handle standard formats
+        elif instruction_key and output_key:
+            print(f"✓ Detected format: '{instruction_key}' -> '{output_key}'")
+            for item in raw_data:
+                normalized_data.append({
+                    'instruction': str(item.get(instruction_key, '')),
+                    'output': str(item.get(output_key, ''))
+                })
+        
+        # Handle Alpaca format with optional input field
+        elif 'instruction' in first:
+            print("✓ Detected Alpaca format (instruction + optional input)")
+            for item in raw_data:
+                instruction = item.get('instruction', '')
+                inp = item.get('input', '')
+                output = item.get('output', item.get('response', ''))
+                # Combine instruction and input if present
+                if inp:
+                    full_instruction = f"{instruction}\n\nInput: {inp}"
+                else:
+                    full_instruction = instruction
+                normalized_data.append({'instruction': full_instruction, 'output': output})
+        
+        else:
+            raise ValueError(f"Could not detect dataset format. First item keys: {list(first.keys())}\n"
+                           f"Expected one of: {instruction_fields} -> {output_fields}, or 'messages' format")
+    
+    if not normalized_data:
+        raise ValueError("No valid examples found in dataset")
+    
+    print(f"✓ Normalized {len(normalized_data)} examples")
+    
+    # Step 3: Write to JSONL format for reliable loading
+    temp_file = tempfile.NamedTemporaryFile(mode='w', suffix='.jsonl', delete=False, encoding='utf-8')
+    for item in normalized_data:
+        temp_file.write(json.dumps(item, ensure_ascii=False) + '\n')
+    temp_file.close()
+    
+    # Step 4: Load with HuggingFace datasets
+    dataset = load_dataset("json", data_files=temp_file.name, split="train")
+    print(f"✓ Loaded dataset with {len(dataset)} examples")
+    
     if args.max_examples:
         dataset = dataset.select(range(min(args.max_examples, len(dataset))))
 
