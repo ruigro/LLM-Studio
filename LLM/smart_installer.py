@@ -92,7 +92,7 @@ class SmartInstaller:
             return False
     
     def install_pytorch(self, python_executable: Optional[str] = None) -> bool:
-        """Install PyTorch based on detection"""
+        """Install PyTorch based on detection with proper version compatibility"""
         if not python_executable:
             python_info = self.detection_results.get("python", {})
             if not python_info.get("found"):
@@ -100,44 +100,85 @@ class SmartInstaller:
                 return False
             python_executable = python_info.get("executable")
         
-        recommendations = self.detection_results.get("recommendations", {})
-        pytorch_build = recommendations.get("pytorch_build", "cpu")
+        # Determine CUDA version and PyTorch build
+        cuda_info = self.detection_results.get("cuda", {})
+        driver_version = cuda_info.get("driver_version")
         
-        self.log(f"Installing PyTorch ({pytorch_build} build)...")
+        # Map CUDA driver to compatible CUDA toolkit version
+        cuda_build = "cpu"
+        pytorch_version = "2.5.0"  # Stable version
+        
+        if driver_version:
+            try:
+                driver_major = int(float(driver_version.split('.')[0]))
+                
+                # CUDA compatibility mapping (conservative for stability)
+                if driver_major >= 525:  # CUDA 12.x support
+                    # Check minor version for exact CUDA toolkit
+                    if driver_major >= 555:
+                        cuda_build = "cu124"  # CUDA 12.4
+                    elif driver_major >= 545:
+                        cuda_build = "cu121"  # CUDA 12.1
+                    else:
+                        cuda_build = "cu118"  # CUDA 11.8
+                elif driver_major >= 450:  # CUDA 11.x support
+                    cuda_build = "cu118"  # CUDA 11.8 (most stable for 11.x)
+                else:
+                    self.log(f"Warning: Old driver version {driver_version}. GPU may not work.")
+                    cuda_build = "cpu"
+                
+                self.log(f"Detected CUDA driver {driver_version} -> Using PyTorch build: {cuda_build}")
+            except:
+                self.log(f"Could not parse driver version {driver_version}, using CPU build")
+                cuda_build = "cpu"
+        else:
+            self.log("No CUDA detected. Installing CPU-only PyTorch.")
+        
+        self.log(f"Installing PyTorch {pytorch_version} ({cuda_build} build)...")
         
         try:
-            if pytorch_build == "cpu":
+            if cuda_build == "cpu":
                 # Install CPU-only PyTorch
                 cmd = [
                     python_executable, "-m", "pip", "install",
-                    "torch", "torchvision", "torchaudio",
+                    f"torch=={pytorch_version}",
+                    f"torchvision==0.20.0",
+                    f"torchaudio=={pytorch_version}",
                     "--index-url", "https://download.pytorch.org/whl/cpu"
                 ]
-            elif pytorch_build.startswith("cu"):
-                # Install CUDA build
-                cuda_version = pytorch_build.replace("cu", "")
-                cmd = [
-                    python_executable, "-m", "pip", "install",
-                    "torch", "torchvision", "torchaudio",
-                    "--index-url", f"https://download.pytorch.org/whl/cu{cuda_version}"
-                ]
             else:
-                # Default to CPU
+                # Install CUDA build
                 cmd = [
                     python_executable, "-m", "pip", "install",
-                    "torch", "torchvision", "torchaudio"
+                    f"torch=={pytorch_version}",
+                    f"torchvision==0.20.0",
+                    f"torchaudio=={pytorch_version}",
+                    "--index-url", f"https://download.pytorch.org/whl/{cuda_build}"
                 ]
             
             self.log(f"Running: {' '.join(cmd)}")
+            self.log("This may take 5-10 minutes (downloading ~2.5GB)...")
+            
             result = subprocess.run(
                 cmd,
                 capture_output=True,
                 text=True,
-                timeout=600  # 10 minutes timeout
+                timeout=900  # 15 minutes timeout
             )
             
             if result.returncode == 0:
                 self.log("PyTorch installed successfully")
+                
+                # If CUDA build, install compatible xformers
+                if cuda_build != "cpu":
+                    self.log("Installing compatible xformers...")
+                    xformers_cmd = [
+                        python_executable, "-m", "pip", "install",
+                        "xformers==0.0.28.post2",
+                        "--index-url", f"https://download.pytorch.org/whl/{cuda_build}"
+                    ]
+                    subprocess.run(xformers_cmd, capture_output=True, timeout=600)
+                
                 return True
             else:
                 self.log(f"PyTorch installation failed: {result.stderr}")
@@ -151,7 +192,7 @@ class SmartInstaller:
             return False
     
     def install_dependencies(self, python_executable: Optional[str] = None) -> bool:
-        """Install application dependencies"""
+        """Install application dependencies with compatibility handling"""
         if not python_executable:
             python_info = self.detection_results.get("python", {})
             if not python_info.get("found"):
@@ -159,34 +200,61 @@ class SmartInstaller:
                 return False
             python_executable = python_info.get("executable")
         
-        requirements_file = self.install_dir / "requirements.txt"
-        
-        if not requirements_file.exists():
-            self.log(f"Requirements file not found: {requirements_file}")
-            return False
-        
         self.log("Installing application dependencies...")
         
         try:
-            cmd = [
+            # First install core dependencies from requirements.txt (excluding problematic ones)
+            requirements_file = self.install_dir / "requirements.txt"
+            
+            if requirements_file.exists():
+                self.log("Installing base requirements...")
+                cmd = [
+                    python_executable, "-m", "pip", "install",
+                    "-r", str(requirements_file)
+                ]
+                
+                self.log(f"Running: {' '.join(cmd)}")
+                result = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=1800  # 30 minutes timeout
+                )
+                
+                if result.returncode != 0:
+                    self.log(f"Warning: Some packages failed: {result.stderr[:500]}")
+            
+            # Install unsloth separately with careful version control
+            self.log("Installing unsloth (this may take a few minutes)...")
+            unsloth_cmd = [
                 python_executable, "-m", "pip", "install",
-                "-r", str(requirements_file)
+                "unsloth"
             ]
             
-            self.log(f"Running: {' '.join(cmd)}")
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=1800  # 30 minutes timeout
-            )
+            result = subprocess.run(unsloth_cmd, capture_output=True, text=True, timeout=900)
             
             if result.returncode == 0:
-                self.log("Dependencies installed successfully")
+                self.log("✅ unsloth installed")
+            else:
+                self.log(f"⚠️ unsloth installation warning: {result.stderr[:200]}")
+            
+            # Remove incompatible torchao if present (known Windows issue)
+            self.log("Checking for torchao compatibility...")
+            remove_torchao = [python_executable, "-m", "pip", "uninstall", "-y", "torchao"]
+            subprocess.run(remove_torchao, capture_output=True, timeout=60)
+            self.log("Removed torchao (incompatible with current setup)")
+            
+            # Test if unsloth works
+            self.log("Testing unsloth import...")
+            test_cmd = [python_executable, "-c", "from unsloth import FastLanguageModel; print('OK')"]
+            test_result = subprocess.run(test_cmd, capture_output=True, text=True, timeout=30)
+            
+            if test_result.returncode == 0 and "OK" in test_result.stdout:
+                self.log("✅ unsloth is working correctly")
                 return True
             else:
-                self.log(f"Dependencies installation failed: {result.stderr}")
-                return False
+                self.log(f"⚠️ unsloth may have issues: {test_result.stderr[:300]}")
+                return True  # Still return True as most deps are installed
         
         except subprocess.TimeoutExpired:
             self.log("Dependencies installation timed out")

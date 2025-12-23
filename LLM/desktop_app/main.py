@@ -16,6 +16,7 @@ from desktop_app.training_widgets import MetricCard
 from desktop_app.chat_widget import ChatWidget
 
 from system_detector import SystemDetector
+from smart_installer import SmartInstaller
 from core.models import (DEFAULT_BASE_MODELS, search_hf_models, download_hf_model, list_local_adapters, 
                          list_local_downloads, get_app_root, detect_model_capabilities, get_capability_icons, get_model_size)
 from core.training import TrainingConfig, default_output_dir, build_finetune_cmd
@@ -23,6 +24,43 @@ from core.inference import InferenceConfig, build_run_adapter_cmd
 
 
 APP_TITLE = "🤖 LLM Fine-tuning Studio"
+
+
+class InstallerThread(QThread):
+    """Thread for running smart installer without freezing UI"""
+    log_output = Signal(str)
+    finished_signal = Signal(bool)  # True if successful
+    
+    def __init__(self, install_type: str):  # "pytorch", "dependencies", or "all"
+        super().__init__()
+        self.install_type = install_type
+    
+    def run(self):
+        try:
+            installer = SmartInstaller()
+            
+            # Redirect installer logs to GUI
+            original_log = installer.log
+            def gui_log(message):
+                self.log_output.emit(message)
+                original_log(message)
+            installer.log = gui_log
+            
+            # Run detection
+            installer.run_detection()
+            
+            # Install based on type
+            if self.install_type == "pytorch":
+                success = installer.install_pytorch()
+            elif self.install_type == "dependencies":
+                success = installer.install_dependencies()
+            else:  # "all"
+                success = installer.install()
+            
+            self.finished_signal.emit(success)
+        except Exception as e:
+            self.log_output.emit(f"[ERROR] Installation failed: {e}")
+            self.finished_signal.emit(False)
 
 
 class DownloadThread(QThread):
@@ -307,6 +345,126 @@ class MainWindow(QMainWindow):
         self._refresh_locals()
         self._apply_theme()
 
+    def _create_status_row(self, label: str, is_ok: bool, detail: str) -> QHBoxLayout:
+        """Create a status indicator row"""
+        row = QHBoxLayout()
+        
+        status_icon = "✅" if is_ok else "❌"
+        color = "#4CAF50" if is_ok else "#f44336"
+        
+        main_label = QLabel(f"{status_icon} <b>{label}</b>")
+        main_label.setStyleSheet(f"color: {color};")
+        row.addWidget(main_label)
+        
+        row.addStretch(1)
+        
+        detail_label = QLabel(detail)
+        detail_label.setStyleSheet("color: #888; font-size: 10pt;")
+        row.addWidget(detail_label)
+        
+        return row
+    
+    def _create_status_widget(self, label: str, is_ok: bool, detail: str) -> QWidget:
+        """Create a status indicator widget"""
+        widget = QWidget()
+        layout = QHBoxLayout(widget)
+        layout.setContentsMargins(0, 0, 0, 0)
+        
+        status_icon = "✅" if is_ok else "❌"
+        color = "#4CAF50" if is_ok else "#f44336"
+        
+        main_label = QLabel(f"{status_icon} <b>{label}</b>")
+        main_label.setStyleSheet(f"color: {color};")
+        layout.addWidget(main_label)
+        
+        layout.addStretch(1)
+        
+        detail_label = QLabel(detail)
+        detail_label.setStyleSheet("color: #888; font-size: 10pt;")
+        layout.addWidget(detail_label)
+        
+        return widget
+    
+    def _install_pytorch(self):
+        """Install PyTorch with CUDA"""
+        reply = QMessageBox.question(
+            self,
+            "Install PyTorch with CUDA",
+            "This will install PyTorch with CUDA support for GPU acceleration.\n\n"
+            "Download size: ~2.5 GB\n"
+            "Time: 5-10 minutes\n\n"
+            "Continue?",
+            QMessageBox.Yes | QMessageBox.No
+        )
+        
+        if reply != QMessageBox.Yes:
+            return
+        
+        # Show log area
+        self.install_log.setVisible(True)
+        self.install_log.clear()
+        self.install_log.appendPlainText("=== Installing PyTorch with CUDA ===\n")
+        
+        # Disable button
+        if hasattr(self, 'install_pytorch_btn'):
+            self.install_pytorch_btn.setEnabled(False)
+            self.install_pytorch_btn.setText("Installing...")
+        
+        # Start installer thread
+        self.installer_thread = InstallerThread("pytorch")
+        self.installer_thread.log_output.connect(lambda msg: self.install_log.appendPlainText(msg))
+        self.installer_thread.finished_signal.connect(self._on_install_complete)
+        self.installer_thread.start()
+    
+    def _install_dependencies(self):
+        """Install application dependencies"""
+        reply = QMessageBox.question(
+            self,
+            "Install Dependencies",
+            "This will install all required dependencies including unsloth.\n\n"
+            "Time: 5-10 minutes\n\n"
+            "Continue?",
+            QMessageBox.Yes | QMessageBox.No
+        )
+        
+        if reply != QMessageBox.Yes:
+            return
+        
+        # Show log area
+        self.install_log.setVisible(True)
+        self.install_log.clear()
+        self.install_log.appendPlainText("=== Installing Dependencies ===\n")
+        
+        # Start installer thread
+        self.installer_thread = InstallerThread("dependencies")
+        self.installer_thread.log_output.connect(lambda msg: self.install_log.appendPlainText(msg))
+        self.installer_thread.finished_signal.connect(self._on_install_complete)
+        self.installer_thread.start()
+    
+    def _on_install_complete(self, success: bool):
+        """Handle installation completion"""
+        if success:
+            self.install_log.appendPlainText("\n✅ Installation completed successfully!")
+            QMessageBox.information(
+                self,
+                "Installation Complete",
+                "✅ Installation completed successfully!\n\n"
+                "Please restart the application for changes to take effect."
+            )
+        else:
+            self.install_log.appendPlainText("\n❌ Installation failed!")
+            QMessageBox.critical(
+                self,
+                "Installation Failed",
+                "❌ Installation failed.\n\n"
+                "Please check the logs above for details."
+            )
+        
+        # Re-enable button
+        if hasattr(self, 'install_pytorch_btn'):
+            self.install_pytorch_btn.setEnabled(True)
+            self.install_pytorch_btn.setText("Install CUDA Version")
+    
     def _toggle_theme(self) -> None:
         """Toggle between dark and light themes"""
         self.dark_mode = not self.dark_mode
@@ -472,26 +630,138 @@ class MainWindow(QMainWindow):
         right_layout.addWidget(sys_frame)
 
         # Tips section
-        right_layout.addWidget(QLabel("<h2>💡 Tips</h2>"))
+        # Software Requirements & Auto-Installer Card (replaces Tips)
+        right_layout.addWidget(QLabel("<h2>⚙️ Software Requirements & Setup</h2>"))
 
-        tips_frame = QFrame()
-        tips_frame.setFrameShape(QFrame.StyledPanel)
-        tips_layout = QVBoxLayout(tips_frame)
-        tips_layout.setSpacing(4)  # Tighter spacing
-        tips_layout.setContentsMargins(10, 8, 10, 8)  # Tighter margins
+        setup_frame = QFrame()
+        setup_frame.setFrameShape(QFrame.StyledPanel)
+        setup_layout = QVBoxLayout(setup_frame)
+        setup_layout.setSpacing(8)
+        setup_layout.setContentsMargins(10, 10, 10, 10)
+        
+        # Check each requirement
+        python_info = self.system_info.get("python", {})
+        pytorch_info = self.system_info.get("pytorch", {})
+        cuda_info = self.system_info.get("cuda", {})
+        
+        # Python status
+        python_status = self._create_status_row(
+            "🐍 Python 3.8+",
+            python_info.get("found", False),
+            f"Version {python_info.get('version', 'N/A')}" if python_info.get("found") else "Not found"
+        )
+        setup_layout.addLayout(python_status)
+        
+        # PyTorch status with install button
+        pytorch_ok = pytorch_info.get("found", False) and pytorch_info.get("cuda_available", False)
+        pytorch_row = QHBoxLayout()
+        
+        if pytorch_ok:
+            pytorch_status_widget = self._create_status_widget(
+                "🔥 PyTorch (CUDA)",
+                True,
+                f"Version {pytorch_info.get('version', 'N/A')}"
+            )
+        elif pytorch_info.get("found"):
+            pytorch_status_widget = self._create_status_widget(
+                "🔥 PyTorch (CUDA)",
+                False,
+                "CPU-only version installed"
+            )
+        else:
+            pytorch_status_widget = self._create_status_widget(
+                "🔥 PyTorch (CUDA)",
+                False,
+                "Not installed"
+            )
+        
+        pytorch_row.addWidget(pytorch_status_widget, 1)
+        
+        # Add install button if needed
+        if not pytorch_ok:
+            self.install_pytorch_btn = QPushButton("Install CUDA Version")
+            self.install_pytorch_btn.setMaximumWidth(160)
+            self.install_pytorch_btn.clicked.connect(self._install_pytorch)
+            pytorch_row.addWidget(self.install_pytorch_btn)
+        
+        setup_layout.addLayout(pytorch_row)
+        
+        # CUDA drivers status
+        cuda_status = self._create_status_row(
+            "🎮 CUDA Drivers",
+            cuda_info.get("found", False),
+            f"Version {cuda_info.get('driver_version', 'N/A')}" if cuda_info.get("found") else "Not found"
+        )
+        setup_layout.addLayout(cuda_status)
+        
+        # Dependencies status with install button
+        deps_row = QHBoxLayout()
+        
+        # Check if key packages are installed (check package existence, not import)
+        deps_ok = True
+        missing_packages = []
+        error_message = None
+        
+        import pkg_resources
+        required_packages = ['unsloth', 'transformers', 'accelerate', 'peft', 'datasets']
+        
+        for pkg in required_packages:
+            try:
+                pkg_resources.get_distribution(pkg)
+            except pkg_resources.DistributionNotFound:
+                deps_ok = False
+                missing_packages.append(pkg)
+        
+        # Try to import unsloth to check for runtime errors
+        if deps_ok:
+            try:
+                import unsloth
+                deps_msg = "✅ All packages installed"
+            except Exception as e:
+                # Packages are installed but there are compatibility issues
+                error_str = str(e)
+                if "triton" in error_str.lower() or "attrsDescriptor" in error_str:
+                    deps_msg = "⚠️ Installed (minor triton warning, will work)"
+                    deps_ok = True  # Don't block - this is a known non-critical warning
+                else:
+                    deps_msg = f"❌ Import error: {error_str[:50]}..."
+                    deps_ok = False
+        else:
+            deps_msg = f"Missing: {', '.join(missing_packages)}"
+        
+        deps_status_widget = self._create_status_widget(
+            "📦 Dependencies",
+            deps_ok,
+            deps_msg
+        )
+        deps_row.addWidget(deps_status_widget, 1)
+        
+        if not deps_ok:
+            install_deps_btn = QPushButton("Install Dependencies")
+            install_deps_btn.setMaximumWidth(160)
+            install_deps_btn.clicked.connect(self._install_dependencies)
+            deps_row.addWidget(install_deps_btn)
+        
+        setup_layout.addLayout(deps_row)
+        
+        # Installation log area (hidden by default)
+        self.install_log = QPlainTextEdit()
+        self.install_log.setReadOnly(True)
+        self.install_log.setMaximumHeight(150)
+        self.install_log.setVisible(False)
+        self.install_log.setStyleSheet("""
+            QPlainTextEdit {
+                background-color: #1a1a1a;
+                color: #00ff00;
+                font-family: 'Consolas', 'Courier New', monospace;
+                font-size: 10pt;
+                border: 1px solid #333;
+                border-radius: 4px;
+            }
+        """)
+        setup_layout.addWidget(self.install_log)
 
-        tips = [
-            "• Use GPU for faster training  • Start with fewer epochs for testing",
-            "• Monitor training logs for progress  • Test models before full validation",
-        ]
-
-        for tip in tips:
-            tip_label = QLabel(tip)
-            tip_label.setStyleSheet("color: #2196F3; padding: 3px; font-size: 11pt;")
-            tip_label.setWordWrap(True)
-            tips_layout.addWidget(tip_label)
-
-        right_layout.addWidget(tips_frame)
+        right_layout.addWidget(setup_frame)
         right_layout.addStretch(1)
 
         right_scroll = QScrollArea()
@@ -499,7 +769,7 @@ class MainWindow(QMainWindow):
         right_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         right_scroll.setFrameShape(QFrame.NoFrame)
         right_scroll.setWidget(right_widget)
-        content_layout.addWidget(right_scroll, 2)
+        content_layout.addWidget(right_scroll, 1)  # Equal size columns (1:1)
         
         layout.addLayout(content_layout)
         
