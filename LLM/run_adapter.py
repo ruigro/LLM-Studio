@@ -8,13 +8,24 @@ Usage examples:
 import argparse
 import torch
 import warnings
-from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
-from peft import PeftModel
+import sys
+import platform
 
 # Suppress known warnings
 warnings.filterwarnings("ignore", message=".*quantization_config.*")
 warnings.filterwarnings("ignore", message=".*pkg_resources.*")
 
+# Check if running on Windows
+IS_WINDOWS = platform.system() == "Windows"
+
+# Check for optional dependencies early
+try:
+    from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
+    from peft import PeftModel
+except ImportError as e:
+    print(f"❌ Missing required package: {e}", file=sys.stderr)
+    print("Please run: pip install transformers peft", file=sys.stderr)
+    sys.exit(1)
 
 # Optional: import weave to enable W&B Weave tracing if installed
 try:
@@ -25,12 +36,116 @@ except Exception:
 
 
 def load_model(base_model, adapter_dir, use_4bit=True, offload=True):
+    import os
+    
     tokenizer = None
+    
+    # If adapter_dir is None, we're loading base model only
+    if adapter_dir is None:
+        print(f"[INFO] Loading base model only (no adapter): {base_model}")
+        tokenizer = AutoTokenizer.from_pretrained(base_model)
+        print("[OK] Tokenizer loaded from base model")
+        
+        # Ensure pad token is set
+        if tokenizer.pad_token is None:
+            tokenizer.pad_token = tokenizer.eos_token
+            print(f"[INFO] Set pad_token to eos_token: {tokenizer.eos_token}")
+        
+        # Load base model
+        # On Windows, bitsandbytes is unreliable - use FP16 instead
+        if use_4bit and not IS_WINDOWS:
+            print("[INFO] Loading with 4-bit quantization (non-Windows)")
+            bnb_config = BitsAndBytesConfig(
+                load_in_4bit=True,
+                bnb_4bit_compute_dtype=torch.float16,
+            )
+            try:
+                model = AutoModelForCausalLM.from_pretrained(
+                    base_model,
+                    quantization_config=bnb_config,
+                    trust_remote_code=True,
+                )
+            except ImportError as e:
+                error_str = str(e).lower()
+                if "timm" in error_str:
+                    print(f"❌ Error: Vision model requires 'timm' package", file=sys.stderr)
+                    print("Please run: pip install timm>=0.9.0", file=sys.stderr)
+                    raise RuntimeError("Missing dependency: timm. Install with: pip install timm>=0.9.0")
+                elif "einops" in error_str:
+                    print(f"❌ Error: Model requires 'einops' package", file=sys.stderr)
+                    print("Please run: pip install einops>=0.6.0", file=sys.stderr)
+                    raise RuntimeError("Missing dependency: einops. Install with: pip install einops>=0.6.0")
+                elif "open_clip" in error_str or "open-clip" in error_str:
+                    print(f"❌ Error: CLIP-based model requires 'open-clip-torch' package", file=sys.stderr)
+                    print("Please run: pip install open-clip-torch>=2.20.0", file=sys.stderr)
+                    raise RuntimeError("Missing dependency: open-clip-torch. Install with: pip install open-clip-torch>=2.20.0")
+                raise
+            except Exception:
+                # Fallback to non-quantized
+                print("[WARN] 4-bit loading failed, falling back to FP16")
+                model = AutoModelForCausalLM.from_pretrained(
+                    base_model,
+                    torch_dtype=torch.float16,
+                    device_map="cuda",
+                    low_cpu_mem_usage=True,
+                    trust_remote_code=True,
+                )
+        else:
+            # Windows or non-4bit: use FP16 on CUDA
+            if IS_WINDOWS:
+                print("[INFO] Windows detected - loading with FP16 (bitsandbytes disabled)")
+            else:
+                print("[INFO] Loading without quantization")
+            
+            try:
+                model = AutoModelForCausalLM.from_pretrained(
+                    base_model,
+                    torch_dtype=torch.float16,
+                    device_map="cuda" if torch.cuda.is_available() else "cpu",
+                    low_cpu_mem_usage=True,
+                    trust_remote_code=True,
+                )
+            except ImportError as e:
+                error_str = str(e).lower()
+                if "timm" in error_str:
+                    print(f"❌ Error: Vision model requires 'timm' package", file=sys.stderr)
+                    print("Please run: pip install timm>=0.9.0", file=sys.stderr)
+                    raise RuntimeError("Missing dependency: timm. Install with: pip install timm>=0.9.0")
+                elif "einops" in error_str:
+                    print(f"❌ Error: Model requires 'einops' package", file=sys.stderr)
+                    print("Please run: pip install einops>=0.6.0", file=sys.stderr)
+                    raise RuntimeError("Missing dependency: einops. Install with: pip install einops>=0.6.0")
+                elif "open_clip" in error_str or "open-clip" in error_str:
+                    print(f"❌ Error: CLIP-based model requires 'open-clip-torch' package", file=sys.stderr)
+                    print("Please run: pip install open-clip-torch>=2.20.0", file=sys.stderr)
+                    raise RuntimeError("Missing dependency: open-clip-torch. Install with: pip install open-clip-torch>=2.20.0")
+                raise
+        
+        return tokenizer, model
+    
+    # Check if adapter_dir is a checkpoint subdirectory and use parent if so
+    if "checkpoint-" in adapter_dir and os.path.basename(adapter_dir).startswith("checkpoint-"):
+        print(f"[INFO] Detected checkpoint subdirectory, using parent: {os.path.dirname(adapter_dir)}")
+        adapter_dir = os.path.dirname(adapter_dir)
+    
+    # Try loading tokenizer from adapter dir first, then base model
     try:
-        # Prefer tokenizer from adapter dir if it contains one
-        tokenizer = AutoTokenizer.from_pretrained(adapter_dir, use_fast=False, fix_mistral_regex=True)
-    except Exception:
-        tokenizer = AutoTokenizer.from_pretrained(base_model, use_fast=False, fix_mistral_regex=True)
+        print(f"[INFO] Loading tokenizer from adapter dir: {adapter_dir}")
+        tokenizer = AutoTokenizer.from_pretrained(adapter_dir)
+        print("[OK] Tokenizer loaded from adapter dir")
+    except Exception as e:
+        print(f"[WARN] Could not load tokenizer from adapter dir: {e}")
+        print(f"[INFO] Loading tokenizer from base model: {base_model}")
+        try:
+            tokenizer = AutoTokenizer.from_pretrained(base_model)
+            print("[OK] Tokenizer loaded from base model")
+        except Exception as e2:
+            raise RuntimeError(f"Failed to load tokenizer from both adapter dir and base model: {e2}")
+    
+    # Ensure pad token is set
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+        print(f"[INFO] Set pad_token to eos_token: {tokenizer.eos_token}")
 
     # Load base model without device_map to avoid accelerate compatibility issues
     if use_4bit:
@@ -123,10 +238,43 @@ def load_model(base_model, adapter_dir, use_4bit=True, offload=True):
             raise RuntimeError(f"Failed to load PEFT adapter or merged model from '{adapter_dir}': {e}")
 
 
-def generate_text(tokenizer, model, prompt, max_new_tokens=128, temperature=0.7):
+def generate_text(tokenizer, model, prompt, max_new_tokens=128, temperature=0.7, model_type="base"):
+    """Generate text with proper formatting based on model type
+    
+    Args:
+        tokenizer: The tokenizer
+        model: The model
+        prompt: The user's input text
+        max_new_tokens: Maximum tokens to generate
+        temperature: Sampling temperature
+        model_type: "instruct" or "base" - determines prompt formatting
+    """
     model.eval()
     device = next(model.parameters()).device
-    inputs = tokenizer(prompt, return_tensors="pt", truncation=True)
+    
+    # Format prompt based on model type
+    if model_type == "instruct":
+        # Use chat template for instruct models
+        messages = [
+            {"role": "system", "content": ""},  # Empty but included for consistency
+            {"role": "user", "content": prompt}
+        ]
+        try:
+            # Use tokenizer's built-in chat template
+            formatted_prompt = tokenizer.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=True
+            )
+        except Exception as e:
+            # Fallback if tokenizer doesn't have chat template
+            print(f"[WARN] Chat template not available: {e}. Using plain prompt.")
+            formatted_prompt = prompt
+    else:
+        # Base model - use plain prompt
+        formatted_prompt = prompt
+    
+    inputs = tokenizer(formatted_prompt, return_tensors="pt", truncation=True)
     inputs = {k: v.to(device) for k, v in inputs.items()}
     
     gen_kwargs = {
@@ -161,17 +309,28 @@ def main():
     p.add_argument("--no-4bit", dest="use_4bit", action="store_false", help="Disable 4-bit quantization (requires more memory)")
     p.add_argument("--no-offload", dest="offload", action="store_false", help="Disable CPU offload for fp32 parts")
     p.add_argument("--temperature", type=float, default=0.7)
+    p.add_argument("--no-adapter", action="store_true", help="Load only base model without adapter")
+    p.add_argument("--model-type", default="base", choices=["base", "instruct"], help="Model type: base or instruct (affects prompt formatting)")
     args = p.parse_args()
 
     # convert literal "\n" sequences into real newlines (allows shell-friendly prompts)
     prompt = args.prompt.replace("\\n", "\n").strip()
 
-    print("Loading tokenizer and model (this may take a few minutes)...")
-    tokenizer, model = load_model(args.base_model, args.adapter_dir, use_4bit=args.use_4bit, offload=args.offload)
+    # Set UTF-8 encoding for Windows console
+    import sys
+    if sys.platform == 'win32':
+        import io
+        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+        sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
+    
+    print("[INFO] Loading tokenizer and model (this may take a few minutes)...")
+    # If no-adapter flag is set, pass None as adapter_dir
+    adapter_dir = None if args.no_adapter else args.adapter_dir
+    tokenizer, model = load_model(args.base_model, adapter_dir, use_4bit=args.use_4bit, offload=args.offload)
 
     # Generate and print only the new text (no prompt echo)
-    print("Generating...")
-    out = generate_text(tokenizer, model, prompt, max_new_tokens=args.max_new_tokens, temperature=args.temperature)
+    print("[INFO] Generating...")
+    out = generate_text(tokenizer, model, prompt, max_new_tokens=args.max_new_tokens, temperature=args.temperature, model_type=args.model_type)
     print("\n--- OUTPUT ---\n")
     print(out)
 
