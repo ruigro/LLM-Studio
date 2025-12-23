@@ -1,0 +1,6 @@
+❌ Error starting training: I/O operation on closed file.
+Traceback (most recent call last):
+  File "C:\1_GitHome\Local-LLM-Server\LLM\gui.py", line 745, in run_training
+    log_file.write("=" * 60 + "\n")
+ValueError: I/O operation on closed file.
+
