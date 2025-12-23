@@ -309,9 +309,21 @@ class MainWindow(QMainWindow):
         pytorch_label.setStyleSheet("color: white; font-size: 11pt; font-weight: bold; background: transparent;")
         sys_info_layout.addWidget(pytorch_label)
         
-        # RAM info
+        # RAM info (round to nearest power of 2 for cleaner display)
         ram_gb = hardware_info.get("ram_gb", 0)
-        ram_label = QLabel(f"💾 RAM: {ram_gb:.1f} GB")
+        # Round to nearest common RAM size (e.g., 63.8 -> 64)
+        if ram_gb > 60:
+            ram_display = 64
+        elif ram_gb > 30:
+            ram_display = 32
+        elif ram_gb > 14:
+            ram_display = 16
+        elif ram_gb > 6:
+            ram_display = 8
+        else:
+            ram_display = round(ram_gb)
+        
+        ram_label = QLabel(f"💾 RAM: {ram_display} GB")
         ram_label.setStyleSheet("color: white; font-size: 11pt; font-weight: bold; background: transparent;")
         sys_info_layout.addWidget(ram_label)
         
@@ -505,9 +517,8 @@ class MainWindow(QMainWindow):
         title.setAlignment(Qt.AlignCenter)
         layout.addWidget(title)
         
-        # Create 2-column layout
-        content_layout = QHBoxLayout()
-        content_layout.setSpacing(30)
+        # Create 2-column layout with SPLITTER for true equal sizing
+        splitter = QSplitter(Qt.Horizontal)
         
         # LEFT: Features
         left_widget = QWidget()
@@ -548,7 +559,14 @@ class MainWindow(QMainWindow):
         left_layout.addWidget(guide_text)
         
         left_layout.addStretch(1)
-        content_layout.addWidget(left_widget, 3)
+        
+        # Add left to splitter
+        left_scroll = QScrollArea()
+        left_scroll.setWidgetResizable(True)
+        left_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        left_scroll.setFrameShape(QFrame.NoFrame)
+        left_scroll.setWidget(left_widget)
+        splitter.addWidget(left_scroll)
         
         # RIGHT: System Status (scrollable to prevent clipping when fonts are larger)
         right_widget = QWidget()
@@ -769,9 +787,21 @@ class MainWindow(QMainWindow):
         right_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         right_scroll.setFrameShape(QFrame.NoFrame)
         right_scroll.setWidget(right_widget)
-        content_layout.addWidget(right_scroll, 1)  # Equal size columns (1:1)
+        splitter.addWidget(right_scroll)
         
-        layout.addLayout(content_layout)
+        # Set equal stretch factors (50/50 split)
+        splitter.setStretchFactor(0, 1)
+        splitter.setStretchFactor(1, 1)
+        
+        # Apply exact 50/50 split after window is shown
+        def _apply_equal_split():
+            w = splitter.width() or 1200
+            half = w // 2
+            splitter.setSizes([half, half])
+        
+        QTimer.singleShot(0, _apply_equal_split)
+        
+        layout.addWidget(splitter)
         
         return w
     

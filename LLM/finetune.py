@@ -34,6 +34,7 @@ def parse_args():
     p.add_argument("--batch-size", type=int, default=1)
     p.add_argument("--grad-accum", type=int, default=8)
     p.add_argument("--epochs", type=int, default=1)
+    p.add_argument("--learning-rate", type=float, default=2e-4, help="Learning rate for training")
     p.add_argument("--max-examples", type=int, default=None, help="Limit dataset for quick runs")
     return p.parse_args()
 
@@ -51,6 +52,7 @@ def main():
     LORA_DROPOUT = args.lora_dropout
     BATCH_SIZE = args.batch_size
     GRADIENT_ACCUMULATION = args.grad_accum
+    LEARNING_RATE = args.learning_rate
 
     print("Loading model and tokenizer in 4-bit...")
 
@@ -101,7 +103,7 @@ def main():
             gradient_accumulation_steps=GRADIENT_ACCUMULATION,
             warmup_steps=5,
             num_train_epochs=args.epochs,
-            learning_rate=2e-4,
+            learning_rate=LEARNING_RATE,  # Use the configurable learning rate
             fp16=not torch.cuda.is_bf16_supported(),
             logging_steps=1,
             output_dir=OUTPUT_DIR,

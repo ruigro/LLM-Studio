@@ -31,7 +31,7 @@ class TrainingConfig:
 def build_finetune_cmd(cfg: TrainingConfig) -> List[str]:
     cmd = [
         sys.executable, "-u", "finetune.py",
-        "--base-model", cfg.base_model,
+        "--model-name", cfg.base_model,  # finetune.py uses --model-name, not --base-model
         "--data-path", str(cfg.data_path),
         "--output-dir", str(cfg.output_dir),
         "--epochs", str(cfg.epochs),
@@ -41,9 +41,8 @@ def build_finetune_cmd(cfg: TrainingConfig) -> List[str]:
         "--lora-r", str(cfg.lora_r),
         "--lora-alpha", str(cfg.lora_alpha),
         "--lora-dropout", str(cfg.lora_dropout),
+        # Note: finetune.py always uses 4-bit (hardcoded), no --use-4bit flag needed
     ]
-    if cfg.use_4bit:
-        cmd.append("--use-4bit")
     return cmd
 
 
