@@ -1785,8 +1785,26 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Training", "Select a dataset file.")
             return
 
+        # Get model name and convert to proper format for training
+        model_name = self.train_base_model.currentText().strip()
+        
+        # Convert hf_models folder format to HuggingFace ID:
+        # meta-llama__Llama-3.2-1B -> meta-llama/Llama-3.2-1B
+        # Double underscore __ is used in folder names, but HF needs single slash /
+        if "__" in model_name:
+            model_name_hf = model_name.replace("__", "/")
+        # Handle old single underscore format: nvidia_Llama -> nvidia/Llama
+        elif "/" not in model_name and "_" in model_name:
+            parts = model_name.split("_", 1)
+            if len(parts) == 2:
+                model_name_hf = f"{parts[0]}/{parts[1]}"
+            else:
+                model_name_hf = model_name
+        else:
+            model_name_hf = model_name
+        
         cfg = TrainingConfig(
-            base_model=self.train_base_model.currentText().strip(),
+            base_model=model_name_hf,
             data_path=Path(data_path),
             output_dir=Path(self.train_out_dir.text().strip()),
             epochs=int(self.train_epochs.value()),
@@ -2216,26 +2234,26 @@ class MainWindow(QMainWindow):
             widget.appendPlainText(data.rstrip("\n"))
 
     def _refresh_locals(self) -> None:
-        # Refresh models
+        # Refresh downloaded models display
         self._refresh_models()
         
-        # Get ONLY DOWNLOADED models from the models directory
-        models_dir = self.root / "models"
+        # Get ONLY DOWNLOADED models from the hf_models directory (actual model weights)
+        hf_models_dir = self.root / "hf_models"
         downloaded_models = []
         
-        if models_dir.exists():
-            for model_dir in sorted(models_dir.iterdir()):
+        if hf_models_dir.exists():
+            for model_dir in sorted(hf_models_dir.iterdir()):
                 if model_dir.is_dir():
-                    downloaded_models.append(str(model_dir))  # Full path for inference
+                    # Use the folder name directly (e.g., meta-llama__Llama-3.2-1B)
+                    downloaded_models.append(model_dir.name)
         
         # Update Train tab: Select Base Model dropdown with ONLY downloaded models
         current_train = self.train_base_model.currentText()
         self.train_base_model.clear()
         
         if downloaded_models:
-            for model_path in downloaded_models:
-                model_name = Path(model_path).name
-                self.train_base_model.addItem(model_name, model_path)
+            for model_name in downloaded_models:
+                self.train_base_model.addItem(model_name)
         else:
             self.train_base_model.addItem("(No models downloaded yet)")
         
