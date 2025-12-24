@@ -224,49 +224,90 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
         healthCheckResult = LaunchPythonApp(exeDir, repairPython, healthCheckCmd, healthCheckLog);
         
         if (repairResult != 0 || healthCheckResult != 0) {
-            // Repair failed OR PySide6 still broken - show error and open log
-            std::wstring errorMsg = L"Auto-repair ";
-            if (repairResult != 0) {
-                errorMsg += L"failed";
-            } else {
-                errorMsg += L"completed but PySide6 is still broken";
-            }
-            errorMsg += L"!\n\nPlease check logs\\auto_repair.log for details.\nThe repair log will open in Notepad.";
+            // Repair failed OR PySide6 still broken - write error to app.log (not Notepad)
+            std::wstring appLog = exeDir + L"\\logs\\app.log";
+            HANDLE hAppLog = CreateFileW(
+                appLog.c_str(),
+                GENERIC_WRITE,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                NULL,
+                OPEN_ALWAYS,  // Open existing or create new
+                FILE_ATTRIBUTE_NORMAL,
+                NULL
+            );
             
+            if (hAppLog != INVALID_HANDLE_VALUE) {
+                // Append to end of file
+                SetFilePointer(hAppLog, 0, NULL, FILE_END);
+                
+                wchar_t errorMsgBuf[512];
+                if (repairResult != 0) {
+                    swprintf_s(errorMsgBuf, 512,
+                        L"\n=== AUTO-REPAIR FAILED ===\n"
+                        L"Repair process failed (exit code: %d)\n"
+                        L"Detailed repair log: logs\\auto_repair.log\n"
+                        L"Please check the repair log for details.\n"
+                        L"=====================================\n\n",
+                        repairResult);
+                } else {
+                    swprintf_s(errorMsgBuf, 512,
+                        L"\n=== AUTO-REPAIR FAILED ===\n"
+                        L"Repair completed but PySide6 is still broken (exit code: %d)\n"
+                        L"Detailed repair log: logs\\auto_repair.log\n"
+                        L"Please check the repair log for details.\n"
+                        L"=====================================\n\n",
+                        healthCheckResult);
+                }
+                std::wstring errorMsg(errorMsgBuf);
+                
+                DWORD written = 0;
+                WriteFile(hAppLog, errorMsg.c_str(), errorMsg.length() * sizeof(wchar_t), &written, NULL);
+                
+                // Also append repair log content if it exists
+                if (FileExists(repairLog)) {
+                    HANDLE hRepairLog = CreateFileW(
+                        repairLog.c_str(),
+                        GENERIC_READ,
+                        FILE_SHARE_READ,
+                        NULL,
+                        OPEN_EXISTING,
+                        FILE_ATTRIBUTE_NORMAL,
+                        NULL
+                    );
+                    if (hRepairLog != INVALID_HANDLE_VALUE) {
+                        DWORD fileSize = GetFileSize(hRepairLog, NULL);
+                        if (fileSize > 0 && fileSize < 1024 * 1024) {  // Max 1MB
+                            std::vector<char> buffer(fileSize);
+                            DWORD read = 0;
+                            if (ReadFile(hRepairLog, buffer.data(), fileSize, &read, NULL)) {
+                                WriteFile(hAppLog, L"\n--- Repair Log Content ---\n", 
+                                         wcslen(L"\n--- Repair Log Content ---\n") * sizeof(wchar_t), &written, NULL);
+                                // Convert to wide string and write
+                                int wideSize = MultiByteToWideChar(CP_UTF8, 0, buffer.data(), read, NULL, 0);
+                                if (wideSize > 0) {
+                                    std::vector<wchar_t> wideBuffer(wideSize);
+                                    MultiByteToWideChar(CP_UTF8, 0, buffer.data(), read, wideBuffer.data(), wideSize);
+                                    WriteFile(hAppLog, wideBuffer.data(), wideSize * sizeof(wchar_t), &written, NULL);
+                                }
+                                WriteFile(hAppLog, L"\n--- End Repair Log ---\n", 
+                                         wcslen(L"\n--- End Repair Log ---\n") * sizeof(wchar_t), &written, NULL);
+                            }
+                        }
+                        CloseHandle(hRepairLog);
+                    }
+                }
+                
+                CloseHandle(hAppLog);
+            }
+            
+            // Show brief error message (no Notepad)
             MessageBoxW(NULL,
-                        errorMsg.c_str(),
+                        L"Auto-repair failed!\n\n"
+                        L"The error has been written to logs\\app.log\n"
+                        L"Check the Logs tab in the application for details.",
                         L"Repair Failed",
                         MB_OK | MB_ICONERROR);
             
-            // Always try to open log file (even if it doesn't exist, Notepad will show error)
-            if (FileExists(repairLog)) {
-                OpenLogInNotepad(repairLog);
-            } else {
-                // Log file doesn't exist - create a summary error log
-                std::wstring errorLog = exeDir + L"\\logs\\repair_error_summary.log";
-                HANDLE hErrorLog = CreateFileW(
-                    errorLog.c_str(),
-                    GENERIC_WRITE,
-                    FILE_SHARE_READ,
-                    NULL,
-                    CREATE_ALWAYS,
-                    FILE_ATTRIBUTE_NORMAL,
-                    NULL
-                );
-                if (hErrorLog != INVALID_HANDLE_VALUE) {
-                    wchar_t summary[512];
-                    swprintf_s(summary, 512,
-                        L"Repair failed but no detailed log was created.\n"
-                        L"Repair exit code: %d\n"
-                        L"PySide6 check exit code: %d\n"
-                        L"Expected log file: %s\n",
-                        repairResult, healthCheckResult, repairLog.c_str());
-                    DWORD written = 0;
-                    WriteFile(hErrorLog, summary, wcslen(summary) * sizeof(wchar_t), &written, NULL);
-                    CloseHandle(hErrorLog);
-                    OpenLogInNotepad(errorLog);
-                }
-            }
             return 1;
         }
     }

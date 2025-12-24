@@ -3183,12 +3183,20 @@ respective package directories or official repositories.
             if idx >= 0:
                 self.test_model_b.setCurrentIndex(idx)
 
-        # log list from repo root
+        # log list from repo root and logs directory
         self.logs_list.clear()
+        # Add logs from root directory
         for p in sorted(self.root.glob("*training*.txt")) + sorted(self.root.glob("*log*.txt")):
             it = QListWidgetItem(str(p.name))
             it.setData(Qt.UserRole, str(p))
             self.logs_list.addItem(it)
+        # Add logs from logs directory (app.log, auto_repair.log, etc.)
+        logs_dir = self.root / "logs"
+        if logs_dir.exists():
+            for p in sorted(logs_dir.glob("*.log")) + sorted(logs_dir.glob("*.txt")):
+                it = QListWidgetItem(f"logs/{p.name}")
+                it.setData(Qt.UserRole, str(p))
+                self.logs_list.addItem(it)
 
     # these are set in models tab construction
     downloaded_container: QWidget
