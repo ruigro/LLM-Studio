@@ -51,7 +51,13 @@ class SetupThread(QThread):
             def log_callback(message):
                 self.progress.emit(message)
             
+            # Set up progress callback for download tracking
+            def progress_update(percent, message):
+                self.install_progress.emit("PyTorch", percent)
+                self.progress.emit(message)
+            
             self.installer.log = lambda msg: log_callback(f"[INSTALL] {msg}")
+            self.installer.progress_callback = progress_update
             
             # Run the installer
             success = self._install_all_dependencies(detection_results)
@@ -216,12 +222,22 @@ class FirstRunSetup(QMainWindow):
         right_layout = QVBoxLayout(right_column)
         right_layout.setContentsMargins(0, 0, 0, 0)
         
-        # Progress bar
+        # Progress bar (indeterminate by default)
         self.progress_bar = QProgressBar()
         self.progress_bar.setTextVisible(True)
         self.progress_bar.setMinimumHeight(30)
         self.progress_bar.setRange(0, 0)  # Indeterminate
         right_layout.addWidget(self.progress_bar)
+        
+        # Download progress bar (for PyTorch downloads)
+        self.download_progress = QProgressBar()
+        self.download_progress.setTextVisible(True)
+        self.download_progress.setMinimumHeight(25)
+        self.download_progress.setRange(0, 100)
+        self.download_progress.setValue(0)
+        self.download_progress.setFormat("Ready to download...")
+        self.download_progress.setVisible(False)  # Hidden initially
+        right_layout.addWidget(self.download_progress)
         
         # Log viewer with dynamic sizing
         log_frame = QFrame()
@@ -400,12 +416,23 @@ class FirstRunSetup(QMainWindow):
     
     def _on_install_progress(self, package: str, progress: int):
         """Update progress bar for specific package"""
-        if progress == 0:
-            self.progress_bar.setRange(0, 0)  # Indeterminate
-            self.status_label.setText(f"Installing {package}...")
+        if package == "PyTorch":
+            # Show download progress bar
+            self.download_progress.setVisible(True)
+            if progress > 0:
+                self.download_progress.setValue(progress)
+                self.download_progress.setFormat(f"Downloading PyTorch: {progress}%")
+            else:
+                self.download_progress.setValue(0)
+                self.download_progress.setFormat("Starting download...")
         else:
-            self.progress_bar.setRange(0, 100)
-            self.progress_bar.setValue(progress)
+            # Other packages use main progress bar
+            if progress == 0:
+                self.progress_bar.setRange(0, 0)  # Indeterminate
+                self.status_label.setText(f"Installing {package}...")
+            else:
+                self.progress_bar.setRange(0, 100)
+                self.progress_bar.setValue(progress)
     
     def _on_install_complete(self, success: bool, message: str):
         """Handle installation completion"""

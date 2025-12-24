@@ -42,6 +42,7 @@ class SmartInstaller:
         self.detector = SystemDetector()
         self.detection_results = {}
         self.installation_log = []
+        self.progress_callback = None  # Callback for progress updates (percent, message)
     
     def log(self, message: str):
         """Log installation message"""
@@ -289,16 +290,42 @@ class SmartInstaller:
                 ]
             
             self.log(f"Running: {' '.join(cmd)}")
-            self.log("This may take 5-10 minutes (downloading ~2.5GB)...")
+            self.log("Downloading PyTorch (~2.5GB)...")
             
-            result = subprocess.run(
+            # Use Popen to capture real-time output
+            process = subprocess.Popen(
                 cmd,
-                capture_output=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
                 text=True,
-                timeout=900  # 15 minutes timeout
+                bufsize=1,
+                universal_newlines=True
             )
             
-            if result.returncode == 0:
+            # Parse output for download progress
+            for line in process.stdout:
+                line = line.strip()
+                if line:
+                    # Look for download progress indicators
+                    if "Downloading" in line and "%" in line:
+                        # Extract percentage if visible
+                        import re
+                        match = re.search(r'(\d+)%', line)
+                        if match:
+                            percent = int(match.group(1))
+                            if self.progress_callback:
+                                self.progress_callback(percent, f"Downloading PyTorch... {percent}%")
+                        self.log(line)
+                    elif "Installing" in line or "Collecting" in line or "Using cached" in line:
+                        self.log(line)
+                    elif "Successfully installed" in line:
+                        self.log(line)
+                        if self.progress_callback:
+                            self.progress_callback(100, "PyTorch installed")
+            
+            process.wait()
+            
+            if process.returncode == 0:
                 self.log("PyTorch installed successfully")
                 
                 # Install compatible triton explicitly to avoid version conflicts
@@ -321,12 +348,9 @@ class SmartInstaller:
                 
                 return True
             else:
-                self.log(f"PyTorch installation failed: {result.stderr}")
+                self.log(f"PyTorch installation failed with code {process.returncode}")
                 return False
         
-        except subprocess.TimeoutExpired:
-            self.log("PyTorch installation timed out")
-            return False
         except Exception as e:
             self.log(f"Error installing PyTorch: {e}")
             return False
