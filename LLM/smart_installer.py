@@ -252,11 +252,17 @@ class SmartInstaller:
         if not self.detection_results:
             self.run_detection()
         
-        # First, uninstall any existing torch to avoid conflicts
-        self.log("Uninstalling any existing PyTorch installation...")
+        # First, uninstall any existing torch to avoid conflicts.
+        # IMPORTANT: also remove xformers and triton variants on Windows to avoid pip resolver downgrading torch.
+        self.log("Uninstalling any existing PyTorch / xformers / triton installation...")
         try:
-            uninstall_cmd = [python_executable, "-m", "pip", "uninstall", "-y", "torch", "torchvision", "torchaudio"]
-            subprocess.run(uninstall_cmd, capture_output=True, timeout=120, **self.subprocess_flags)
+            uninstall_cmd = [
+                python_executable, "-m", "pip", "uninstall", "-y",
+                "torch", "torchvision", "torchaudio",
+                "xformers",
+                "triton", "triton-windows",
+            ]
+            subprocess.run(uninstall_cmd, capture_output=True, text=True, timeout=300, **self.subprocess_flags)
         except Exception as e:
             self.log(f"Note: Could not uninstall old PyTorch: {e}")
         
@@ -280,13 +286,27 @@ class SmartInstaller:
         torchaudio_version = versions["torchaudio"]
         triton_version = versions["triton"]
         
-        self.log(f"Installing PyTorch {pytorch_version} ({cuda_build} build)...")
+        self.log(f"Installing PyTorch {pytorch_version} ({cuda_build} build) [force-reinstall, no-deps]...")
         
         try:
+            # Ensure numpy is in a safe range before importing torch inside the GUI / detectors.
+            # NumPy 2.x can break some torch numpy bridges on Windows.
+            try:
+                subprocess.run(
+                    [python_executable, "-m", "pip", "install", "--upgrade", "numpy<2"],
+                    capture_output=True,
+                    text=True,
+                    timeout=900,
+                    **self.subprocess_flags,
+                )
+            except Exception:
+                pass
+
             if cuda_build == "cpu":
                 # Install CPU-only PyTorch
                 cmd = [
                     python_executable, "-m", "pip", "install",
+                    "--force-reinstall", "--no-deps",
                     f"torch=={pytorch_version}",
                     f"torchvision=={torchvision_version}",
                     f"torchaudio=={torchaudio_version}",
@@ -296,6 +316,7 @@ class SmartInstaller:
                 # Install CUDA build
                 cmd = [
                     python_executable, "-m", "pip", "install",
+                    "--force-reinstall", "--no-deps",
                     f"torch=={pytorch_version}",
                     f"torchvision=={torchvision_version}",
                     f"torchaudio=={torchaudio_version}",
@@ -337,22 +358,25 @@ class SmartInstaller:
                 self.log("PyTorch installed successfully")
                 
                 # Install compatible triton explicitly to avoid version conflicts
-                self.log(f"Installing compatible triton {triton_version}...")
-                triton_cmd = [
-                    python_executable, "-m", "pip", "install",
-                    f"triton=={triton_version}"
-                ]
-                subprocess.run(triton_cmd, capture_output=True, timeout=300, **self.subprocess_flags)
-                
-                # If CUDA build, install compatible xformers
-                if cuda_build != "cpu":
-                    self.log("Installing compatible xformers...")
-                    xformers_cmd = [
+                # Windows uses triton-windows; Linux uses triton.
+                if sys.platform == "win32":
+                    self.log("Installing compatible triton-windows (pinned)...")
+                    triton_cmd = [
                         python_executable, "-m", "pip", "install",
-                        "xformers==0.0.28.post2",
-                        "--index-url", f"https://download.pytorch.org/whl/{cuda_build}"
+                        "--upgrade", "--no-deps",
+                        "triton-windows==3.5.1.post22",
                     ]
-                    subprocess.run(xformers_cmd, capture_output=True, timeout=600, **self.subprocess_flags)
+                else:
+                    self.log(f"Installing compatible triton {triton_version}...")
+                    triton_cmd = [
+                        python_executable, "-m", "pip", "install",
+                        "--upgrade", "--no-deps",
+                        f"triton=={triton_version}",
+                    ]
+                subprocess.run(triton_cmd, capture_output=True, text=True, timeout=900, **self.subprocess_flags)
+
+                # IMPORTANT: Do NOT install xformers automatically.
+                # On Windows, xformers wheels often pin an exact torch version and can silently downgrade torch.
                 
                 return True
             else:
@@ -397,11 +421,13 @@ class SmartInstaller:
                 if result.returncode != 0:
                     self.log(f"Warning: Some packages failed: {result.stderr[:500]}")
             
-            # Install unsloth separately with careful version control
+            # Install unsloth separately with careful version control.
+            # IMPORTANT: use --no-deps so pip cannot swap torch/triton versions underneath us.
             self.log("Installing unsloth (this may take a few minutes)...")
             unsloth_cmd = [
                 python_executable, "-m", "pip", "install",
-                "unsloth"
+                "--upgrade", "--no-deps",
+                "unsloth",
             ]
             
             result = subprocess.run(unsloth_cmd, capture_output=True, text=True, timeout=900, **self.subprocess_flags)
@@ -627,6 +653,19 @@ if errorlevel 1 (
             self.log("Warning: PyTorch installation failed.")
             self.log("You can install it manually later.")
             return False
+
+        # Step 4b: Hard-remove xformers if present (it can downgrade torch)
+        try:
+            pyexe = self.detection_results.get("python", {}).get("executable") or python_executable or sys.executable
+            subprocess.run(
+                [pyexe, "-m", "pip", "uninstall", "-y", "xformers"],
+                capture_output=True,
+                text=True,
+                timeout=180,
+                **self.subprocess_flags,
+            )
+        except Exception:
+            pass
         
         # Step 5: Install dependencies
         if not self.install_dependencies():
@@ -639,6 +678,125 @@ if errorlevel 1 (
         self.log("Installation complete!")
         self.log("=" * 60)
         
+        return True
+
+    def repair_all(self, python_executable: Optional[str] = None) -> bool:
+        """
+        Repair a broken environment deterministically.
+
+        Goals:
+        - Ensure correct PyTorch CUDA build is installed (force reinstall).
+        - Ensure Triton is installed correctly for the current platform (Windows uses triton-windows).
+        - Prevent pip resolver from downgrading torch (remove xformers, install key packages with --no-deps).
+        - Fix common corruption: missing dist-info / partial installs.
+        """
+        self.log("=" * 60)
+        self.log("LLM Fine-tuning Studio - Repair Mode")
+        self.log("=" * 60)
+
+        # Detection (also populates python path)
+        if not self.detection_results:
+            self.run_detection()
+
+        if not python_executable:
+            python_executable = (
+                self.detection_results.get("python", {}).get("executable")
+                or sys.executable
+            )
+
+        # Try to locate site-packages for cleanup
+        site_packages = None
+        try:
+            sp = subprocess.run(
+                [python_executable, "-c", "import site; print(site.getsitepackages()[0])"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                **self.subprocess_flags,
+            )
+            if sp.returncode == 0:
+                site_packages = sp.stdout.strip()
+        except Exception:
+            pass
+
+        # Hard uninstall problematic packages
+        self.log("Repair: Uninstalling conflicting packages...")
+        try:
+            subprocess.run(
+                [
+                    python_executable, "-m", "pip", "uninstall", "-y",
+                    "torch", "torchvision", "torchaudio",
+                    "xformers",
+                    "triton", "triton-windows",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=600,
+                **self.subprocess_flags,
+            )
+        except Exception as e:
+            self.log(f"Repair: Uninstall step warning: {e}")
+
+        # Remove leftovers that can cause "No package metadata found" or weird imports
+        if site_packages and os.path.isdir(site_packages):
+            try:
+                import shutil
+                spath = Path(site_packages)
+                leftovers = [
+                    "torch", "torchvision", "torchaudio", "triton", "xformers",
+                    "torch-*.dist-info", "torchvision-*.dist-info", "torchaudio-*.dist-info",
+                    "triton-*.dist-info", "triton_windows-*.dist-info", "triton_windows-*.data",
+                    "xformers-*.dist-info",
+                    "~~rch", "~orch",  # common temp dirs seen on Windows
+                ]
+                self.log("Repair: Cleaning leftover site-packages folders...")
+                for pattern in leftovers:
+                    for p in spath.glob(pattern):
+                        try:
+                            if p.is_dir():
+                                shutil.rmtree(p, ignore_errors=True)
+                            else:
+                                p.unlink(missing_ok=True)
+                        except Exception:
+                            pass
+            except Exception as e:
+                self.log(f"Repair: Cleanup warning: {e}")
+
+        # Reinstall core stack
+        self.log("Repair: Reinstalling PyTorch + Triton...")
+        if not self.install_pytorch(python_executable=python_executable):
+            self.log("Repair failed: Could not install PyTorch.")
+            return False
+
+        # Reinstall deps (requirements + unsloth) with safe flags
+        self.log("Repair: Reinstalling dependencies...")
+        if not self.install_dependencies(python_executable=python_executable):
+            self.log("Repair warning: Some dependencies may have failed.")
+
+        # Final verification (runs inside the same interpreter)
+        self.log("Repair: Verifying environment...")
+        try:
+            verify_cmd = [
+                python_executable,
+                "-c",
+                "import verify_installation as v; ok, checks = v.verify_all(); print('OK' if ok else 'FAIL'); raise SystemExit(0 if ok else 1)",
+            ]
+            res = subprocess.run(
+                verify_cmd,
+                capture_output=True,
+                text=True,
+                timeout=60,
+                **self.subprocess_flags,
+            )
+            if res.returncode != 0:
+                self.log("Repair verification failed:")
+                self.log((res.stdout or "").strip())
+                self.log((res.stderr or "").strip())
+                return False
+        except Exception as e:
+            self.log(f"Repair verification warning: {e}")
+
+        self.log("Repair complete: Environment is healthy.")
         return True
 
 

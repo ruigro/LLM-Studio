@@ -8,6 +8,7 @@ import sys
 import subprocess
 from pathlib import Path
 from typing import Dict, Tuple, Optional
+from importlib.metadata import PackageNotFoundError, version as pkg_version
 
 
 def verify_python() -> Tuple[bool, str]:
@@ -25,6 +26,12 @@ def verify_python() -> Tuple[bool, str]:
 def verify_pytorch() -> Tuple[bool, str]:
     """Verify PyTorch installation and functionality"""
     try:
+        # Ensure package metadata exists (prevents "torch imports but metadata missing" situations)
+        try:
+            _ = pkg_version("torch")
+        except PackageNotFoundError:
+            return False, "PyTorch is corrupted (no package metadata for torch)"
+
         import torch
         version = torch.__version__
         
@@ -38,9 +45,23 @@ def verify_pytorch() -> Tuple[bool, str]:
             cuda_available = torch.cuda.is_available()
             if cuda_available:
                 device_name = torch.cuda.get_device_name(0)
-                return True, f"PyTorch {version} with CUDA ({device_name})"
-            else:
-                return True, f"PyTorch {version} (CPU-only)"
+                cuda_ver = torch.version.cuda if torch.version.cuda else "N/A"
+                return True, f"PyTorch {version} with CUDA {cuda_ver} ({device_name})"
+
+            # If a GPU exists but torch is CPU-only, treat as FAIL (training requires CUDA build)
+            try:
+                smi = subprocess.run(
+                    ["nvidia-smi"],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                )
+                if smi.returncode == 0:
+                    return False, f"PyTorch {version} is CPU-only but an NVIDIA GPU is detected"
+            except Exception:
+                pass
+
+            return True, f"PyTorch {version} (CPU-only)"
                 
         except Exception as e:
             return False, f"PyTorch {version} installed but tensor operations failed: {str(e)}"
@@ -86,14 +107,18 @@ def verify_triton() -> Tuple[bool, str]:
     try:
         import triton
         version = triton.__version__
-        
-        # Check if it's the expected version
+
+        # Windows uses triton-windows (module name is still 'triton'), versions are typically 3.5.x
+        if sys.platform == "win32":
+            return True, f"Triton {version} (Windows)"
+
+        # Linux/macOS expectations
         if version.startswith("3.0"):
             return True, f"Triton {version} (compatible)"
-        else:
-            return True, f"Triton {version} (may have compatibility issues)"
+        return True, f"Triton {version} (may have compatibility issues)"
             
     except ImportError:
+        # Windows package name is triton-windows, but module is still triton; import error means missing anyway
         return False, "Triton not installed"
     except Exception as e:
         return False, f"Error: {str(e)}"

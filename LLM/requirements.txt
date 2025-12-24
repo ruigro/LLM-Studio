@@ -4,8 +4,12 @@
 # - `bitsandbytes` is optional (for 8-bit training/inference) and may require special install steps.
 
 # NOTE: PyTorch, torchvision, torchaudio are installed by SmartInstaller
-# Do NOT include them here as pip will install wrong (CPU-only) version
+# Do NOT include them here as pip can install the wrong build (CPU-only) or the wrong version
 # torch>=2.0.0  # REMOVED - SmartInstaller handles this
+#
+# IMPORTANT: Torch on Windows is currently not fully compatible with NumPy 2.x in all codepaths.
+# Pin NumPy < 2 to avoid "Failed to initialize NumPy: _ARRAY_API not found" and similar issues.
+numpy<2
 transformers>=4.30.0
 accelerate>=0.18.0
 datasets>=2.11.0

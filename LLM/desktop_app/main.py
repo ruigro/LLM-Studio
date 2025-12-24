@@ -55,6 +55,8 @@ class InstallerThread(QThread):
                 success = installer.install_pytorch()
             elif self.install_type == "dependencies":
                 success = installer.install_dependencies()
+            elif self.install_type == "repair":
+                success = installer.repair_all()
             else:  # "all"
                 success = installer.install()
             
@@ -545,13 +547,16 @@ class MainWindow(QMainWindow):
         self.installer_thread.start()
     
     def _install_dependencies(self):
-        """Install application dependencies - runs FULL smart installer (PyTorch + deps)"""
+        """Fix Issues (repair mode): deterministically repair PyTorch + deps"""
         reply = QMessageBox.question(
             self,
-            "Install All Components",
-            "This will install:\n"
-            "• PyTorch (correct CUDA version for your GPU)\n"
-            "• All dependencies (unsloth, transformers, etc.)\n\n"
+            "Fix Issues",
+            "This will automatically fix the environment:\n"
+            "• Force reinstall PyTorch with the correct CUDA build\n"
+            "• Fix common corruption (missing metadata / partial installs)\n"
+            "• Install correct Triton for Windows\n"
+            "• Install all required dependencies (unsloth, transformers, etc.)\n"
+            "• Remove xformers if it would break torch compatibility\n\n"
             "Time: 10-15 minutes\n"
             "Download size: ~2.5GB\n\n"
             "Continue?",
@@ -564,11 +569,11 @@ class MainWindow(QMainWindow):
         # Show log area
         self.install_log.setVisible(True)
         self.install_log.clear()
-        self.install_log.appendPlainText("=== Running Full Smart Installer ===\n")
-        self.install_log.appendPlainText("This will install PyTorch with correct CUDA version + all dependencies\n\n")
+        self.install_log.appendPlainText("=== Fix Issues (Repair Mode) ===\n")
+        self.install_log.appendPlainText("This will repair PyTorch CUDA + dependencies and verify the environment.\n\n")
         
-        # Start installer thread with "all" to run full smart installer
-        self.installer_thread = InstallerThread("all")
+        # Start installer thread with "repair" (deterministic self-heal)
+        self.installer_thread = InstallerThread("repair")
         self.installer_thread.log_output.connect(lambda msg: self.install_log.appendPlainText(msg))
         self.installer_thread.finished_signal.connect(self._on_install_complete)
         self.installer_thread.start()
@@ -815,32 +820,8 @@ class MainWindow(QMainWindow):
         
         pytorch_row.addWidget(pytorch_status_widget, 1)
         
-        # Add install button if needed
-        if not pytorch_ok:
-            self.install_pytorch_btn = QPushButton("🔧 Install CUDA Version")
-            self.install_pytorch_btn.setMinimumWidth(180)
-            self.install_pytorch_btn.setMinimumHeight(35)
-            self.install_pytorch_btn.setStyleSheet("""
-                QPushButton {
-                    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
-                        stop:0 #667eea, stop:1 #764ba2);
-                    color: white;
-                    font-size: 12pt;
-                    font-weight: bold;
-                    border-radius: 6px;
-                    padding: 8px 16px;
-                }
-                QPushButton:hover {
-                    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
-                        stop:0 #7b8ff0, stop:1 #8a5ab8);
-                }
-                QPushButton:pressed {
-                    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
-                        stop:0 #556bd0, stop:1 #623a88);
-                }
-            """)
-            self.install_pytorch_btn.clicked.connect(self._install_pytorch)
-            pytorch_row.addWidget(self.install_pytorch_btn)
+        # We intentionally do NOT show a separate PyTorch button here.
+        # Use the single "Fix Issues" button (below) to repair everything deterministically.
         
         setup_layout.addLayout(pytorch_row)
         
@@ -900,19 +881,19 @@ class MainWindow(QMainWindow):
         )
         deps_row.addWidget(deps_status_widget, 1)
         
-        if not deps_ok:
-            install_deps_btn = QPushButton("🚀 Install All Components")
-            install_deps_btn.setMinimumWidth(200)
-            install_deps_btn.setMinimumHeight(35)
-            install_deps_btn.setStyleSheet("""
+        # Single Fix Issues button (repair mode)
+        if (not pytorch_ok) or (not deps_ok):
+            fix_btn = QPushButton("🛠️ Fix Issues (Recommended)")
+            fix_btn.setMinimumHeight(42)
+            fix_btn.setStyleSheet("""
                 QPushButton {
                     background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
                         stop:0 #f093fb, stop:1 #f5576c);
                     color: white;
-                    font-size: 12pt;
+                    font-size: 13pt;
                     font-weight: bold;
-                    border-radius: 6px;
-                    padding: 8px 16px;
+                    border-radius: 8px;
+                    padding: 10px 18px;
                 }
                 QPushButton:hover {
                     background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
@@ -923,8 +904,8 @@ class MainWindow(QMainWindow):
                         stop:0 #d083db, stop:1 #d5475c);
                 }
             """)
-            install_deps_btn.clicked.connect(self._install_dependencies)
-            deps_row.addWidget(install_deps_btn)
+            fix_btn.clicked.connect(self._install_dependencies)
+            setup_layout.addWidget(fix_btn)
         
         setup_layout.addLayout(deps_row)
         
