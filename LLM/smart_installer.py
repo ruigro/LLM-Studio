@@ -728,6 +728,7 @@ if errorlevel 1 (
                     "torch", "torchvision", "torchaudio",
                     "xformers",
                     "triton", "triton-windows",
+                    "transformers", "tokenizers",  # Also uninstall these to force fresh install
                 ],
                 capture_output=True,
                 text=True,
@@ -744,9 +745,11 @@ if errorlevel 1 (
                 spath = Path(site_packages)
                 leftovers = [
                     "torch", "torchvision", "torchaudio", "triton", "xformers",
+                    "transformers", "tokenizers",  # Also clean these
                     "torch-*.dist-info", "torchvision-*.dist-info", "torchaudio-*.dist-info",
                     "triton-*.dist-info", "triton_windows-*.dist-info", "triton_windows-*.data",
                     "xformers-*.dist-info",
+                    "transformers-*.dist-info", "tokenizers-*.dist-info",  # Clean these too
                     "~~rch", "~orch",  # common temp dirs seen on Windows
                 ]
                 self.log("Repair: Cleaning leftover site-packages folders...")

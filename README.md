@@ -1,6 +1,40 @@
-# LLM Fine-tuning Studio - Desktop App
+# 🚀 LLM Fine-tuning Studio - Desktop App
 
-## 🚀 Quick Start
+A comprehensive local LLM fine-tuning and inference platform with desktop GUI.
+
+---
+
+## 🚨 **IMPORTANT: After Cloning on a New PC**
+
+**Model weight files are NOT included in Git due to their large size (1-50 GB each)!**
+
+After cloning this repository, you **MUST** download model weights:
+
+### Quick Check (Windows)
+```cmd
+check_models.bat
+```
+
+### Quick Check (Linux/Mac)
+```bash
+chmod +x check_models.sh
+./check_models.sh
+```
+
+This will:
+- ✅ Check which models are complete
+- ❌ List models that need downloading  
+- 📋 Provide exact download instructions
+
+### Need Help?
+
+- **Quick Start:** [QUICK_START_AFTER_CLONE.md](QUICK_START_AFTER_CLONE.md)
+- **Detailed Guide:** [MODEL_MANAGEMENT_GUIDE.md](MODEL_MANAGEMENT_GUIDE.md)
+- **Solution Summary:** [SOLUTION_SUMMARY.md](SOLUTION_SUMMARY.md)
+
+---
+
+## 🚀 Quick Start (After Models Are Downloaded)
 
 **To launch the app, double-click:**
 ```

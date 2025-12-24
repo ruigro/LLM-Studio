@@ -41,7 +41,27 @@ fine_tuned_adapter/
 *.safetensors
 *.bin
 pytorch_model.bin
-hf_model/
+
+# Keep model directory structures but exclude weights
+# Models should be downloaded on each machine
+LLM/models/**/*.safetensors
+LLM/models/**/*.bin
+LLM/models/**/*.pth
+LLM/models/**/*.pt
+LLM/hf_models/**/*.safetensors
+LLM/hf_models/**/*.bin
+LLM/hf_models/**/*.pth
+LLM/hf_models/**/*.pt
+# But allow config files
+!LLM/models/**/config.json
+!LLM/models/**/tokenizer*.json
+!LLM/models/**/*.md
+!LLM/hf_models/**/config.json
+!LLM/hf_models/**/tokenizer*.json
+!LLM/hf_models/**/*.md
+
+# Auto-generated model status (regenerate after clone)
+LLM/MODELS_README.md
 
 # Per-run experiment artifacts and generated metadata
 # W&B offline runs and logs

@@ -18,6 +18,7 @@ from desktop_app.chat_widget import ChatWidget
 from system_detector import SystemDetector
 from smart_installer import SmartInstaller
 from setup_state import SetupStateManager
+from model_integrity_checker import ModelIntegrityChecker
 from core.models import (DEFAULT_BASE_MODELS, search_hf_models, download_hf_model, list_local_adapters, 
                          list_local_downloads, get_app_root, detect_model_capabilities, get_capability_icons, get_model_size)
 from core.training import TrainingConfig, default_output_dir, build_finetune_cmd
@@ -238,6 +239,9 @@ class MainWindow(QMainWindow):
 
         self.root = get_app_root()
         self.dark_mode = True  # Start in dark mode
+        
+        # Model integrity checker
+        self.model_checker = ModelIntegrityChecker()
         
         # Detect real system info
         self.system_info = SystemDetector().detect_all()
@@ -1116,15 +1120,30 @@ class MainWindow(QMainWindow):
                 item.widget().deleteLater()
         self.model_cards.clear()
         
+        # Check model integrity and show warnings
+        incomplete_models = self.model_checker.get_incomplete_models()
+        if incomplete_models:
+            self._log_models(f"⚠️ Warning: Found {len(incomplete_models)} incomplete model(s) - missing weights/config files")
+            for model_status in incomplete_models:
+                self._log_models(f"   ✗ {model_status.model_name} - Missing: {', '.join(model_status.missing_files)}")
+        
         # Downloaded models (vertical list on right)
         models_dir = self.root / "models"
         if models_dir.exists():
             for model_dir in sorted(models_dir.iterdir()):
                 if model_dir.is_dir():
                     model_name = model_dir.name
-                    size = get_model_size(str(model_dir))
-                    capabilities = detect_model_capabilities(model_name=model_name, model_path=str(model_dir))
-                    icons = get_capability_icons(capabilities)
+                    
+                    # Check if model is complete
+                    status = self.model_checker.check_model(model_dir)
+                    if not status.is_complete:
+                        # Show as incomplete with warning
+                        size = "⚠️ INCOMPLETE"
+                        icons = "❌"
+                    else:
+                        size = get_model_size(str(model_dir))
+                        capabilities = detect_model_capabilities(model_name=model_name, model_path=str(model_dir))
+                        icons = get_capability_icons(capabilities)
                     
                     card = DownloadedModelCard(model_name, str(model_dir), size, icons)
                     card.set_theme(self.dark_mode)
@@ -2708,7 +2727,8 @@ class MainWindow(QMainWindow):
         requirements = {
             "Core ML Libraries": [
                 ("numpy", "<2", "Pinned for Windows/PyTorch compatibility"),
-                ("transformers", "==4.46.3", "Pinned for unsloth 2025.12.x compatibility"),
+                ("transformers", "==4.51.3", "Required by unsloth 2025.12.9 (min version: >=4.51.3)"),
+                ("tokenizers", ">=0.21,<0.22", "Required by transformers 4.51.3"),
                 ("accelerate", ">=0.18.0", "Distributed training"),
                 ("datasets", ">=2.11.0", "Dataset loading"),
                 ("peft", ">=0.3.0", "LoRA and efficient training"),
@@ -2716,7 +2736,6 @@ class MainWindow(QMainWindow):
             ],
             "Tokenization": [
                 ("sentencepiece", ">=0.1.98", "Text tokenization"),
-                ("tokenizers", ">=0.13.2", "Fast tokenizers"),
             ],
             "Quantization & Optimization": [
                 ("bitsandbytes", ">=0.39.0", "4-bit/8-bit quantization (Python 3.8+)"),

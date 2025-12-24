@@ -7,6 +7,23 @@ This document explains how to set up the environment and run the included script
 - Git
 - (Optional) CUDA drivers and a suitable GPU for faster training
 
+## 🚨 Important: First Time Setup on a New Machine
+
+**After cloning this repository, you MUST download model weights:**
+
+```bash
+cd LLM
+python check_models_after_clone.py
+```
+
+This will check which models are incomplete and provide download instructions.
+
+**Why?** Model weight files (1-50 GB each) are excluded from Git. You need to download them separately.
+
+**See:** [MODEL_MANAGEMENT_GUIDE.md](../MODEL_MANAGEMENT_GUIDE.md) for detailed instructions.
+
+---
+
 # 🎨 GUI Interface (Recommended)
 
 The easiest way to use this project is through the beautiful web-based GUI.
