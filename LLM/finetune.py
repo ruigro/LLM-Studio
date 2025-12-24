@@ -92,7 +92,7 @@ def main():
     # Step 1: Convert to list if needed
     if isinstance(raw_data, dict):
         # Try common keys that contain the actual data
-        for key in ['data', 'examples', 'train', 'dataset', 'items', 'conversations']:
+        for key in ['data', 'examples', 'train', 'dataset', 'items', 'conversations', 'entries']:
             if key in raw_data and isinstance(raw_data[key], list):
                 raw_data = raw_data[key]
                 print(f"✓ Extracted data from '{key}' field")

@@ -3,11 +3,11 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QProcess, QTimer, QThread, Signal, QProcessEnvironment
+from PySide6.QtCore import Qt, QProcess, QTimer, QThread, Signal, QProcessEnvironment, QRect, QSize
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QTabWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QLineEdit, QPushButton, QFileDialog, QComboBox, QTextEdit, QPlainTextEdit,
-    QSpinBox, QDoubleSpinBox, QMessageBox, QListWidget, QListWidgetItem, QSplitter, QToolBar, QScrollArea, QGridLayout, QFrame, QProgressBar
+    QSpinBox, QDoubleSpinBox, QMessageBox, QListWidget, QListWidgetItem, QSplitter, QToolBar, QScrollArea, QGridLayout, QFrame, QProgressBar, QSizePolicy, QTabBar, QStyleOptionTab, QStyle
 )
 from PySide6.QtGui import QAction, QIcon, QFont
 
@@ -24,6 +24,48 @@ from core.inference import InferenceConfig, build_run_adapter_cmd
 
 
 APP_TITLE = "🤖 LLM Fine-tuning Studio"
+
+
+class RightAlignedTabBar(QTabBar):
+    """Custom QTabBar that positions the last tab on the far right"""
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._right_tab_index = -1  # Index of tab to align right
+    
+    def set_right_aligned_tab(self, index: int):
+        """Set which tab should be aligned to the right"""
+        self._right_tab_index = index
+    
+    def tabSizeHint(self, index: int) -> QSize:
+        """Override to add spacing before the right-aligned tab"""
+        size = super().tabSizeHint(index)
+        
+        # If this is the right-aligned tab, calculate spacing needed
+        if index == self._right_tab_index and self._right_tab_index >= 0:
+            # Calculate total width of all tabs except this one
+            total_other_tabs = 0
+            for i in range(self.count()):
+                if i != index:
+                    total_other_tabs += super().tabSizeHint(i).width()
+            
+            # Available width
+            available_width = self.width()
+            
+            # Space needed to push this tab to the right
+            spacing_needed = available_width - total_other_tabs - size.width()
+            
+            # Add spacing as width (Qt will distribute this)
+            if spacing_needed > 0:
+                size.setWidth(size.width() + spacing_needed - 10)  # -10 for margin
+        
+        return size
+    
+    def resizeEvent(self, event):
+        """Recalculate tab positions when window resizes"""
+        super().resizeEvent(event)
+        # Force layout update
+        self.update()
 
 
 class InstallerThread(QThread):
@@ -338,11 +380,28 @@ class MainWindow(QMainWindow):
         main_layout.addWidget(header_widget)
 
         tabs = QTabWidget()
+        
+        # Use custom tab bar for right-aligned last tab
+        custom_tab_bar = RightAlignedTabBar()
+        tabs.setTabBar(custom_tab_bar)
+        
         tabs.addTab(self._build_home_tab(), "🏠 Home")
         tabs.addTab(self._build_train_tab(), "🎯 Train")
         tabs.addTab(self._build_models_tab(), "📥 Download")
         tabs.addTab(self._build_test_tab(), "🧪 Test")
         tabs.addTab(self._build_logs_tab(), "📊 Logs")
+        tabs.addTab(self._build_info_tab(), "ℹ️ Info")
+        
+        # Set Info tab (index 5) to be right-aligned
+        custom_tab_bar.set_right_aligned_tab(5)
+        
+        tabs.setStyleSheet("""
+            QTabBar::tab {
+                padding: 10px 20px;
+                font-size: 14pt;
+                font-weight: bold;
+            }
+        """)
 
         main_layout.addWidget(tabs)
         self.setCentralWidget(main_widget)
@@ -1329,18 +1388,7 @@ class MainWindow(QMainWindow):
         lr_layout.addWidget(self.train_max_seq, 1)
         params_layout.addLayout(lr_layout)
         
-        # Advanced settings collapsible
-        self.advanced_btn = QPushButton("▶ Advanced Settings")
-        self.advanced_btn.setCheckable(True)
-        self.advanced_btn.clicked.connect(self._toggle_advanced)
-        params_layout.addWidget(self.advanced_btn)
-        
-        # Advanced settings container (hidden by default)
-        self.advanced_container = QFrame()
-        self.advanced_container.setVisible(False)
-        adv_layout = QVBoxLayout(self.advanced_container)
-        
-        # Output directory
+        # Output directory (moved from Advanced Settings)
         out_row = QHBoxLayout()
         out_row.addWidget(QLabel("Output dir:"))
         self.train_out_dir = QLineEdit(str(default_output_dir()))
@@ -1348,22 +1396,13 @@ class MainWindow(QMainWindow):
         out_browse = QPushButton("Browse…")
         out_browse.clicked.connect(self._browse_train_out)
         out_row.addWidget(out_browse)
-        adv_layout.addLayout(out_row)
+        params_layout.addLayout(out_row)
         
-        # Batch size (manual)
-        self.batch_size_container = QWidget()
-        batch_layout = QHBoxLayout(self.batch_size_container)
-        batch_layout.setContentsMargins(0, 0, 0, 0)
-        batch_layout.addWidget(QLabel("Batch size:"))
+        # Batch size kept for internal use but not displayed
         self.train_batch = QSpinBox()
         self.train_batch.setRange(1, 512)
         self.train_batch.setValue(2)
-        batch_layout.addWidget(self.train_batch, 1)
-        batch_layout.addStretch(1)
-        adv_layout.addWidget(self.batch_size_container)
-        self.batch_size_container.setVisible(False)
-        
-        params_layout.addWidget(self.advanced_container)
+        self.train_batch.setVisible(False)  # Hidden, controlled by optimal batch size checkbox
         
         left_layout.addWidget(params_frame)
         
@@ -1374,25 +1413,31 @@ class MainWindow(QMainWindow):
         gpu_frame.setFrameShape(QFrame.StyledPanel)
         gpu_layout = QVBoxLayout(gpu_frame)
         
-        self.gpu_status_label = QLabel("✅ 2 GPUs detected")
-        self.gpu_status_label.setStyleSheet("font-weight: bold; color: #4CAF50;")
+        # GPU status using REAL system detection
+        cuda_info = self.system_info.get("cuda", {})
+        gpus = cuda_info.get("gpus", [])
+        
+        if gpus:
+            gpu_count = len(gpus)
+            self.gpu_status_label = QLabel(f"✅ {gpu_count} GPU{'s' if gpu_count > 1 else ''} detected")
+            self.gpu_status_label.setStyleSheet("font-weight: bold; color: #4CAF50;")
+        else:
+            self.gpu_status_label = QLabel("⚠️ No GPUs detected")
+            self.gpu_status_label.setStyleSheet("font-weight: bold; color: #FF9800;")
+        
         gpu_layout.addWidget(self.gpu_status_label)
         
         # GPU selection dropdown
         self.gpu_select = QComboBox()
         
-        # Get real GPU info
-        cuda_info = self.system_info.get("cuda", {})
-        gpus = cuda_info.get("gpus", [])
-        
-        # Populate with real GPUs
         if gpus:
             for idx, gpu in enumerate(gpus):
-                gpu_name = gpu.get("name", "Unknown")
+                gpu_name = gpu.get("name", f"GPU {idx}")
                 self.gpu_select.addItem(f"GPU {idx}: {gpu_name}")
             self.training_info_label = QLabel(f"⚡ Training will use: {self.gpu_select.currentText()}")
         else:
-            self.gpu_select.addItem("No GPUs detected - CPU mode")
+            self.gpu_select.addItem("No GPUs available - CPU mode")
+            self.gpu_select.setEnabled(False)
             self.training_info_label = QLabel("⚠️ Training will use CPU (slower)")
             
         gpu_layout.addWidget(self.gpu_select)
@@ -1440,7 +1485,7 @@ class MainWindow(QMainWindow):
         dashboard_header.setStyleSheet("""
             QLabel {
                 background: qlineargradient(x1:0, y1:0, x2:1, y2:0, 
-                    stop:0 #667eea, stop:1 #764ba2);
+                    stop:0 rgba(102, 126, 234, 0.8), stop:1 rgba(118, 75, 162, 0.8));
                 color: white;
                 font-size: 16pt;
                 font-weight: bold;
@@ -1450,89 +1495,56 @@ class MainWindow(QMainWindow):
         """)
         right_layout.addWidget(dashboard_header)
         
-        # Status banner
-        self.training_status_banner = QLabel("⏸ WAITING FOR TRAINING")
-        self.training_status_banner.setAlignment(Qt.AlignCenter)
-        self.training_status_banner.setMinimumHeight(60)
-        self.training_status_banner.setStyleSheet("""
-            QLabel {
-                background: #ff9800;
-                color: white;
-                font-size: 14pt;
-                font-weight: bold;
-                border: none;
-                border-radius: 12px;
-            }
-        """)
-        right_layout.addWidget(self.training_status_banner)
+        # REMOVED: Status banner (no longer needed)
         
-        # EPOCH + STEPS row (compact side by side)
-        epoch_steps_row = QWidget()
-        epoch_steps_row.setMinimumHeight(140)
-        epoch_steps_layout = QHBoxLayout(epoch_steps_row)
-        epoch_steps_layout.setSpacing(0)
-        epoch_steps_layout.setContentsMargins(0, 0, 0, 0)
+        # Single row with all 4 metrics: EPOCH, STEPS, LOSS, ETA
+        metrics_row = QWidget()
+        metrics_row.setMinimumHeight(90)
+        metrics_row.setMaximumHeight(90)
+        metrics_layout = QHBoxLayout(metrics_row)
+        metrics_layout.setSpacing(8)
+        metrics_layout.setContentsMargins(0, 0, 0, 0)
         
-        self.epoch_card = self._create_compact_metric_card("EPOCH", "📚", "0/0", "#1a1f35")
-        self.steps_card = self._create_compact_metric_card("STEPS", "🔥", "0/0", "#1f1a35")
+        self.epoch_card = self._create_3d_metric_card("EPOCH", "📚", "0/0", "rgba(26, 31, 53, 0.7)")
+        self.steps_card = self._create_3d_metric_card("STEPS", "🔥", "0/0", "rgba(31, 26, 53, 0.7)")
+        self.loss_card = self._create_3d_metric_card("LOSS", "📉", "--·----", "rgba(53, 34, 26, 0.7)")
+        self.eta_card = self._create_3d_metric_card("ETA", "⏱", "--m --s", "rgba(26, 53, 34, 0.7)")
         
-        epoch_steps_layout.addWidget(self.epoch_card)
-        epoch_steps_layout.addWidget(self.steps_card)
-        right_layout.addWidget(epoch_steps_row)
+        metrics_layout.addWidget(self.epoch_card)
+        metrics_layout.addWidget(self.steps_card)
+        metrics_layout.addWidget(self.loss_card)
+        metrics_layout.addWidget(self.eta_card)
+        right_layout.addWidget(metrics_row)
         
-        # LOSS + ETA row (compact side by side)
-        loss_eta_row = QWidget()
-        loss_eta_row.setMinimumHeight(140)
-        loss_eta_layout = QHBoxLayout(loss_eta_row)
-        loss_eta_layout.setSpacing(0)
-        loss_eta_layout.setContentsMargins(0, 0, 0, 0)
-        
-        self.loss_card = self._create_compact_metric_card("LOSS", "📉", "--·----", "#35221a")
-        self.eta_card = self._create_compact_metric_card("ETA", "⏱", "--m --s", "#1a3522")
-        
-        loss_eta_layout.addWidget(self.loss_card)
-        loss_eta_layout.addWidget(self.eta_card)
-        right_layout.addWidget(loss_eta_row)
-        
-        # Progress label
-        self.progress_label = QLabel("0.0% Complete")
-        self.progress_label.setAlignment(Qt.AlignCenter)
-        self.progress_label.setMinimumHeight(35)
-        self.progress_label.setStyleSheet("""
-            QLabel {
-                background: #0f0f1a;
-                color: #888;
-                font-size: 13pt;
-                border: none;
-                border-radius: 12px;
-            }
-        """)
-        right_layout.addWidget(self.progress_label)
-        
-        # LEARNING RATE + SPEED + GPU MEM row (3 cards)
+        # Second row with LR, SPEED, GPU (same height as first row)
         extra_row = QWidget()
-        extra_row.setMinimumHeight(140)
+        extra_row.setMinimumHeight(90)
+        extra_row.setMaximumHeight(90)
         extra_layout = QHBoxLayout(extra_row)
-        extra_layout.setSpacing(0)
+        extra_layout.setSpacing(8)
         extra_layout.setContentsMargins(0, 0, 0, 0)
         
-        self.learning_rate_card = self._create_compact_metric_card("LR", "📊", "--e-0", "#2a1a35")
-        self.speed_card = self._create_compact_metric_card("SPEED", "🚀", "-- s/s", "#1a2535")
-        self.gpu_mem_card = self._create_compact_metric_card("GPU", "💾", "-- GB", "#35291a")
+        self.learning_rate_card = self._create_3d_metric_card("LR", "📊", "--e-0", "rgba(42, 26, 53, 0.7)")
+        self.speed_card = self._create_3d_metric_card("SPEED", "🚀", "-- s/s", "rgba(26, 37, 53, 0.7)")
+        self.gpu_mem_card = self._create_3d_metric_card("GPU", "💾", "-- GB", "rgba(53, 41, 26, 0.7)")
         
         extra_layout.addWidget(self.learning_rate_card)
         extra_layout.addWidget(self.speed_card)
         extra_layout.addWidget(self.gpu_mem_card)
         right_layout.addWidget(extra_row)
         
-        # Loss Over Time Section
+        # Loss Over Time Section (60px taller = 240px)
         loss_section = QWidget()
-        loss_section.setMinimumHeight(180)
+        loss_section.setMinimumHeight(240)
+        loss_section.setMaximumHeight(240)
         loss_section_layout = QVBoxLayout(loss_section)
         loss_section_layout.setContentsMargins(15, 10, 15, 10)
         loss_section_layout.setSpacing(5)
         
-        loss_section_layout.addWidget(QLabel("<b>📉 Loss Over Time</b>"))
+        loss_title = QLabel("<b>📉 Loss Over Time</b>")
+        loss_title.setStyleSheet("color: white; font-size: 12pt;")
+        loss_section_layout.addWidget(loss_title)
+        
         self.loss_chart_label = QLabel("Loss chart will appear here once training starts...")
         self.loss_chart_label.setAlignment(Qt.AlignCenter)
         self.loss_chart_label.setStyleSheet("color: #888;")
@@ -1540,56 +1552,77 @@ class MainWindow(QMainWindow):
         
         loss_section.setStyleSheet("""
             QWidget {
-                background: #0f0f1a;
-                border: none;
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 rgba(15, 15, 26, 0.6), stop:1 rgba(25, 25, 36, 0.8));
+                border: 1px solid rgba(102, 126, 234, 0.3);
                 border-radius: 12px;
             }
         """)
         right_layout.addWidget(loss_section)
         
-        # Training Logs
+        # Training Logs (takes remaining space with stretch)
         logs_section = QWidget()
-        logs_section.setMinimumHeight(50)
         logs_section_layout = QVBoxLayout(logs_section)
         logs_section_layout.setContentsMargins(15, 10, 15, 10)
         logs_section_layout.setSpacing(5)
         
         logs_header = QHBoxLayout()
-        logs_header.addWidget(QLabel("<b>📋 Detailed Logs</b>"))
+        logs_title = QLabel("<b>📋 Training Logs</b>")
+        logs_title.setStyleSheet("color: white; font-size: 12pt;")
+        logs_header.addWidget(logs_title)
         logs_header.addStretch(1)
+        
         self.logs_expand_btn = QPushButton("▼ Show Logs")
         self.logs_expand_btn.setCheckable(True)
+        self.logs_expand_btn.setChecked(True)  # Start expanded
         self.logs_expand_btn.clicked.connect(self._toggle_logs)
-        logs_header.addWidget(self.logs_expand_btn)
-        logs_section_layout.addLayout(logs_header)
-        
-        logs_section.setStyleSheet("""
-            QWidget {
-                background: #0f0f1a;
+        self.logs_expand_btn.setStyleSheet("""
+            QPushButton {
+                background: rgba(102, 126, 234, 0.3);
+                color: white;
                 border: none;
-                border-radius: 12px;
+                border-radius: 6px;
+                padding: 5px 15px;
+                font-size: 10pt;
+            }
+            QPushButton:hover {
+                background: rgba(102, 126, 234, 0.5);
             }
         """)
-        right_layout.addWidget(logs_section)
+        logs_header.addWidget(self.logs_expand_btn)
+        logs_section_layout.addLayout(logs_header)
         
         self.train_log = QPlainTextEdit()
         self.train_log.setReadOnly(True)
         self.train_log.setMaximumBlockCount(10000)
-        self.train_log.setMaximumHeight(300)
-        self.train_log.setVisible(False)
+        # NO maximum height - let it expand to fill remaining space!
+        self.train_log.setMinimumHeight(200)  # Just a minimum
+        self.train_log.setVisible(True)  # Start visible
         self.train_log.setStyleSheet("""
             QPlainTextEdit {
-                background-color: #1a1a1a;
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 rgba(10, 10, 15, 0.9), stop:1 rgba(20, 20, 25, 0.9));
                 color: #00ff00;
                 font-family: 'Consolas', 'Courier New', monospace;
                 font-size: 11pt;
-                border: 1px solid #333;
-                border-radius: 4px;
+                border: 1px solid rgba(102, 126, 234, 0.3);
+                border-radius: 8px;
+                padding: 10px;
             }
         """)
-        right_layout.addWidget(self.train_log)
+        logs_section_layout.addWidget(self.train_log, 1)  # Stretch=1 to fill all remaining space!
         
-        right_layout.addStretch(1)
+        logs_section.setStyleSheet("""
+            QWidget {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 rgba(15, 15, 26, 0.6), stop:1 rgba(25, 25, 36, 0.8));
+                border: 1px solid rgba(102, 126, 234, 0.3);
+                border-radius: 12px;
+            }
+        """)
+        right_layout.addWidget(logs_section, 1)  # Stretch=1 to expand with window!
+        
+        # NO addStretch here - let logs_section take all remaining space!
         
         # Add to splitter
         # Left column is long; make it scrollable so larger fonts don't get clipped.
@@ -1640,12 +1673,21 @@ class MainWindow(QMainWindow):
         """Auto-generate model name based on base model and dataset"""
         from datetime import datetime
         
-        # Get base model name (last part after /)
+        # Get base model name (last part after / or __)
         base_model = self.train_base_model.currentText().strip()
         if not base_model or base_model == "(No models downloaded yet)":
             return
         
-        model_short = base_model.split('/')[-1].replace('-bnb-4bit', '').replace('unsloth-', '')
+        # Handle different formats: nvidia__Model or unsloth/model or unsloth__model
+        if "__" in base_model:
+            model_short = base_model.split("__")[-1]
+        elif "/" in base_model:
+            model_short = base_model.split('/')[-1]
+        else:
+            model_short = base_model
+        
+        # Clean up model name
+        model_short = model_short.replace('-bnb-4bit', '').replace('unsloth-', '').replace('_', '-')
         
         # Get dataset name (filename without extension)
         dataset_path = self.train_data_path.text().strip()
@@ -1658,9 +1700,8 @@ class MainWindow(QMainWindow):
         now = datetime.now()
         auto_name = f"{now.strftime('%y%m%d')}_{model_short}_{dataset_short}_{now.strftime('%H%M')}"
         
-        # Only set if field is empty
-        if not self.train_model_name.text().strip():
-            self.train_model_name.setText(auto_name)
+        # Always update the name when model changes
+        self.train_model_name.setText(auto_name)
     
     def _validate_dataset(self):
         """Validate and show dataset info"""
@@ -1710,6 +1751,53 @@ class MainWindow(QMainWindow):
             self.advanced_btn.setText("▼ Advanced Settings")
         else:
             self.advanced_btn.setText("▶ Advanced Settings")
+    
+    def _create_3d_metric_card(self, title: str, icon: str, value: str, bg_color: str):
+        """Create a compact 3D metric card with semi-transparent gradients"""
+        card = QWidget()
+        card.setMinimumHeight(90)
+        card.setMaximumHeight(90)
+        
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(2)
+        
+        # Title + Icon
+        header = QHBoxLayout()
+        icon_label = QLabel(icon)
+        icon_label.setStyleSheet("font-size: 12pt; background: transparent; border: none;")
+        header.addWidget(icon_label)
+        
+        title_label = QLabel(title)
+        title_label.setStyleSheet("font-size: 9pt; font-weight: bold; color: #aaa; background: transparent; border: none;")
+        header.addWidget(title_label)
+        header.addStretch(1)
+        layout.addLayout(header)
+        
+        layout.addStretch(1)
+        
+        # Value
+        value_label = QLabel(value)
+        value_label.setAlignment(Qt.AlignCenter)
+        value_label.setStyleSheet("font-size: 18pt; font-weight: bold; color: white; background: transparent; border: none;")
+        layout.addWidget(value_label)
+        
+        layout.addStretch(1)
+        
+        card.setStyleSheet(f"""
+            QWidget {{
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 {bg_color}, stop:1 rgba(20, 20, 30, 0.5));
+                border: 1px solid rgba(102, 126, 234, 0.3);
+                border-radius: 12px;
+            }}
+        """)
+        
+        # Store value_label for updates
+        card.value_label = value_label
+        card.set_value = lambda v: value_label.setText(v)
+        
+        return card
     
     def _create_compact_metric_card(self, title: str, icon: str, value: str, bg_color: str):
         """Create a futuristic compact metric card with fixed height"""
@@ -2191,6 +2279,171 @@ class MainWindow(QMainWindow):
         self.chat_widget_b.clear()
         self.test_prompt.clear()
 
+    # ---------------- Info/About tab ----------------
+    def _build_info_tab(self) -> QWidget:
+        w = QWidget()
+        layout = QVBoxLayout(w)
+        layout.setContentsMargins(40, 30, 40, 30)
+        layout.setSpacing(20)
+        
+        # Title
+        title = QLabel("<h1>ℹ️ About LLM Fine-tuning Studio</h1>")
+        title.setAlignment(Qt.AlignCenter)
+        layout.addWidget(title)
+        
+        # Two-column layout using QSplitter for fixed 50/50 split
+        splitter = QSplitter(Qt.Horizontal)
+        
+        # LEFT COLUMN: Credits
+        left_scroll = QScrollArea()
+        left_scroll.setWidgetResizable(True)
+        left_scroll.setFrameShape(QFrame.NoFrame)
+        
+        credits_widget = QWidget()
+        credits_layout = QVBoxLayout(credits_widget)
+        credits_layout.setSpacing(15)
+        
+        credits_frame = QFrame()
+        credits_frame.setFrameShape(QFrame.StyledPanel)
+        credits_inner = QVBoxLayout(credits_frame)
+        credits_inner.setSpacing(12)
+        
+        credits_title = QLabel("<h2>💝 Credits</h2>")
+        credits_inner.addWidget(credits_title)
+        
+        credits_text = QLabel("""
+<p style="line-height: 1.4;">
+<b>LLM Fine-tuning Studio</b> - A user-friendly desktop application for fine-tuning Large Language Models<br><br>
+
+<b>Development:</b><br>
+• Built with modern Python technologies and AI-assisted development<br>
+• Designed for researchers, developers, and AI enthusiasts<br><br>
+
+<b>Special Thanks:</b><br>
+• <b>Unsloth AI</b> - For the incredible Unsloth library that makes training 2x faster<br>
+• <b>Hugging Face</b> - For transformers, datasets, and the model hub<br>
+• <b>Meta AI</b> - For the Llama model family<br>
+• <b>NVIDIA</b> - For CUDA and GPU acceleration technologies<br>
+• <b>The Open Source Community</b> - For all the amazing tools and libraries
+</p>
+        """)
+        credits_text.setWordWrap(True)
+        credits_text.setTextFormat(Qt.RichText)
+        credits_inner.addWidget(credits_text)
+        credits_inner.addStretch(1)
+        
+        credits_layout.addWidget(credits_frame)
+        left_scroll.setWidget(credits_widget)
+        splitter.addWidget(left_scroll)
+        
+        # RIGHT COLUMN: Licenses
+        right_scroll = QScrollArea()
+        right_scroll.setWidgetResizable(True)
+        right_scroll.setFrameShape(QFrame.NoFrame)
+        
+        license_widget = QWidget()
+        license_layout = QVBoxLayout(license_widget)
+        license_layout.setSpacing(15)
+        
+        license_frame = QFrame()
+        license_frame.setFrameShape(QFrame.StyledPanel)
+        license_inner = QVBoxLayout(license_frame)
+        license_inner.setSpacing(12)
+        
+        license_title = QLabel("<h2>📜 License Information</h2>")
+        license_inner.addWidget(license_title)
+        
+        license_text = QLabel("""
+<p style="line-height: 1.3; font-size: 12pt;">
+This application uses the following open-source libraries and tools:
+</p>
+
+<h3 style="color: #667eea; margin-top: 12px;">Core Libraries</h3>
+<ul style="line-height: 1.4;">
+<li><b>Python 3.10+</b> - PSF License</li>
+<li><b>PySide6 (Qt for Python)</b> - LGPL v3<br>
+    <span style="color: #888;">GUI framework</span></li>
+<li><b>PyTorch</b> - BSD-3-Clause<br>
+    <span style="color: #888;">Deep learning framework</span></li>
+<li><b>Transformers</b> - Apache 2.0 (HuggingFace)<br>
+    <span style="color: #888;">NLP models and tokenizers</span></li>
+<li><b>Unsloth</b> - Apache 2.0<br>
+    <span style="color: #888;">Fast LLM fine-tuning</span></li>
+</ul>
+
+<h3 style="color: #667eea; margin-top: 12px;">Training & Data</h3>
+<ul style="line-height: 1.4;">
+<li><b>TRL</b> - Apache 2.0<br>
+    <span style="color: #888;">SFTTrainer for supervised fine-tuning</span></li>
+<li><b>Datasets</b> - Apache 2.0<br>
+    <span style="color: #888;">Dataset loading and processing</span></li>
+<li><b>PEFT</b> - Apache 2.0<br>
+    <span style="color: #888;">LoRA and efficient training</span></li>
+<li><b>BitsAndBytes</b> - MIT<br>
+    <span style="color: #888;">4-bit/8-bit quantization</span></li>
+</ul>
+
+<h3 style="color: #667eea; margin-top: 12px;">Acceleration</h3>
+<ul style="line-height: 1.4;">
+<li><b>xFormers</b> - BSD (Meta)<br>
+    <span style="color: #888;">Memory-efficient attention</span></li>
+<li><b>CUDA Toolkit 12.4</b> - NVIDIA EULA<br>
+    <span style="color: #888;">GPU acceleration</span></li>
+<li><b>Triton</b> - MIT (OpenAI)<br>
+    <span style="color: #888;">GPU programming</span></li>
+</ul>
+
+<h3 style="color: #667eea; margin-top: 12px;">Utilities</h3>
+<ul style="line-height: 1.4;">
+<li><b>huggingface_hub</b> - Apache 2.0</li>
+<li><b>psutil</b> - BSD-3-Clause</li>
+<li><b>pandas</b> - BSD-3-Clause</li>
+<li><b>numpy</b> - BSD-3-Clause</li>
+</ul>
+
+<h3 style="color: #667eea; margin-top: 12px;">Models</h3>
+<ul style="line-height: 1.4;">
+<li><b>Llama Models</b> - Llama Community License (Meta)<br>
+    <span style="color: #888;">Commercial use with restrictions</span></li>
+<li><b>Other Models</b> - Various licenses<br>
+    <span style="color: #888;">Check model card on Hugging Face</span></li>
+</ul>
+
+<h3 style="color: #667eea; margin-top: 12px;">Important Notes</h3>
+<p style="line-height: 1.4; background: #2a2a2a; padding: 12px; border-radius: 8px; border-left: 4px solid #667eea;">
+⚠️ <b>Disclaimer:</b> This application is provided "AS IS" without warranty. 
+Users are responsible for complying with all applicable licenses.<br><br>
+
+📖 <b>Full Licenses:</b> Complete license texts can be found in their 
+respective package directories or official repositories.
+</p>
+        """)
+        license_text.setWordWrap(True)
+        license_text.setTextFormat(Qt.RichText)
+        license_text.setOpenExternalLinks(True)
+        license_inner.addWidget(license_text)
+        license_inner.addStretch(1)
+        
+        license_layout.addWidget(license_frame)
+        right_scroll.setWidget(license_widget)
+        splitter.addWidget(right_scroll)
+        
+        # Set 50/50 split
+        splitter.setStretchFactor(0, 1)
+        splitter.setStretchFactor(1, 1)
+        
+        # Apply exact 50/50 split after window is shown
+        def _apply_equal_split():
+            w = splitter.width() or 1200
+            half = w // 2
+            splitter.setSizes([half, half])
+        
+        QTimer.singleShot(0, _apply_equal_split)
+        
+        layout.addWidget(splitter)
+        
+        return w
+    
     # ---------------- Logs tab ----------------
     def _build_logs_tab(self) -> QWidget:
         w = QWidget()
@@ -2267,17 +2520,27 @@ class MainWindow(QMainWindow):
             if idx >= 0:
                 self.train_base_model.setCurrentIndex(idx)
         
-        # Update Test tab Model A dropdown with ONLY DOWNLOADED models
+        # Update Test tab Model A dropdown with downloaded models + trained adapters
         current_a = self.test_model_a.currentText()
         self.test_model_a.clear()
         self.test_model_a.addItem("None")
         
+        # Add base models
         if downloaded_models:
-            for model_path in downloaded_models:
-                model_name = Path(model_path).name
-                self.test_model_a.addItem(model_name, model_path)  # Display name, store full path
-        else:
-            self.test_model_a.addItem("(No models downloaded yet)")
+            for model_name in downloaded_models:
+                self.test_model_a.addItem(f"📦 {model_name}", str(models_dir / model_name))
+        
+        # Add trained adapters
+        adapter_dir = self.root / "fine_tuned_adapter"
+        if adapter_dir.exists():
+            trained_adapters = sorted([d for d in adapter_dir.iterdir() if d.is_dir() and (d / "adapter_config.json").exists()])
+            if trained_adapters:
+                for adapter_path in trained_adapters:
+                    adapter_name = adapter_path.name
+                    self.test_model_a.addItem(f"🎯 {adapter_name}", str(adapter_path))
+        
+        if not downloaded_models and (not adapter_dir.exists() or not trained_adapters):
+            self.test_model_a.addItem("(No models available)")
         
         if current_a and current_a != "None":
             idx = self.test_model_a.findText(current_a)
@@ -2289,12 +2552,21 @@ class MainWindow(QMainWindow):
         self.test_model_b.clear()
         self.test_model_b.addItem("None")
         
+        # Add base models
         if downloaded_models:
-            for model_path in downloaded_models:
-                model_name = Path(model_path).name
-                self.test_model_b.addItem(model_name, model_path)  # Display name, store full path
-        else:
-            self.test_model_b.addItem("(No models downloaded yet)")
+            for model_name in downloaded_models:
+                self.test_model_b.addItem(f"📦 {model_name}", str(models_dir / model_name))
+        
+        # Add trained adapters
+        if adapter_dir.exists():
+            trained_adapters = sorted([d for d in adapter_dir.iterdir() if d.is_dir() and (d / "adapter_config.json").exists()])
+            if trained_adapters:
+                for adapter_path in trained_adapters:
+                    adapter_name = adapter_path.name
+                    self.test_model_b.addItem(f"🎯 {adapter_name}", str(adapter_path))
+        
+        if not downloaded_models and (not adapter_dir.exists() or not trained_adapters):
+            self.test_model_b.addItem("(No models available)")
         
         if current_b and current_b != "None":
             idx = self.test_model_b.findText(current_b)
