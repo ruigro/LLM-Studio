@@ -106,7 +106,7 @@ class SmartInstaller:
         
         # Map CUDA driver to compatible CUDA toolkit version
         cuda_build = "cpu"
-        pytorch_version = "2.5.0"  # Stable version
+        pytorch_version = "2.5.1"  # Stable version compatible with Unsloth (2.6.0+ breaks Triton)
         
         if driver_version:
             try:
@@ -151,7 +151,7 @@ class SmartInstaller:
                 cmd = [
                     python_executable, "-m", "pip", "install",
                     f"torch=={pytorch_version}",
-                    f"torchvision==0.20.0",
+                    f"torchvision==0.20.1",
                     f"torchaudio=={pytorch_version}",
                     "--index-url", f"https://download.pytorch.org/whl/{cuda_build}"
                 ]
@@ -168,6 +168,14 @@ class SmartInstaller:
             
             if result.returncode == 0:
                 self.log("PyTorch installed successfully")
+                
+                # Install compatible triton explicitly to avoid version conflicts
+                self.log("Installing compatible triton...")
+                triton_cmd = [
+                    python_executable, "-m", "pip", "install",
+                    "triton==3.0.0"
+                ]
+                subprocess.run(triton_cmd, capture_output=True, timeout=300)
                 
                 # If CUDA build, install compatible xformers
                 if cuda_build != "cpu":
