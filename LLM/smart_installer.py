@@ -17,9 +17,9 @@ class SmartInstaller:
     
     # Hardware-specific version matrix for compatibility
     VERSION_MATRIX = {
-        "cuda_12.4": {"torch": "2.5.1", "triton": "3.0.0", "torchvision": "0.20.1", "torchaudio": "2.5.1"},
-        "cuda_12.1": {"torch": "2.5.1", "triton": "3.0.0", "torchvision": "0.20.1", "torchaudio": "2.5.1"},
-        "cuda_11.8": {"torch": "2.5.1", "triton": "3.0.0", "torchvision": "0.20.1", "torchaudio": "2.5.1"},
+        "cuda_12_4": {"torch": "2.5.1", "triton": "3.0.0", "torchvision": "0.20.1", "torchaudio": "2.5.1"},
+        "cuda_12_1": {"torch": "2.5.1", "triton": "3.0.0", "torchvision": "0.20.1", "torchaudio": "2.5.1"},
+        "cuda_11_8": {"torch": "2.5.1", "triton": "3.0.0", "torchvision": "0.20.1", "torchaudio": "2.5.1"},
         "cpu": {"torch": "2.5.1", "triton": "3.0.0", "torchvision": "0.20.1", "torchaudio": "2.5.1"}
     }
     
@@ -251,9 +251,9 @@ class SmartInstaller:
         
         # Get versions from matrix
         build_key_map = {
-            "cu124": "cuda_12.4",
-            "cu121": "cuda_12.1",
-            "cu118": "cuda_11.8",
+            "cu124": "cuda_12_4",
+            "cu121": "cuda_12_1",
+            "cu118": "cuda_11_8",
             "cpu": "cpu",
         }
         build_key = build_key_map.get(cuda_build, "cpu")
