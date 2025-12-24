@@ -694,6 +694,33 @@ if errorlevel 1 (
         self.log("LLM Fine-tuning Studio - Repair Mode")
         self.log("=" * 60)
 
+        # Check for file locks - warn user if Python processes might be locking files
+        if platform.system() == "Windows":
+            self.log("Repair: Checking for file locks...")
+            try:
+                import psutil
+                venv_python_path = str(Path(python_executable).parent.parent) if python_executable else None
+                locked_processes = []
+                for proc in psutil.process_iter(['pid', 'name', 'exe', 'cwd']):
+                    try:
+                        if proc.info['name'] and 'python' in proc.info['name'].lower():
+                            # Check if it's using our venv
+                            if venv_python_path and proc.info.get('exe'):
+                                exe_path = Path(proc.info['exe']).parent.parent
+                                if str(exe_path).lower() == venv_python_path.lower():
+                                    locked_processes.append(f"{proc.info['name']} (PID {proc.info['pid']})")
+                    except (psutil.NoSuchProcess, psutil.AccessDenied, KeyError):
+                        pass
+                if locked_processes:
+                    self.log(f"WARNING: Found {len(locked_processes)} Python process(es) using this venv:")
+                    for p in locked_processes:
+                        self.log(f"  - {p}")
+                    self.log("These may lock files during repair. Close them if repair fails.")
+            except ImportError:
+                pass  # psutil not available, skip check
+            except Exception:
+                pass  # Ignore errors in process check
+
         # Detection (also populates python path)
         if not self.detection_results:
             self.run_detection()
@@ -846,10 +873,14 @@ if errorlevel 1 (
             self.log(f"Repair warning: transformers/tokenizers reinstall failed: {result.stderr[:300]}")
         
         # Step 3: Install PyTorch (before unsloth, after requirements)
+        # NOTE: PyTorch installation may fail due to file locks (running Python processes)
+        # We continue anyway to install PySide6 (critical for GUI to start)
         self.log("Repair: Installing PyTorch + Triton...")
-        if not self.install_pytorch(python_executable=python_executable):
-            self.log("Repair failed: Could not install PyTorch.")
-            return False
+        pytorch_success = self.install_pytorch(python_executable=python_executable)
+        if not pytorch_success:
+            self.log("Repair warning: PyTorch installation failed (may be due to file locks)")
+            self.log("Continuing to install PySide6 (required for GUI to start)...")
+            self.log("You may need to close all Python processes and run Fix Issues again for PyTorch")
         
         # Step 4: Install unsloth separately with --no-deps to prevent torch downgrades
         self.log("Repair: Installing unsloth (with --no-deps to protect torch)...")
@@ -890,8 +921,28 @@ if errorlevel 1 (
         else:
             self.log("OK: PySide6 6.8.1 (all packages) installed successfully")
 
-        # Final verification (runs inside the same interpreter)
-        self.log("Repair: Verifying environment...")
+        # Final verification - check PySide6 first (critical for GUI to start)
+        pyside_ok = False
+        self.log("Repair: Verifying PySide6 (required for GUI)...")
+        try:
+            pyside_check = subprocess.run(
+                [python_executable, "-c", "import PySide6.QtCore; print('OK')"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                **self.subprocess_flags,
+            )
+            if pyside_check.returncode == 0:
+                self.log("OK: PySide6 is working - GUI can start")
+                pyside_ok = True
+            else:
+                self.log("ERROR: PySide6 verification failed - GUI cannot start")
+                self.log((pyside_check.stderr or "").strip())
+        except Exception as e:
+            self.log(f"Repair warning: PySide6 check failed: {e}")
+        
+        # Full verification (may fail if PyTorch has issues, but that's OK if PySide6 works)
+        self.log("Repair: Verifying full environment...")
         try:
             verify_cmd = [
                 python_executable,
@@ -906,15 +957,19 @@ if errorlevel 1 (
                 **self.subprocess_flags,
             )
             if res.returncode != 0:
-                self.log("Repair verification failed:")
+                self.log("Repair verification: Some components failed (check details above)")
                 self.log((res.stdout or "").strip())
-                self.log((res.stderr or "").strip())
-                return False
+                # Don't return False here - if PySide6 works, GUI can start
         except Exception as e:
             self.log(f"Repair verification warning: {e}")
-
-        self.log("Repair complete: Environment is healthy.")
-        return True
+        
+        # Return True if PySide6 is OK (GUI can start), even if other things failed
+        if pyside_ok:
+            self.log("Repair complete: PySide6 is working - GUI can start.")
+            return True
+        else:
+            self.log("Repair failed: PySide6 is not working - GUI cannot start.")
+            return False
 
 
 if __name__ == "__main__":
