@@ -7,13 +7,64 @@ echo ═════════════════════════
 echo    🚀 LLM Fine-tuning Studio Launcher 🚀
 echo ═══════════════════════════════════════════════════════
 echo.
+
+REM Change to script directory
+cd /d "%~dp0"
+
+REM Check if first-time setup has been completed
+if not exist ".setup_complete" (
+    echo.
+    echo ⚙️  First-time setup required...
+    echo This will detect your hardware and install all dependencies.
+    echo Please wait, this may take 5-15 minutes.
+    echo.
+    
+    REM Activate virtual environment if it exists
+    if exist .venv\Scripts\activate.bat (
+        call .venv\Scripts\activate.bat
+    )
+    
+    REM Run first-time setup
+    python first_run_setup.py
+    
+    if errorlevel 1 (
+        echo.
+        echo ❌ Setup failed! Please check the logs above.
+        echo.
+        echo Common issues:
+        echo  - No internet connection
+        echo  - Python not in PATH
+        echo  - Antivirus blocking downloads
+        echo.
+        echo You can retry by running this launcher again.
+        pause
+        exit /b 1
+    )
+    
+    echo.
+    echo ✅ Setup completed successfully!
+    echo.
+)
+
+REM Normal app launch
 echo Starting application...
 echo.
-cd /d "%~dp0"
+
 if exist .venv\Scripts\activate.bat (
   echo ✓ Activating virtual environment...
   call .venv\Scripts\activate.bat
 )
+
 python -m desktop_app.main
+
+if errorlevel 1 (
+    echo.
+    echo ❌ Application failed to start!
+    echo.
+    echo Try running: python verify_installation.py
+    echo to check your installation.
+    echo.
+)
+
 pause
 

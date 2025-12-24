@@ -17,6 +17,7 @@ from desktop_app.chat_widget import ChatWidget
 
 from system_detector import SystemDetector
 from smart_installer import SmartInstaller
+from setup_state import SetupStateManager
 from core.models import (DEFAULT_BASE_MODELS, search_hf_models, download_hf_model, list_local_adapters, 
                          list_local_downloads, get_app_root, detect_model_capabilities, get_capability_icons, get_model_size)
 from core.training import TrainingConfig, default_output_dir, build_finetune_cmd

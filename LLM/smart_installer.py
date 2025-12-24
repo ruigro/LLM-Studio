@@ -15,6 +15,28 @@ from system_detector import SystemDetector, detect_all
 class SmartInstaller:
     """Smart installer that detects and installs only what's needed"""
     
+    # Hardware-specific version matrix for compatibility
+    VERSION_MATRIX = {
+        "cuda_12.4": {"torch": "2.5.1", "triton": "3.0.0", "torchvision": "0.20.1", "torchaudio": "2.5.1"},
+        "cuda_12.1": {"torch": "2.5.1", "triton": "3.0.0", "torchvision": "0.20.1", "torchaudio": "2.5.1"},
+        "cuda_11.8": {"torch": "2.5.1", "triton": "3.0.0", "torchvision": "0.20.1", "torchaudio": "2.5.1"},
+        "cpu": {"torch": "2.5.1", "triton": "3.0.0", "torchvision": "0.20.1", "torchaudio": "2.5.1"}
+    }
+    
+    # GPU-specific compatibility information
+    GPU_COMPAT = {
+        "RTX 4090": {"compute": "8.9", "min_cuda": "11.8", "recommended_cuda": "12.4"},
+        "RTX 4080": {"compute": "8.9", "min_cuda": "11.8", "recommended_cuda": "12.4"},
+        "RTX 4070": {"compute": "8.9", "min_cuda": "11.8", "recommended_cuda": "12.4"},
+        "RTX A2000": {"compute": "8.6", "min_cuda": "11.1", "recommended_cuda": "11.8"},
+        "RTX 3090": {"compute": "8.6", "min_cuda": "11.1", "recommended_cuda": "11.8"},
+        "RTX 3080": {"compute": "8.6", "min_cuda": "11.1", "recommended_cuda": "11.8"},
+        "RTX 3070": {"compute": "8.6", "min_cuda": "11.1", "recommended_cuda": "11.8"},
+        "RTX 3060": {"compute": "8.6", "min_cuda": "11.1", "recommended_cuda": "11.8"},
+        "T1000": {"compute": "7.5", "min_cuda": "10.0", "recommended_cuda": "11.8"},
+        "T600": {"compute": "7.5", "min_cuda": "10.0", "recommended_cuda": "11.8"},
+    }
+    
     def __init__(self, install_dir: Optional[str] = None):
         self.install_dir = Path(install_dir) if install_dir else Path.cwd()
         self.detector = SystemDetector()
@@ -91,6 +113,50 @@ class SmartInstaller:
             self.log("Please install manually from: https://aka.ms/vs/17/release/vc_redist.x64.exe")
             return False
     
+    def get_optimal_cuda_build(self) -> str:
+        """Determine optimal CUDA build based on hardware detection"""
+        cuda_info = self.detection_results.get("cuda", {})
+        driver_version = cuda_info.get("driver_version")
+        gpus = cuda_info.get("gpus", [])
+        
+        if not driver_version or not gpus:
+            self.log("No CUDA detected. Using CPU build.")
+            return "cpu"
+        
+        # Check GPU compatibility
+        gpu_name = gpus[0].get("name", "") if gpus else ""
+        
+        # Find matching GPU in compatibility matrix
+        for known_gpu, info in self.GPU_COMPAT.items():
+            if known_gpu in gpu_name:
+                recommended = info.get("recommended_cuda", "11.8")
+                self.log(f"Detected {gpu_name} - Recommended CUDA: {recommended}")
+                
+                # Map to PyTorch build
+                if "12.4" in recommended:
+                    return "cu124"
+                elif "12.1" in recommended:
+                    return "cu121"
+                else:
+                    return "cu118"
+        
+        # Fallback: use driver version to determine build
+        try:
+            driver_major = int(float(driver_version.split('.')[0]))
+            
+            if driver_major >= 555:
+                return "cu124"  # CUDA 12.4
+            elif driver_major >= 545:
+                return "cu121"  # CUDA 12.1
+            elif driver_major >= 450:
+                return "cu118"  # CUDA 11.8
+            else:
+                self.log(f"Warning: Old driver {driver_version}. Using CPU build.")
+                return "cpu"
+        except:
+            self.log(f"Could not parse driver version {driver_version}. Using CPU build.")
+            return "cpu"
+    
     def install_pytorch(self, python_executable: Optional[str] = None) -> bool:
         """Install PyTorch based on detection with proper version compatibility"""
         if not python_executable:
@@ -100,39 +166,23 @@ class SmartInstaller:
                 return False
             python_executable = python_info.get("executable")
         
-        # Determine CUDA version and PyTorch build
-        cuda_info = self.detection_results.get("cuda", {})
-        driver_version = cuda_info.get("driver_version")
+        # Run detection if not already done
+        if not self.detection_results:
+            self.run_detection()
         
-        # Map CUDA driver to compatible CUDA toolkit version
-        cuda_build = "cpu"
-        pytorch_version = "2.5.1"  # Stable version compatible with Unsloth (2.6.0+ breaks Triton)
+        # Determine optimal CUDA build
+        cuda_build = self.get_optimal_cuda_build()
         
-        if driver_version:
-            try:
-                driver_major = int(float(driver_version.split('.')[0]))
-                
-                # CUDA compatibility mapping (conservative for stability)
-                if driver_major >= 525:  # CUDA 12.x support
-                    # Check minor version for exact CUDA toolkit
-                    if driver_major >= 555:
-                        cuda_build = "cu124"  # CUDA 12.4
-                    elif driver_major >= 545:
-                        cuda_build = "cu121"  # CUDA 12.1
-                    else:
-                        cuda_build = "cu118"  # CUDA 11.8
-                elif driver_major >= 450:  # CUDA 11.x support
-                    cuda_build = "cu118"  # CUDA 11.8 (most stable for 11.x)
-                else:
-                    self.log(f"Warning: Old driver version {driver_version}. GPU may not work.")
-                    cuda_build = "cpu"
-                
-                self.log(f"Detected CUDA driver {driver_version} -> Using PyTorch build: {cuda_build}")
-            except:
-                self.log(f"Could not parse driver version {driver_version}, using CPU build")
-                cuda_build = "cpu"
-        else:
-            self.log("No CUDA detected. Installing CPU-only PyTorch.")
+        # Get versions from matrix
+        build_key = cuda_build if cuda_build == "cpu" else f"cuda_{cuda_build[2:]}"
+        if build_key not in self.VERSION_MATRIX:
+            build_key = "cpu"
+        
+        versions = self.VERSION_MATRIX[build_key]
+        pytorch_version = versions["torch"]
+        torchvision_version = versions["torchvision"]
+        torchaudio_version = versions["torchaudio"]
+        triton_version = versions["triton"]
         
         self.log(f"Installing PyTorch {pytorch_version} ({cuda_build} build)...")
         
@@ -142,8 +192,8 @@ class SmartInstaller:
                 cmd = [
                     python_executable, "-m", "pip", "install",
                     f"torch=={pytorch_version}",
-                    f"torchvision==0.20.0",
-                    f"torchaudio=={pytorch_version}",
+                    f"torchvision=={torchvision_version}",
+                    f"torchaudio=={torchaudio_version}",
                     "--index-url", "https://download.pytorch.org/whl/cpu"
                 ]
             else:
@@ -151,8 +201,8 @@ class SmartInstaller:
                 cmd = [
                     python_executable, "-m", "pip", "install",
                     f"torch=={pytorch_version}",
-                    f"torchvision==0.20.1",
-                    f"torchaudio=={pytorch_version}",
+                    f"torchvision=={torchvision_version}",
+                    f"torchaudio=={torchaudio_version}",
                     "--index-url", f"https://download.pytorch.org/whl/{cuda_build}"
                 ]
             
@@ -170,10 +220,10 @@ class SmartInstaller:
                 self.log("PyTorch installed successfully")
                 
                 # Install compatible triton explicitly to avoid version conflicts
-                self.log("Installing compatible triton...")
+                self.log(f"Installing compatible triton {triton_version}...")
                 triton_cmd = [
                     python_executable, "-m", "pip", "install",
-                    "triton==3.0.0"
+                    f"triton=={triton_version}"
                 ]
                 subprocess.run(triton_cmd, capture_output=True, timeout=300)
                 
@@ -350,6 +400,88 @@ if errorlevel 1 (
             except Exception as e:
                 self.log(f"Error creating launcher: {e}")
                 return False
+    
+    def auto_install_all(self, progress_callback=None) -> Dict:
+        """
+        Single method to install everything with proper error handling
+        Returns detailed results for each component
+        """
+        results = {
+            "detection": {"success": False, "data": {}},
+            "python": {"success": False, "message": ""},
+            "vcredist": {"success": False, "message": ""},
+            "pytorch": {"success": False, "message": ""},
+            "dependencies": {"success": False, "message": ""},
+            "overall_success": False
+        }
+        
+        def log_with_callback(msg):
+            self.log(msg)
+            if progress_callback:
+                progress_callback(msg)
+        
+        try:
+            # Step 1: Detection
+            log_with_callback("Running system detection...")
+            self.run_detection()
+            results["detection"]["success"] = True
+            results["detection"]["data"] = self.detection_results
+            
+            # Step 2: Python check
+            log_with_callback("Checking Python installation...")
+            if self.install_python():
+                results["python"]["success"] = True
+                results["python"]["message"] = "Python found"
+            else:
+                results["python"]["message"] = "Python not found or invalid"
+                return results
+            
+            # Step 3: Visual C++ Redistributables (Windows only)
+            if platform.system() == "Windows":
+                log_with_callback("Checking Visual C++ Redistributables...")
+                if self.install_vcredist():
+                    results["vcredist"]["success"] = True
+                    results["vcredist"]["message"] = "Visual C++ Redistributables OK"
+                else:
+                    results["vcredist"]["message"] = "Visual C++ install failed (non-critical)"
+            else:
+                results["vcredist"]["success"] = True
+                results["vcredist"]["message"] = "Not required on this platform"
+            
+            # Step 4: PyTorch
+            log_with_callback("Installing PyTorch...")
+            pytorch_info = self.detection_results.get("pytorch", {})
+            if not pytorch_info.get("found"):
+                if self.install_pytorch():
+                    results["pytorch"]["success"] = True
+                    results["pytorch"]["message"] = "PyTorch installed successfully"
+                else:
+                    results["pytorch"]["message"] = "PyTorch installation failed"
+                    return results
+            else:
+                results["pytorch"]["success"] = True
+                results["pytorch"]["message"] = f"PyTorch {pytorch_info.get('version')} already installed"
+            
+            # Step 5: Dependencies
+            log_with_callback("Installing dependencies...")
+            if self.install_dependencies():
+                results["dependencies"]["success"] = True
+                results["dependencies"]["message"] = "Dependencies installed successfully"
+            else:
+                results["dependencies"]["message"] = "Some dependencies failed (may still work)"
+            
+            # Overall success if critical components installed
+            results["overall_success"] = (
+                results["python"]["success"] and 
+                results["pytorch"]["success"]
+            )
+            
+            log_with_callback("Installation process completed!")
+            return results
+            
+        except Exception as e:
+            log_with_callback(f"Error during installation: {str(e)}")
+            return results
     
     def install(self) -> bool:
         """Run complete installation process"""
