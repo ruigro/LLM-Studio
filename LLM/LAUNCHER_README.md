@@ -168,6 +168,17 @@ LLM/
    - Disk space
 3. Delete `.setup_complete` to retry setup
 
+### PySide6 DLL errors
+The launcher automatically detects and repairs PySide6 corruption:
+- **Auto-repair**: If PySide6 import fails, launcher runs repair automatically
+- **Version requirement**: ALL PySide6 packages must be at version 6.8.1:
+  - `PySide6==6.8.1`
+  - `PySide6-Essentials==6.8.1`
+  - `PySide6-Addons==6.8.1`
+  - `shiboken6==6.8.1`
+- **Why**: Version mismatches cause "procedure could not be found" errors
+- **Repair logs**: Check `logs\auto_repair.log` and `logs\app.log` for details
+
 ## 🔄 For Distribution
 
 When distributing to other PCs:

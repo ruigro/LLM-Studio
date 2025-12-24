@@ -198,6 +198,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     EnsureLogsDirectory(exeDir);
     
     // Health check: Test if PySide6 can import (if GUI can't start, user can't click Fix Issues)
+    // NOTE: All PySide6 packages MUST be at version 6.8.1 (PySide6, Essentials, Addons, shiboken6)
+    // Version mismatches cause "procedure could not be found" DLL errors
     std::wstring healthCheckCmd = L"-c \"import PySide6.QtCore; print('OK')\"";
     std::wstring healthCheckLog = exeDir + L"\\logs\\health_check.log";
     
@@ -205,6 +207,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     
     if (healthCheckResult != 0) {
         // PySide6 is broken - auto-repair silently before launching GUI
+        // Repair will install all PySide6 packages at 6.8.1 to prevent version mismatches
         // No popup - repair runs in background silently
         
         // Run repair_all() using pythonw.exe (no console window)

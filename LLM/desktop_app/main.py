@@ -2826,7 +2826,10 @@ class MainWindow(QMainWindow):
             "GUI & Visualization": [
                 ("streamlit", ">=1.28.0", "Web interface (optional)"),
                 ("pandas", ">=2.0.0", "Data manipulation"),
-                ("PySide6", ">=6.6.0", "Qt desktop GUI"),
+                ("PySide6", "==6.8.1", "Qt desktop GUI (ALL components must match)"),
+                ("PySide6-Essentials", "==6.8.1", "PySide6 essentials (must match PySide6 version)"),
+                ("PySide6-Addons", "==6.8.1", "PySide6 addons (must match PySide6 version)"),
+                ("shiboken6", "==6.8.1", "PySide6 binding generator (must match PySide6 version)"),
             ],
             "Hugging Face Integration": [
                 ("huggingface_hub", ">=0.36.0", "Model download/upload"),
