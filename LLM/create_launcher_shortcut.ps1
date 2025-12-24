@@ -1,22 +1,22 @@
-# Create shortcut with rocket icon
+# Create shortcut with custom rocket icon
 $WScriptShell = New-Object -ComObject WScript.Shell
 $ShortcutPath = "$PSScriptRoot\Launch LLM Studio.lnk"
-
-# Verify icon file exists
-$IconPath = Join-Path $PSScriptRoot "rocket.ico"
-if (-not (Test-Path $IconPath)) {
-    Write-Host ""
-    Write-Host "ERROR: rocket.ico not found!" -ForegroundColor Red
-    Write-Host "The icon file should be in the same directory as this script." -ForegroundColor Yellow
-    Write-Host "Path checked: $IconPath" -ForegroundColor Yellow
-    Write-Host ""
-    pause
-    exit 1
-}
 
 # Delete old shortcut if exists
 if (Test-Path $ShortcutPath) {
     Remove-Item $ShortcutPath -Force
+}
+
+# Check if rocket.ico exists
+$IconPath = Join-Path $PSScriptRoot "rocket.ico"
+if (-not (Test-Path $IconPath)) {
+    Write-Host "Creating rocket.ico..." -ForegroundColor Yellow
+    python (Join-Path $PSScriptRoot "create_rocket_ico.py")
+    if (-not (Test-Path $IconPath)) {
+        Write-Host "ERROR: Failed to create rocket.ico" -ForegroundColor Red
+        pause
+        exit 1
+    }
 }
 
 $Shortcut = $WScriptShell.CreateShortcut($ShortcutPath)
@@ -24,24 +24,23 @@ $Shortcut.TargetPath = "$PSScriptRoot\LAUNCHER.bat"
 $Shortcut.WorkingDirectory = "$PSScriptRoot"
 $Shortcut.Description = "Launch LLM Fine-tuning Studio"
 
-# Use absolute path for icon
-$AbsoluteIconPath = Resolve-Path $IconPath
-$Shortcut.IconLocation = $AbsoluteIconPath.Path
+# CRITICAL: Use icon with explicit index 0 and quotes for path with spaces
+$AbsoluteIconPath = (Resolve-Path $IconPath).Path
+$Shortcut.IconLocation = "`"$AbsoluteIconPath`",0"
 
 $Shortcut.Save()
 
-Write-Host ""
-Write-Host "SUCCESS: Launcher shortcut created with rocket icon!" -ForegroundColor Green
-Write-Host "Icon path: $($AbsoluteIconPath.Path)" -ForegroundColor Cyan
-Write-Host ""
+# Force icon refresh by touching the shortcut file
+$shortcutFile = Get-Item $ShortcutPath
+$shortcutFile.LastWriteTime = Get-Date
 
-# Refresh Windows icon cache
+Write-Host ""
+Write-Host "SUCCESS: Launcher shortcut created!" -ForegroundColor Green
+Write-Host "Icon: $AbsoluteIconPath" -ForegroundColor Cyan
+Write-Host ""
 Write-Host "Refreshing icon cache..." -ForegroundColor Yellow
 ie4uinit.exe -show
-Start-Sleep -Seconds 1
-
 Write-Host ""
-Write-Host "Done! If icon doesn't appear, restart Explorer:" -ForegroundColor Cyan
-Write-Host "  taskkill /f /im explorer.exe & start explorer.exe" -ForegroundColor Gray
+Write-Host "If icon still doesn't show, right-click the shortcut > Properties > Change Icon > OK" -ForegroundColor Cyan
 Write-Host ""
 
