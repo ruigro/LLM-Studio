@@ -1,6 +1,6 @@
 # Create shortcut with rocket icon
 $WScriptShell = New-Object -ComObject WScript.Shell
-$ShortcutPath = "$PSScriptRoot\🚀 Launch LLM Studio.lnk"
+$ShortcutPath = "$PSScriptRoot\Launch LLM Studio.lnk"
 
 # Verify icon file exists
 $IconPath = Join-Path $PSScriptRoot "rocket.ico"
