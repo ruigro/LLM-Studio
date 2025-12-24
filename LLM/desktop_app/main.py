@@ -888,9 +888,37 @@ class MainWindow(QMainWindow):
         
         required_packages = ['unsloth', 'transformers', 'accelerate', 'peft', 'datasets', 'Pillow']
         
+        # Version requirements for critical packages
+        version_requirements = {
+            'transformers': ('4.51.3', '4.51.3'),  # exact version needed
+            'tokenizers': ('0.21', '0.22'),  # range: >=0.21, <0.22
+        }
+        
         for pkg in required_packages:
             try:
-                version(pkg)
+                installed_version = version(pkg)
+                
+                # Check version compatibility for critical packages
+                if pkg in version_requirements:
+                    min_ver, max_ver = version_requirements[pkg]
+                    if pkg == 'transformers':
+                        # Exact version check
+                        if not installed_version.startswith(min_ver):
+                            deps_ok = False
+                            missing_packages.append(f"{pkg} (need {min_ver}, have {installed_version})")
+                    elif pkg == 'tokenizers':
+                        # Range check
+                        try:
+                            from packaging import version as pkg_version
+                            ver = pkg_version.parse(installed_version)
+                            min_v = pkg_version.parse(min_ver)
+                            max_v = pkg_version.parse(max_ver)
+                            if not (min_v <= ver < max_v):
+                                deps_ok = False
+                                missing_packages.append(f"{pkg} (need >={min_ver},<{max_ver}, have {installed_version})")
+                        except:
+                            pass  # If version parsing fails, assume OK
+                
             except PackageNotFoundError:
                 deps_ok = False
                 missing_packages.append(pkg)
