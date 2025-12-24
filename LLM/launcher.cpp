@@ -119,96 +119,40 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     bool needsSetup = !FileExists(setupCompleteMarker);
     
     if (needsSetup) {
-        // First run: launch bootstrap_setup.py (uses tkinter, no deps)
-        std::wstring bootstrapScript = exeDir + L"\\bootstrap_setup.py";
+        // First run: launch LAUNCHER.bat (has better Python detection)
+        std::wstring launcherBat = exeDir + L"\\LAUNCHER.bat";
         
-        // Find system Python
-        std::wstring systemPython = L"python.exe";
+        SHELLEXECUTEINFOW sei = {0};
+        sei.cbSize = sizeof(sei);
+        sei.fMask = SEE_MASK_NOCLOSEPROCESS;
+        sei.lpVerb = L"open";
+        sei.lpFile = launcherBat.c_str();
+        sei.lpDirectory = exeDir.c_str();
+        sei.nShow = SW_SHOW;
         
-        // Try to find Python in common locations
-        std::vector<std::wstring> pythonPaths = {
-            L"python.exe",  // From PATH
-            exeDir + L"\\python.exe"
-        };
-        
-        // Check AppData
-        wchar_t appdata[MAX_PATH];
-        if (GetEnvironmentVariableW(L"LOCALAPPDATA", appdata, MAX_PATH) > 0) {
-            std::wstring appdataPath(appdata);
-            pythonPaths.push_back(appdataPath + L"\\Programs\\Python\\Python312\\python.exe");
-            pythonPaths.push_back(appdataPath + L"\\Programs\\Python\\Python311\\python.exe");
-            pythonPaths.push_back(appdataPath + L"\\Programs\\Python\\Python310\\python.exe");
-        }
-        
-        // Check standard locations
-        pythonPaths.push_back(L"C:\\Python312\\python.exe");
-        pythonPaths.push_back(L"C:\\Python311\\python.exe");
-        pythonPaths.push_back(L"C:\\Python310\\python.exe");
-        
-        std::wstring foundPython;
-        for (const auto& path : pythonPaths) {
-            if (path.find(L":") != std::wstring::npos) {
-                // Absolute path
-                if (FileExists(path)) {
-                    foundPython = path;
-                    break;
-                }
-            } else {
-                // Relative or PATH
-                foundPython = path;
-                break;
-            }
-        }
-        
-        if (foundPython.empty()) {
+        if (!ShellExecuteExW(&sei)) {
             MessageBoxW(NULL,
-                       L"Python not found!\n\n"
-                       L"Please install Python 3.8+ from:\n"
-                       L"https://www.python.org/downloads/\n\n"
-                       L"Make sure to check 'Add Python to PATH' during installation.",
-                       L"Python Required",
-                       MB_OK | MB_ICONERROR);
-            return 1;
-        }
-        
-        // Launch bootstrap
-        std::wstring args = L"\"" + foundPython + L"\" \"" + bootstrapScript + L"\"";
-        
-        STARTUPINFOW si = {0};
-        si.cb = sizeof(si);
-        PROCESS_INFORMATION pi = {0};
-        
-        BOOL success = CreateProcessW(
-            NULL,
-            &args[0],
-            NULL, NULL, FALSE, 0, NULL,
-            exeDir.c_str(),
-            &si, &pi
-        );
-        
-        if (!success) {
-            MessageBoxW(NULL,
-                       L"Failed to launch bootstrap setup!\n\n"
+                       L"Failed to launch setup!\n\n"
                        L"Please run LAUNCHER.bat manually.",
                        L"Setup Error",
                        MB_OK | MB_ICONERROR);
             return 1;
         }
         
-        // Wait for bootstrap to complete
-        WaitForSingleObject(pi.hProcess, INFINITE);
-        
-        DWORD exitCode = 0;
-        GetExitCodeProcess(pi.hProcess, &exitCode);
-        CloseHandle(pi.hProcess);
-        CloseHandle(pi.hThread);
-        
-        if (exitCode != 0) {
-            return exitCode;
+        // Wait for setup to complete
+        if (sei.hProcess) {
+            WaitForSingleObject(sei.hProcess, INFINITE);
+            
+            DWORD exitCode = 0;
+            GetExitCodeProcess(sei.hProcess, &exitCode);
+            CloseHandle(sei.hProcess);
+            
+            if (exitCode != 0) {
+                return exitCode;
+            }
         }
         
-        // Bootstrap launches main setup, so just exit here
-        return 0;
+        // Setup done, continue to launch app
     }
     
     // Check which Python interpreter to use (venv should exist now)
