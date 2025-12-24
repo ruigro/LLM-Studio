@@ -7,7 +7,7 @@ from PySide6.QtCore import Qt, QProcess, QTimer, QThread, Signal, QProcessEnviro
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QTabWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QLineEdit, QPushButton, QFileDialog, QComboBox, QTextEdit, QPlainTextEdit,
-    QSpinBox, QDoubleSpinBox, QMessageBox, QListWidget, QListWidgetItem, QSplitter, QToolBar, QScrollArea, QGridLayout, QFrame, QProgressBar, QSizePolicy, QTabBar, QStyleOptionTab, QStyle
+    QSpinBox, QDoubleSpinBox, QMessageBox, QListWidget, QListWidgetItem, QSplitter, QToolBar, QScrollArea, QGridLayout, QFrame, QProgressBar, QSizePolicy, QTabBar, QStyleOptionTab, QStyle, QStackedWidget
 )
 from PySide6.QtGui import QAction, QIcon, QFont
 
@@ -1399,7 +1399,7 @@ class MainWindow(QMainWindow):
         # Use recommended settings checkbox
         use_recommended = QHBoxLayout()
         self.use_recommended_btn = QPushButton("✨ Use Recommended Settings")
-        self.use_recommended_btn.clicked.connect(self._use_recommended_settings)
+        self.use_recommended_btn.clicked.connect(lambda: (self._use_recommended_settings(), self._switch_to_dashboard()))
         use_recommended.addWidget(self.use_recommended_btn)
         use_recommended.addStretch(1)
         params_layout.addLayout(use_recommended)
@@ -1576,10 +1576,10 @@ class MainWindow(QMainWindow):
 
         # Give each side a sensible minimum so the dashboard can't get crushed.
         left_scroll.setMinimumWidth(520)
-        right_widget.setMinimumWidth(400)
+        self.train_right_stack.setMinimumWidth(400)
 
         splitter.addWidget(left_scroll)
-        splitter.addWidget(right_widget)
+        splitter.addWidget(self.train_right_stack)
 
         # Dashboard = 1/3 of width, Config = 2/3
         splitter.setStretchFactor(0, 2)
@@ -1667,6 +1667,251 @@ class MainWindow(QMainWindow):
         else:
             self.dataset_status_label.setText("⚠️ File not found")
             self.dataset_status_label.setStyleSheet("color: #ff9800;")
+    
+    def _check_dataset(self):
+        """Check dataset format and switch to dataset viewer"""
+        path = self.train_data_path.text().strip()
+        if not path or not Path(path).exists():
+            QMessageBox.warning(self, "No Dataset", "Please select a dataset file first.")
+            return
+        
+        # Switch to dataset viewer page
+        self.train_right_stack.setCurrentIndex(1)
+        
+        # Load and display dataset preview
+        self._load_dataset_preview(path)
+    
+    def _switch_to_dashboard(self):
+        """Switch right panel back to training dashboard"""
+        self.train_right_stack.setCurrentIndex(0)
+    
+    def _load_dataset_preview(self, path: str):
+        """Load first few entries from dataset and update viewer"""
+        try:
+            import json
+            examples = []
+            with open(path, 'r', encoding='utf-8') as f:
+                for i, line in enumerate(f):
+                    if i >= 10:  # Show first 10 entries
+                        break
+                    try:
+                        entry = json.loads(line.strip())
+                        examples.append(entry)
+                    except:
+                        pass
+            
+            # Update dataset viewer with loaded examples
+            if hasattr(self, 'dataset_preview_text'):
+                preview_text = ""
+                for i, entry in enumerate(examples, 1):
+                    preview_text += f"=== Entry {i} ===\n"
+                    preview_text += json.dumps(entry, indent=2, ensure_ascii=False)
+                    preview_text += "\n\n"
+                
+                self.dataset_preview_text.setPlainText(preview_text)
+                
+                # Validate format
+                if examples:
+                    first = examples[0]
+                    has_instruction = any(k in first for k in ['instruction', 'prompt', 'input', 'question'])
+                    has_output = any(k in first for k in ['output', 'response', 'completion', 'answer'])
+                    has_messages = 'messages' in first
+                    
+                    if has_instruction and has_output:
+                        self.dataset_format_label.setText("✅ Format: Instruction/Output (Compatible)")
+                        self.dataset_format_label.setStyleSheet("color: #4CAF50; font-weight: bold;")
+                    elif has_messages:
+                        self.dataset_format_label.setText("✅ Format: Chat/Messages (Compatible)")
+                        self.dataset_format_label.setStyleSheet("color: #4CAF50; font-weight: bold;")
+                    else:
+                        self.dataset_format_label.setText("⚠️ Format: Unknown - May need conversion")
+                        self.dataset_format_label.setStyleSheet("color: #ff9800; font-weight: bold;")
+        except Exception as e:
+            if hasattr(self, 'dataset_preview_text'):
+                self.dataset_preview_text.setPlainText(f"Error loading dataset: {str(e)}")
+    
+    def _build_training_dashboard(self) -> QWidget:
+        """Build the training dashboard widget (right column page 0)"""
+        right_widget = QWidget()
+        right_layout = QVBoxLayout(right_widget)
+        right_layout.setSpacing(0)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        
+        # Training Dashboard Header
+        dashboard_header = QLabel("📊 TRAINING DASHBOARD")
+        dashboard_header.setAlignment(Qt.AlignCenter)
+        dashboard_header.setMinimumHeight(50)
+        dashboard_header.setStyleSheet("""
+            QLabel {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, 
+                    stop:0 rgba(102, 126, 234, 0.8), stop:1 rgba(118, 75, 162, 0.8));
+                color: white;
+                font-size: 16pt;
+                font-weight: bold;
+                border: none;
+                border-radius: 12px;
+            }
+        """)
+        right_layout.addWidget(dashboard_header)
+        
+        # Single row with all 4 metrics: EPOCH, STEPS, LOSS, ETA
+        metrics_row = QWidget()
+        metrics_row.setMinimumHeight(90)
+        metrics_row.setMaximumHeight(90)
+        metrics_layout = QHBoxLayout(metrics_row)
+        metrics_layout.setSpacing(8)
+        metrics_layout.setContentsMargins(0, 0, 0, 0)
+        
+        self.epoch_card = self._create_3d_metric_card("EPOCH", "📚", "0/0", "rgba(26, 31, 53, 0.7)")
+        self.steps_card = self._create_3d_metric_card("STEPS", "🔥", "0/0", "rgba(31, 26, 53, 0.7)")
+        self.loss_card = self._create_3d_metric_card("LOSS", "📉", "--·----", "rgba(53, 34, 26, 0.7)")
+        self.eta_card = self._create_3d_metric_card("ETA", "⏱", "--m --s", "rgba(26, 53, 34, 0.7)")
+        
+        metrics_layout.addWidget(self.epoch_card)
+        metrics_layout.addWidget(self.steps_card)
+        metrics_layout.addWidget(self.loss_card)
+        metrics_layout.addWidget(self.eta_card)
+        right_layout.addWidget(metrics_row)
+        
+        # Second row with LR, SPEED, GPU
+        extra_row = QWidget()
+        extra_row.setMinimumHeight(90)
+        extra_row.setMaximumHeight(90)
+        extra_layout = QHBoxLayout(extra_row)
+        extra_layout.setSpacing(8)
+        extra_layout.setContentsMargins(0, 0, 0, 0)
+        
+        self.learning_rate_card = self._create_3d_metric_card("LR", "📊", "--e-0", "rgba(42, 26, 53, 0.7)")
+        self.speed_card = self._create_3d_metric_card("SPEED", "🚀", "-- s/s", "rgba(26, 37, 53, 0.7)")
+        self.gpu_mem_card = self._create_3d_metric_card("GPU", "💾", "-- GB", "rgba(53, 41, 26, 0.7)")
+        
+        extra_layout.addWidget(self.learning_rate_card)
+        extra_layout.addWidget(self.speed_card)
+        extra_layout.addWidget(self.gpu_mem_card)
+        right_layout.addWidget(extra_row)
+        
+        # Loss Over Time Section
+        loss_section = QWidget()
+        loss_section.setMinimumHeight(240)
+        loss_section.setMaximumHeight(240)
+        loss_section_layout = QVBoxLayout(loss_section)
+        loss_section_layout.setContentsMargins(15, 10, 15, 10)
+        loss_section_layout.setSpacing(5)
+        
+        loss_title = QLabel("<b>📉 Loss Over Time</b>")
+        loss_title.setStyleSheet("color: white; font-size: 12pt;")
+        loss_section_layout.addWidget(loss_title)
+        
+        self.loss_chart_label = QLabel("Loss chart will appear here once training starts...")
+        self.loss_chart_label.setAlignment(Qt.AlignCenter)
+        self.loss_chart_label.setStyleSheet("color: #888;")
+        loss_section_layout.addWidget(self.loss_chart_label, 1)
+        
+        loss_section.setStyleSheet("""
+            QWidget {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 rgba(15, 15, 26, 0.6), stop:1 rgba(25, 25, 36, 0.8));
+                border: 1px solid rgba(102, 126, 234, 0.3);
+                border-radius: 12px;
+            }
+        """)
+        right_layout.addWidget(loss_section)
+        
+        # Training Logs
+        logs_section = QWidget()
+        logs_section_layout = QVBoxLayout(logs_section)
+        logs_section_layout.setContentsMargins(15, 10, 15, 10)
+        logs_section_layout.setSpacing(5)
+        
+        logs_header = QHBoxLayout()
+        logs_title = QLabel("<b>📋 Training Logs</b>")
+        logs_title.setStyleSheet("color: white; font-size: 12pt;")
+        logs_header.addWidget(logs_title)
+        logs_header.addStretch(1)
+        
+        self.logs_expand_btn = QPushButton("▼ Show Logs")
+        self.logs_expand_btn.setCheckable(True)
+        self.logs_expand_btn.setChecked(True)
+        self.logs_expand_btn.clicked.connect(self._toggle_logs)
+        self.logs_expand_btn.setStyleSheet("""
+            QPushButton {
+                background: rgba(102, 126, 234, 0.3);
+                color: white;
+                border: none;
+                border-radius: 6px;
+                padding: 5px 15px;
+                font-size: 10pt;
+            }
+            QPushButton:hover {
+                background: rgba(102, 126, 234, 0.5);
+            }
+        """)
+        logs_header.addWidget(self.logs_expand_btn)
+        logs_section_layout.addLayout(logs_header)
+        
+        self.train_log = QPlainTextEdit()
+        self.train_log.setReadOnly(True)
+        self.train_log.setMaximumBlockCount(10000)
+        self.train_log.setMinimumHeight(200)
+        self.train_log.setVisible(True)
+        self.train_log.setStyleSheet("""
+            QPlainTextEdit {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 rgba(10, 10, 15, 0.9), stop:1 rgba(20, 20, 25, 0.9));
+                color: #00ff00;
+                font-family: 'Consolas', 'Courier New', monospace;
+                font-size: 11pt;
+                border: 1px solid rgba(102, 126, 234, 0.3);
+                border-radius: 8px;
+                padding: 10px;
+            }
+        """)
+        logs_section_layout.addWidget(self.train_log, 1)
+        
+        logs_section.setStyleSheet("""
+            QWidget {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 rgba(15, 15, 26, 0.6), stop:1 rgba(25, 25, 36, 0.8));
+                border: 1px solid rgba(102, 126, 234, 0.3);
+                border-radius: 12px;
+            }
+        """)
+        right_layout.addWidget(logs_section, 1)
+        
+        return right_widget
+    
+    def _build_dataset_viewer(self) -> QWidget:
+        """Build the dataset viewer widget (right column page 1)"""
+        viewer_widget = QWidget()
+        viewer_layout = QVBoxLayout(viewer_widget)
+        viewer_layout.setSpacing(15)
+        viewer_layout.setContentsMargins(15, 15, 15, 15)
+        
+        # Header
+        header = QLabel("<h2>🔍 Dataset Viewer</h2>")
+        viewer_layout.addWidget(header)
+        
+        # Format validation status
+        self.dataset_format_label = QLabel("Select a dataset and click 'Check Dataset' to view")
+        self.dataset_format_label.setWordWrap(True)
+        self.dataset_format_label.setStyleSheet("font-size: 12pt; padding: 10px;")
+        viewer_layout.addWidget(self.dataset_format_label)
+        
+        # Preview text
+        preview_label = QLabel("<b>Dataset Preview (first 10 entries):</b>")
+        viewer_layout.addWidget(preview_label)
+        
+        self.dataset_preview_text = QPlainTextEdit()
+        self.dataset_preview_text.setReadOnly(True)
+        self.dataset_preview_text.setPlaceholderText("Dataset preview will appear here...")
+        viewer_layout.addWidget(self.dataset_preview_text, 1)
+        
+        # Back button
+        back_btn = QPushButton("← Back to Dashboard")
+        back_btn.clicked.connect(self._switch_to_dashboard)
+        viewer_layout.addWidget(back_btn)
+        
+        return viewer_widget
     
     def _use_recommended_settings(self):
         """Apply recommended training settings"""
