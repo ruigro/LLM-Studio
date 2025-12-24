@@ -622,11 +622,44 @@ class MainWindow(QMainWindow):
                 self._restart_application()
         else:
             self.install_log.appendPlainText("\n❌ Installation failed!")
+            
+            # Write error to log files so it appears in Logs tab
+            from pathlib import Path
+            logs_dir = Path(__file__).parent.parent / "logs"
+            logs_dir.mkdir(exist_ok=True)
+            
+            app_log_path = logs_dir / "app.log"
+            repair_log_path = logs_dir / "auto_repair.log"
+            
+            # Get install log content
+            log_content = self.install_log.toPlainText()
+            
+            # Append to app.log
+            try:
+                with open(app_log_path, "a", encoding="utf-8") as f:
+                    f.write(f"\n\n=== Fix Issues Failed ===\n")
+                    f.write(log_content)
+                    f.write("\n=====================================\n")
+            except Exception as e:
+                print(f"Failed to write to app.log: {e}")
+            
+            # Write to auto_repair.log
+            try:
+                with open(repair_log_path, "w", encoding="utf-8") as f:
+                    f.write(log_content)
+            except Exception as e:
+                print(f"Failed to write to auto_repair.log: {e}")
+            
+            # Refresh Logs tab to show new files
+            if hasattr(self, 'logs_list'):
+                self._refresh_locals()
+            
             QMessageBox.critical(
                 self,
                 "Installation Failed",
                 "❌ Installation failed.\n\n"
-                "Please check the logs above for details."
+                "The error has been written to logs\\app.log and logs\\auto_repair.log\n"
+                "Check the Logs tab for details."
             )
         
         # Re-enable button
