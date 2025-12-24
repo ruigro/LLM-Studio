@@ -218,25 +218,53 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
         
         int repairResult = LaunchPythonApp(exeDir, pythonExe, repairCmd, repairLog);
         
-        if (repairResult != 0) {
+        // Always verify PySide6 after repair, regardless of repair exit code
+        healthCheckResult = LaunchPythonApp(exeDir, pythonExe, healthCheckCmd, healthCheckLog);
+        
+        if (repairResult != 0 || healthCheckResult != 0) {
+            // Repair failed OR PySide6 still broken - show error and open log
+            std::wstring errorMsg = L"Auto-repair ";
+            if (repairResult != 0) {
+                errorMsg += L"failed";
+            } else {
+                errorMsg += L"completed but PySide6 is still broken";
+            }
+            errorMsg += L"!\n\nPlease check logs\\auto_repair.log for details.\nThe repair log will open in Notepad.";
+            
             MessageBoxW(NULL,
-                        L"Auto-repair failed!\n\n"
-                        L"Please check logs\\auto_repair.log for details.\n"
-                        L"The repair log will open in Notepad.",
+                        errorMsg.c_str(),
                         L"Repair Failed",
                         MB_OK | MB_ICONERROR);
-            OpenLogInNotepad(repairLog);
-            return 1;
-        }
-        
-        // Repair succeeded - verify PySide6 again
-        healthCheckResult = LaunchPythonApp(exeDir, pythonExe, healthCheckCmd, healthCheckLog);
-        if (healthCheckResult != 0) {
-            MessageBoxW(NULL,
-                        L"Repair completed but PySide6 still broken.\n\n"
-                        L"Please check logs\\auto_repair.log for details.",
-                        L"Repair Incomplete",
-                        MB_OK | MB_ICONWARNING);
+            
+            // Always try to open log file (even if it doesn't exist, Notepad will show error)
+            if (FileExists(repairLog)) {
+                OpenLogInNotepad(repairLog);
+            } else {
+                // Log file doesn't exist - create a summary error log
+                std::wstring errorLog = exeDir + L"\\logs\\repair_error_summary.log";
+                HANDLE hErrorLog = CreateFileW(
+                    errorLog.c_str(),
+                    GENERIC_WRITE,
+                    FILE_SHARE_READ,
+                    NULL,
+                    CREATE_ALWAYS,
+                    FILE_ATTRIBUTE_NORMAL,
+                    NULL
+                );
+                if (hErrorLog != INVALID_HANDLE_VALUE) {
+                    wchar_t summary[512];
+                    swprintf_s(summary, 512,
+                        L"Repair failed but no detailed log was created.\n"
+                        L"Repair exit code: %d\n"
+                        L"PySide6 check exit code: %d\n"
+                        L"Expected log file: %s\n",
+                        repairResult, healthCheckResult, repairLog.c_str());
+                    DWORD written = 0;
+                    WriteFile(hErrorLog, summary, wcslen(summary) * sizeof(wchar_t), &written, NULL);
+                    CloseHandle(hErrorLog);
+                    OpenLogInNotepad(errorLog);
+                }
+            }
             return 1;
         }
     }
