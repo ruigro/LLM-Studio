@@ -30,15 +30,15 @@ if errorlevel 1 (
 echo SUCCESS: Resource compiled
 
 echo.
-echo [2/3] Compiling C++ source...
-g++ -O2 -s -mwindows launcher.cpp launcher_res.o -o launcher.exe -static-libgcc -static-libstdc++
+echo [2/3] Compiling C++ source with static linking...
+g++ -O2 -s -static -mwindows launcher.cpp launcher_res.o -o launcher.exe
 if errorlevel 1 (
     echo ERROR: Failed to compile launcher
     pause
     del launcher_res.o
     exit /b 1
 )
-echo SUCCESS: Launcher compiled
+echo SUCCESS: Launcher compiled (fully static, no DLL dependencies)
 
 echo.
 echo [3/3] Cleaning up temporary files...
