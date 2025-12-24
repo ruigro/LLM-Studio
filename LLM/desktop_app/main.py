@@ -1690,15 +1690,34 @@ class MainWindow(QMainWindow):
         try:
             import json
             examples = []
+            
+            # Try loading the file (handle both JSONL and JSON array formats)
             with open(path, 'r', encoding='utf-8') as f:
-                for i, line in enumerate(f):
-                    if i >= 10:  # Show first 10 entries
-                        break
-                    try:
+                content = f.read().strip()
+            
+            # Try as JSONL first (one object per line)
+            try:
+                for i, line in enumerate(content.split('\n')[:10]):
+                    if line.strip():
                         entry = json.loads(line.strip())
                         examples.append(entry)
-                    except:
-                        pass
+            except:
+                # Try as JSON array
+                try:
+                    data = json.loads(content)
+                    if isinstance(data, list):
+                        examples = data[:10]
+                    elif isinstance(data, dict):
+                        # Wrapped format like {"data": [...]} or {"entries": [...]}
+                        for key in ['data', 'entries', 'examples', 'dataset', 'items']:
+                            if key in data and isinstance(data[key], list):
+                                examples = data[key][:10]
+                                break
+                        # If still empty, treat the dict itself as a single example
+                        if not examples:
+                            examples = [data]
+                except:
+                    pass
             
             # Update dataset viewer with loaded examples
             if hasattr(self, 'dataset_preview_text'):
@@ -1710,25 +1729,49 @@ class MainWindow(QMainWindow):
                 
                 self.dataset_preview_text.setPlainText(preview_text)
                 
-                # Validate format
+                # Validate format - comprehensive field detection
                 if examples:
                     first = examples[0]
-                    has_instruction = any(k in first for k in ['instruction', 'prompt', 'input', 'question'])
-                    has_output = any(k in first for k in ['output', 'response', 'completion', 'answer'])
+                    
+                    # All possible field names
+                    instruction_fields = ['instruction', 'prompt', 'input', 'text', 'question', 'query', 'user', 'human']
+                    output_fields = ['output', 'response', 'completion', 'answer', 'assistant', 'reply', 'bot', 'gpt']
+                    
+                    found_instruction = [k for k in instruction_fields if k in first]
+                    found_output = [k for k in output_fields if k in first]
                     has_messages = 'messages' in first
                     
-                    if has_instruction and has_output:
-                        self.dataset_format_label.setText("✅ Format: Instruction/Output (Compatible)")
-                        self.dataset_format_label.setStyleSheet("color: #4CAF50; font-weight: bold;")
+                    # Show detailed format info
+                    format_info = f"📊 Dataset has {len(examples)} entries shown\n\n"
+                    format_info += f"🔍 Detected fields: {', '.join(first.keys())}\n\n"
+                    
+                    if found_instruction and found_output:
+                        format_info += f"✅ Format: Instruction/Output\n"
+                        format_info += f"   - Instruction field: {found_instruction[0]}\n"
+                        format_info += f"   - Output field: {found_output[0]}\n"
+                        format_info += f"   Status: Compatible ✓"
+                        self.dataset_format_label.setText(format_info)
+                        self.dataset_format_label.setStyleSheet("color: #4CAF50; font-size: 11pt;")
                     elif has_messages:
-                        self.dataset_format_label.setText("✅ Format: Chat/Messages (Compatible)")
-                        self.dataset_format_label.setStyleSheet("color: #4CAF50; font-weight: bold;")
+                        format_info += f"✅ Format: Chat/Messages\n"
+                        format_info += f"   Status: Compatible ✓"
+                        self.dataset_format_label.setText(format_info)
+                        self.dataset_format_label.setStyleSheet("color: #4CAF50; font-size: 11pt;")
                     else:
-                        self.dataset_format_label.setText("⚠️ Format: Unknown - May need conversion")
-                        self.dataset_format_label.setStyleSheet("color: #ff9800; font-weight: bold;")
+                        format_info += f"⚠️ Format: Custom\n"
+                        format_info += f"   No standard instruction/output fields found\n"
+                        format_info += f"   Available fields: {', '.join(first.keys())}\n"
+                        format_info += f"   May require conversion"
+                        self.dataset_format_label.setText(format_info)
+                        self.dataset_format_label.setStyleSheet("color: #ff9800; font-size: 11pt;")
+                else:
+                    self.dataset_format_label.setText("⚠️ No entries found in dataset")
+                    self.dataset_format_label.setStyleSheet("color: #ff9800; font-size: 11pt;")
         except Exception as e:
             if hasattr(self, 'dataset_preview_text'):
                 self.dataset_preview_text.setPlainText(f"Error loading dataset: {str(e)}")
+                self.dataset_format_label.setText(f"❌ Error: {str(e)}")
+                self.dataset_format_label.setStyleSheet("color: #f44336; font-size: 11pt;")
     
     def _build_training_dashboard(self) -> QWidget:
         """Build the training dashboard widget (right column page 0)"""
