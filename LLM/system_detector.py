@@ -18,6 +18,17 @@ class SystemDetector:
     def __init__(self):
         self.platform = platform.system().lower()
         self.detection_results = {}
+        
+        # Windows subprocess flags to prevent CMD window flashing
+        self.subprocess_flags = {}
+        if sys.platform == 'win32':
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            startupinfo.wShowWindow = subprocess.SW_HIDE
+            self.subprocess_flags = {
+                'startupinfo': startupinfo,
+                'creationflags': subprocess.CREATE_NO_WINDOW
+            }
     
     def detect_all(self) -> Dict:
         """Run all detection methods and return results"""
@@ -63,7 +74,7 @@ class SystemDetector:
                     # Try running pip command
                     try:
                         subprocess.run([sys.executable, "-m", "pip", "--version"], 
-                                      capture_output=True, check=True, timeout=5)
+                                      capture_output=True, check=True, timeout=5, **self.subprocess_flags)
                         result["pip_available"] = True
                     except:
                         pass
@@ -87,7 +98,7 @@ class SystemDetector:
                         try:
                             version_output = subprocess.run(
                                 [python_exe, "--version"],
-                                capture_output=True, text=True, timeout=5
+                                capture_output=True, text=True, timeout=5, **self.subprocess_flags
                             )
                             if version_output.returncode == 0:
                                 version_str = version_output.stdout.strip()
@@ -109,12 +120,12 @@ class SystemDetector:
                     try:
                         version_output = subprocess.run(
                             [cmd, "--version"],
-                            capture_output=True, text=True, timeout=5
+                            capture_output=True, text=True, timeout=5, **self.subprocess_flags
                         )
                         if version_output.returncode == 0:
                             which_output = subprocess.run(
                                 ["which", cmd],
-                                capture_output=True, text=True, timeout=5
+                                capture_output=True, text=True, timeout=5, **self.subprocess_flags
                             )
                             if which_output.returncode == 0:
                                 result["found"] = True
@@ -129,7 +140,7 @@ class SystemDetector:
                                 # Check pip
                                 try:
                                     subprocess.run([result["executable"], "-m", "pip", "--version"],
-                                                 capture_output=True, check=True, timeout=5)
+                                                 capture_output=True, check=True, timeout=5, **self.subprocess_flags)
                                     result["pip_available"] = True
                                 except:
                                     pass
@@ -185,7 +196,7 @@ class SystemDetector:
         try:
             nvidia_smi = subprocess.run(
                 ["nvidia-smi", "--query-gpu=name,memory.total,driver_version", "--format=csv,noheader"],
-                capture_output=True, text=True, timeout=10
+                capture_output=True, text=True, timeout=10, **self.subprocess_flags
             )
             
             if nvidia_smi.returncode == 0:
@@ -209,7 +220,7 @@ class SystemDetector:
                 try:
                     cuda_version_cmd = subprocess.run(
                         ["nvidia-smi", "--query-gpu=compute_cap", "--format=csv,noheader"],
-                        capture_output=True, text=True, timeout=5
+                        capture_output=True, text=True, timeout=5, **self.subprocess_flags
                     )
                     if cuda_version_cmd.returncode == 0:
                         # Get compute capability, map to CUDA version
@@ -307,7 +318,7 @@ class SystemDetector:
                 try:
                     cpu_cmd = subprocess.run(
                         ["wmic", "cpu", "get", "name"],
-                        capture_output=True, text=True, timeout=5
+                        capture_output=True, text=True, timeout=5, **self.subprocess_flags
                     )
                     if cpu_cmd.returncode == 0:
                         lines = [line.strip() for line in cpu_cmd.stdout.strip().split('\n') if line.strip()]
@@ -374,7 +385,7 @@ class SystemDetector:
             elif self.platform == "darwin":
                 mem_output = subprocess.run(
                     ["sysctl", "-n", "hw.memsize"],
-                    capture_output=True, text=True, timeout=5
+                    capture_output=True, text=True, timeout=5, **self.subprocess_flags
                 )
                 if mem_output.returncode == 0:
                     bytes = int(mem_output.stdout.strip())

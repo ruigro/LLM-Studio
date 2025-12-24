@@ -8,6 +8,7 @@ import os
 import sys
 import subprocess
 import platform
+import re
 from pathlib import Path
 from typing import Dict, Optional
 from system_detector import SystemDetector, detect_all
@@ -43,6 +44,17 @@ class SmartInstaller:
         self.detection_results = {}
         self.installation_log = []
         self.progress_callback = None  # Callback for progress updates (percent, message)
+        
+        # Windows subprocess flags to prevent CMD window flashing
+        self.subprocess_flags = {}
+        if sys.platform == 'win32':
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            startupinfo.wShowWindow = subprocess.SW_HIDE
+            self.subprocess_flags = {
+                'startupinfo': startupinfo,
+                'creationflags': subprocess.CREATE_NO_WINDOW
+            }
     
     def log(self, message: str):
         """Log installation message"""
@@ -96,7 +108,8 @@ class SmartInstaller:
             result = subprocess.run(
                 [str(vcredist_path), "/install", "/quiet", "/norestart"],
                 timeout=300,
-                capture_output=True
+                capture_output=True,
+                **self.subprocess_flags
             )
             
             if result.returncode == 0:
@@ -243,7 +256,7 @@ class SmartInstaller:
         self.log("Uninstalling any existing PyTorch installation...")
         try:
             uninstall_cmd = [python_executable, "-m", "pip", "uninstall", "-y", "torch", "torchvision", "torchaudio"]
-            subprocess.run(uninstall_cmd, capture_output=True, timeout=120)
+            subprocess.run(uninstall_cmd, capture_output=True, timeout=120, **self.subprocess_flags)
         except Exception as e:
             self.log(f"Note: Could not uninstall old PyTorch: {e}")
         
@@ -293,14 +306,9 @@ class SmartInstaller:
             self.log("Downloading PyTorch (~2.5GB)...")
             
             # Use Popen to capture real-time output
-            process = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                bufsize=1,
-                universal_newlines=True
-            )
+            popen_flags = {'stdout': subprocess.PIPE, 'stderr': subprocess.STDOUT, 'text': True, 'bufsize': 1, 'universal_newlines': True}
+            popen_flags.update(self.subprocess_flags)
+            process = subprocess.Popen(cmd, **popen_flags)
             
             # Parse output for download progress
             for line in process.stdout:
@@ -334,7 +342,7 @@ class SmartInstaller:
                     python_executable, "-m", "pip", "install",
                     f"triton=={triton_version}"
                 ]
-                subprocess.run(triton_cmd, capture_output=True, timeout=300)
+                subprocess.run(triton_cmd, capture_output=True, timeout=300, **self.subprocess_flags)
                 
                 # If CUDA build, install compatible xformers
                 if cuda_build != "cpu":
@@ -344,7 +352,7 @@ class SmartInstaller:
                         "xformers==0.0.28.post2",
                         "--index-url", f"https://download.pytorch.org/whl/{cuda_build}"
                     ]
-                    subprocess.run(xformers_cmd, capture_output=True, timeout=600)
+                    subprocess.run(xformers_cmd, capture_output=True, timeout=600, **self.subprocess_flags)
                 
                 return True
             else:
@@ -368,7 +376,7 @@ class SmartInstaller:
         
         try:
             # First install core dependencies from requirements.txt (excluding problematic ones)
-            requirements_file = self.install_dir / "requirements.txt"
+            requirements_file = Path(__file__).parent / "requirements.txt"
             
             if requirements_file.exists():
                 self.log("Installing base requirements...")
@@ -382,7 +390,8 @@ class SmartInstaller:
                     cmd,
                     capture_output=True,
                     text=True,
-                    timeout=1800  # 30 minutes timeout
+                    timeout=1800,  # 30 minutes timeout
+                    **self.subprocess_flags
                 )
                 
                 if result.returncode != 0:
@@ -395,7 +404,7 @@ class SmartInstaller:
                 "unsloth"
             ]
             
-            result = subprocess.run(unsloth_cmd, capture_output=True, text=True, timeout=900)
+            result = subprocess.run(unsloth_cmd, capture_output=True, text=True, timeout=900, **self.subprocess_flags)
             
             if result.returncode == 0:
                 self.log("✅ unsloth installed")
@@ -405,13 +414,13 @@ class SmartInstaller:
             # Remove incompatible torchao if present (known Windows issue)
             self.log("Checking for torchao compatibility...")
             remove_torchao = [python_executable, "-m", "pip", "uninstall", "-y", "torchao"]
-            subprocess.run(remove_torchao, capture_output=True, timeout=60)
+            subprocess.run(remove_torchao, capture_output=True, timeout=60, **self.subprocess_flags)
             self.log("Removed torchao (incompatible with current setup)")
             
             # Test if unsloth works
             self.log("Testing unsloth import...")
             test_cmd = [python_executable, "-c", "from unsloth import FastLanguageModel; print('OK')"]
-            test_result = subprocess.run(test_cmd, capture_output=True, text=True, timeout=30)
+            test_result = subprocess.run(test_cmd, capture_output=True, text=True, timeout=30, **self.subprocess_flags)
             
             if test_result.returncode == 0 and "OK" in test_result.stdout:
                 self.log("✅ unsloth is working correctly")

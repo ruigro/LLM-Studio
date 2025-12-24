@@ -1310,21 +1310,32 @@ class MainWindow(QMainWindow):
         left_layout.setSpacing(15)
         
         # TOP ROW: Model and Dataset in 2 columns
-        top_row_label = QLabel("<h2>🎯 Model & Dataset Selection</h2>")
-        left_layout.addWidget(top_row_label)
+        top_row_header = QLabel("<h2>🎯 Model & Dataset Configuration</h2>")
+        left_layout.addWidget(top_row_header)
         
         top_row_widget = QWidget()
         top_row_layout = QHBoxLayout(top_row_widget)
-        top_row_layout.setSpacing(15)
+        top_row_layout.setSpacing(20)
         top_row_layout.setContentsMargins(0, 0, 0, 0)
         
         # LEFT SUB-COLUMN: Model Configuration
         model_frame = QFrame()
         model_frame.setFrameShape(QFrame.StyledPanel)
+        model_frame.setStyleSheet("""
+            QFrame {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 rgba(60, 60, 80, 0.4), stop:1 rgba(40, 40, 60, 0.4));
+                border: 2px solid #667eea;
+                border-radius: 12px;
+                padding: 15px;
+            }
+        """)
         model_layout = QVBoxLayout(model_frame)
         model_layout.setSpacing(12)
         
-        model_layout.addWidget(QLabel("<b>Select Base Model</b>"))
+        model_header = QLabel("🤖 <b>Select Base Model</b>")
+        model_header.setStyleSheet("font-size: 14pt; color: #667eea; border: none; padding: 0;")
+        model_layout.addWidget(model_header)
         
         self.train_base_model = QComboBox()
         self.train_base_model.setEditable(True)
@@ -1348,10 +1359,21 @@ class MainWindow(QMainWindow):
         # RIGHT SUB-COLUMN: Dataset Upload
         dataset_frame = QFrame()
         dataset_frame.setFrameShape(QFrame.StyledPanel)
+        dataset_frame.setStyleSheet("""
+            QFrame {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 rgba(60, 80, 60, 0.4), stop:1 rgba(40, 60, 40, 0.4));
+                border: 2px solid #4CAF50;
+                border-radius: 12px;
+                padding: 15px;
+            }
+        """)
         dataset_layout = QVBoxLayout(dataset_frame)
         dataset_layout.setSpacing(10)
         
-        dataset_layout.addWidget(QLabel("<b>Upload Training Dataset</b>"))
+        dataset_header = QLabel("📊 <b>Upload Training Dataset</b>")
+        dataset_header.setStyleSheet("font-size: 14pt; color: #4CAF50; border: none; padding: 0;")
+        dataset_layout.addWidget(dataset_header)
         
         self.train_data_path = QLineEdit()
         self.train_data_path.setPlaceholderText("Drag and drop file or browse...")
@@ -1393,82 +1415,176 @@ class MainWindow(QMainWindow):
         
         params_frame = QFrame()
         params_frame.setFrameShape(QFrame.StyledPanel)
+        params_frame.setStyleSheet("""
+            QFrame {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 rgba(70, 60, 90, 0.4), stop:1 rgba(50, 40, 70, 0.4));
+                border: 2px solid #9c27b0;
+                border-radius: 12px;
+                padding: 15px;
+            }
+            QSpinBox, QDoubleSpinBox {
+                padding: 8px;
+                font-size: 13pt;
+                font-weight: bold;
+                min-width: 100px;
+                max-width: 140px;
+                border: 2px solid #555;
+                border-radius: 6px;
+                background: rgba(50, 50, 70, 0.6);
+            }
+            QSpinBox::up-button, QDoubleSpinBox::up-button {
+                subcontrol-origin: border;
+                subcontrol-position: right;
+                width: 24px;
+                height: 22px;
+                border-left: 1px solid #666;
+                background: rgba(80, 80, 100, 0.8);
+            }
+            QSpinBox::down-button, QDoubleSpinBox::down-button {
+                subcontrol-origin: border;
+                subcontrol-position: left;
+                width: 24px;
+                height: 22px;
+                border-right: 1px solid #666;
+                background: rgba(80, 80, 100, 0.8);
+            }
+            QSpinBox::up-arrow, QDoubleSpinBox::up-arrow {
+                image: none;
+                border-left: 6px solid transparent;
+                border-right: 6px solid transparent;
+                border-bottom: 8px solid #4CAF50;
+                width: 0px;
+                height: 0px;
+            }
+            QSpinBox::down-arrow, QDoubleSpinBox::down-arrow {
+                image: none;
+                border-left: 6px solid transparent;
+                border-right: 6px solid transparent;
+                border-top: 8px solid #f44336;
+                width: 0px;
+                height: 0px;
+            }
+            QLabel {
+                font-size: 11pt;
+            }
+        """)
         params_layout = QVBoxLayout(params_frame)
-        params_layout.setSpacing(10)
+        params_layout.setSpacing(15)
         
-        # Use recommended settings checkbox
-        use_recommended = QHBoxLayout()
+        # Use recommended settings button
         self.use_recommended_btn = QPushButton("✨ Use Recommended Settings")
+        self.use_recommended_btn.setMinimumHeight(40)
+        self.use_recommended_btn.setStyleSheet("""
+            QPushButton {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #667eea, stop:1 #764ba2);
+                color: white;
+                font-size: 13pt;
+                font-weight: bold;
+                border-radius: 8px;
+                padding: 8px;
+            }
+            QPushButton:hover {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #7b8ff0, stop:1 #8a5ab8);
+            }
+        """)
         self.use_recommended_btn.clicked.connect(lambda: (self._use_recommended_settings(), self._switch_to_dashboard()))
-        use_recommended.addWidget(self.use_recommended_btn)
-        use_recommended.addStretch(1)
-        params_layout.addLayout(use_recommended)
+        params_layout.addWidget(self.use_recommended_btn)
         
         # Model Name (auto-generated)
-        params_layout.addWidget(QLabel("<b>Model Name</b>"))
+        name_row = QHBoxLayout()
+        name_row.addWidget(QLabel("<b>Model Name:</b>"))
         self.train_model_name = QLineEdit()
         self.train_model_name.setPlaceholderText("Auto-generated: YYMMDD_modelname_dataset_HHMM")
-        params_layout.addWidget(self.train_model_name)
+        self.train_model_name.setMinimumHeight(35)
+        name_row.addWidget(self.train_model_name, 1)
+        params_layout.addLayout(name_row)
         
-        # Epochs
-        epochs_layout = QHBoxLayout()
-        epochs_layout.addWidget(QLabel("Epochs:"))
+        # Parameters in compact grid
+        params_grid = QGridLayout()
+        params_grid.setSpacing(12)
+        params_grid.setColumnStretch(1, 1)
+        params_grid.setColumnStretch(3, 1)
+        
+        # Row 0: Epochs + LoRA R
+        params_grid.addWidget(QLabel("<b>Epochs:</b>"), 0, 0)
         self.train_epochs = QSpinBox()
         self.train_epochs.setRange(1, 1000)
         self.train_epochs.setValue(1)
-        epochs_layout.addWidget(self.train_epochs, 1)
+        self.train_epochs.setMinimumHeight(40)
+        params_grid.addWidget(self.train_epochs, 0, 1)
         
-        # Batch size toggle
-        self.batch_size_auto = QPushButton("✅ Optimal batch size")
-        self.batch_size_auto.setCheckable(True)
-        self.batch_size_auto.setChecked(True)
-        self.batch_size_auto.clicked.connect(self._toggle_batch_size)
-        epochs_layout.addWidget(self.batch_size_auto)
-        params_layout.addLayout(epochs_layout)
-        
-        # LoRA R
-        lora_layout = QHBoxLayout()
-        lora_layout.addWidget(QLabel("LoRA R:"))
+        params_grid.addWidget(QLabel("<b>LoRA R:</b>"), 0, 2)
         self.train_lora_r = QSpinBox()
         self.train_lora_r.setRange(8, 256)
         self.train_lora_r.setValue(16)
-        lora_layout.addWidget(self.train_lora_r, 1)
+        self.train_lora_r.setMinimumHeight(40)
+        params_grid.addWidget(self.train_lora_r, 0, 3)
         
-        # LoRA Alpha (calculated automatically)
-        lora_layout.addWidget(QLabel("LoRA Alpha:"))
-        self.train_lora_alpha_label = QLabel("32")
-        self.train_lora_alpha_label.setStyleSheet("font-weight: bold;")
-        lora_layout.addWidget(self.train_lora_alpha_label)
-        self.train_lora_r.valueChanged.connect(lambda v: self.train_lora_alpha_label.setText(str(v * 2)))
-        params_layout.addLayout(lora_layout)
-        
-        # Learning Rate + Max Seq Length
-        lr_layout = QHBoxLayout()
-        lr_layout.addWidget(QLabel("Learning Rate:"))
+        # Row 1: Learning Rate + LoRA Alpha (auto-calculated, display only)
+        params_grid.addWidget(QLabel("<b>Learning Rate:</b>"), 1, 0)
         self.train_lr = QDoubleSpinBox()
-        self.train_lr.setDecimals(8)
-        self.train_lr.setRange(1e-8, 1.0)
+        self.train_lr.setDecimals(6)
+        self.train_lr.setRange(1e-6, 1.0)
         self.train_lr.setValue(2e-4)
         self.train_lr.setSingleStep(1e-5)
-        lr_layout.addWidget(self.train_lr, 1)
+        self.train_lr.setMinimumHeight(40)
+        params_grid.addWidget(self.train_lr, 1, 1)
         
-        lr_layout.addWidget(QLabel("Max Seq Length:"))
+        params_grid.addWidget(QLabel("<b>LoRA Alpha:</b>"), 1, 2)
+        self.train_lora_alpha_label = QLabel("32")
+        self.train_lora_alpha_label.setStyleSheet("font-size: 14pt; font-weight: bold; color: #4CAF50; padding: 8px;")
+        self.train_lora_alpha_label.setMinimumHeight(40)
+        self.train_lora_alpha_label.setAlignment(Qt.AlignCenter)
+        params_grid.addWidget(self.train_lora_alpha_label, 1, 3)
+        self.train_lora_r.valueChanged.connect(lambda v: self.train_lora_alpha_label.setText(str(v * 2)))
+        
+        # Row 2: Max Seq Length + Batch Size toggle
+        params_grid.addWidget(QLabel("<b>Max Seq Length:</b>"), 2, 0)
         self.train_max_seq = QSpinBox()
         self.train_max_seq.setRange(128, 8192)
         self.train_max_seq.setValue(2048)
         self.train_max_seq.setSingleStep(128)
-        lr_layout.addWidget(self.train_max_seq, 1)
-        params_layout.addLayout(lr_layout)
+        self.train_max_seq.setMinimumHeight(40)
+        params_grid.addWidget(self.train_max_seq, 2, 1)
         
-        # Output directory
-        out_row = QHBoxLayout()
-        out_row.addWidget(QLabel("Output dir:"))
+        self.batch_size_auto = QPushButton("✅ Optimal batch size")
+        self.batch_size_auto.setCheckable(True)
+        self.batch_size_auto.setChecked(True)
+        self.batch_size_auto.setMinimumHeight(40)
+        self.batch_size_auto.setStyleSheet("""
+            QPushButton {
+                background: rgba(76, 175, 80, 0.3);
+                border: 2px solid #4CAF50;
+                border-radius: 6px;
+                font-size: 11pt;
+                font-weight: bold;
+            }
+            QPushButton:checked {
+                background: rgba(76, 175, 80, 0.6);
+            }
+        """)
+        self.batch_size_auto.clicked.connect(self._toggle_batch_size)
+        params_grid.addWidget(self.batch_size_auto, 2, 2, 1, 2)
+        
+        params_layout.addLayout(params_grid)
+        
+        # Output directory - show base path + generated folder name
+        output_row = QHBoxLayout()
+        output_row.addWidget(QLabel("<b>Output:</b>"))
         self.train_out_dir = QLineEdit(str(default_output_dir()))
-        out_row.addWidget(self.train_out_dir, 2)
-        out_browse = QPushButton("Browse…")
+        self.train_out_dir.setMinimumHeight(35)
+        self.train_out_dir.setReadOnly(True)  # Read-only, user browses to change
+        self.train_out_dir.setStyleSheet("background: rgba(50, 50, 60, 0.5);")
+        output_row.addWidget(self.train_out_dir, 1)
+        out_browse = QPushButton("📁 Browse")
+        out_browse.setMinimumHeight(35)
+        out_browse.setMinimumWidth(100)
         out_browse.clicked.connect(self._browse_train_out)
-        out_row.addWidget(out_browse)
-        params_layout.addLayout(out_row)
+        output_row.addWidget(out_browse)
+        params_layout.addLayout(output_row)
         
         # Batch size kept for internal use but not displayed
         self.train_batch = QSpinBox()
