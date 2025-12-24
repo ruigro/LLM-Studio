@@ -238,6 +238,14 @@ class SmartInstaller:
         if not self.detection_results:
             self.run_detection()
         
+        # First, uninstall any existing torch to avoid conflicts
+        self.log("Uninstalling any existing PyTorch installation...")
+        try:
+            uninstall_cmd = [python_executable, "-m", "pip", "uninstall", "-y", "torch", "torchvision", "torchaudio"]
+            subprocess.run(uninstall_cmd, capture_output=True, timeout=120)
+        except Exception as e:
+            self.log(f"Note: Could not uninstall old PyTorch: {e}")
+        
         # Determine optimal CUDA build
         cuda_build = self.get_optimal_cuda_build()
         
@@ -522,19 +530,18 @@ if errorlevel 1 (
                 results["vcredist"]["success"] = True
                 results["vcredist"]["message"] = "Not required on this platform"
             
-            # Step 4: PyTorch
+            # Step 4: PyTorch (always install/reinstall to ensure clean state)
             log_with_callback("Installing PyTorch...")
             pytorch_info = self.detection_results.get("pytorch", {})
-            if not pytorch_info.get("found"):
-                if self.install_pytorch():
-                    results["pytorch"]["success"] = True
-                    results["pytorch"]["message"] = "PyTorch installed successfully"
-                else:
-                    results["pytorch"]["message"] = "PyTorch installation failed"
-                    return results
-            else:
+            if pytorch_info.get("found"):
+                log_with_callback(f"Found existing PyTorch {pytorch_info.get('version')} - will reinstall to ensure compatibility")
+            
+            if self.install_pytorch():
                 results["pytorch"]["success"] = True
-                results["pytorch"]["message"] = f"PyTorch {pytorch_info.get('version')} already installed"
+                results["pytorch"]["message"] = "PyTorch installed successfully"
+            else:
+                results["pytorch"]["message"] = "PyTorch installation failed"
+                return results
             
             # Step 5: Dependencies
             log_with_callback("Installing dependencies...")
