@@ -773,16 +773,23 @@ if errorlevel 1 (
 
         # Reinstall core stack
         self.log("Repair: Reinstalling PySide6 (GUI framework)...")
+        # First uninstall completely
+        subprocess.run(
+            [python_executable, "-m", "pip", "uninstall", "-y", "PySide6", "PySide6-Essentials", "PySide6-Addons", "shiboken6"],
+            capture_output=True,
+            timeout=60,
+            **self.subprocess_flags
+        )
+        # Then install specific stable version
         pyside_cmd = [
             python_executable, "-m", "pip", "install",
-            "--force-reinstall",
-            "PySide6==6.8.1"  # Use stable version known to work on Windows
+            "PySide6==6.8.1"  # Specific stable version for Windows
         ]
         result = subprocess.run(pyside_cmd, capture_output=True, text=True, timeout=600, **self.subprocess_flags)
         if result.returncode != 0:
             self.log(f"Repair warning: PySide6 installation failed: {result.stderr[:500]}")
         else:
-            self.log("OK: PySide6 installed successfully")
+            self.log("OK: PySide6 6.8.1 installed successfully")
         
         # Install requirements FIRST (before PyTorch) to avoid dependencies pulling wrong torch
         self.log("Repair: Installing core dependencies from requirements.txt...")
