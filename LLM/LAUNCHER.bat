@@ -57,65 +57,18 @@ if errorlevel 1 (
 
 REM Check if first-time setup has been completed
 if not exist ".setup_complete" (
-    echo.
-    echo ═══════════════════════════════════════════════════════
-    echo    🚀 LLM Fine-tuning Studio - First Run Setup 🚀
-    echo ═══════════════════════════════════════════════════════
-    echo.
-    echo ⚙️  First-time setup required...
-    echo This will detect your hardware and install all dependencies.
-    echo Please wait, this may take 5-15 minutes.
-    echo.
-    
-    REM Create virtual environment if it doesn't exist
-    if not exist .venv (
-        echo Creating virtual environment...
-        "%PYTHON_EXE%" -m venv .venv
-        if errorlevel 1 (
-            echo ❌ Failed to create virtual environment!
-            echo Make sure Python 3.8+ is installed correctly.
-            pause
-            exit /b 1
-        )
-        echo ✓ Virtual environment created
-        echo.
-    )
-    
-    REM Activate virtual environment
-    if exist .venv\Scripts\activate.bat (
-        call .venv\Scripts\activate.bat
-        echo ✓ Virtual environment activated
-        echo.
-    )
-    
-    REM Install PySide6 for the setup wizard GUI
-    echo Installing PySide6 for setup wizard...
-    python -m pip install --quiet PySide6
-    if errorlevel 1 (
-        echo ⚠️ Warning: Failed to install PySide6
-    )
-    echo.
-    
-    REM Run first-time setup
-    python first_run_setup.py
+    REM Launch bootstrap GUI (uses tkinter, no deps needed)
+    "%PYTHON_EXE%" bootstrap_setup.py
     
     if errorlevel 1 (
         echo.
-        echo ❌ Setup failed! Please check the logs above.
-        echo.
-        echo Common issues:
-        echo  - No internet connection
-        echo  - Python not in PATH
-        echo  - Antivirus blocking downloads
-        echo.
-        echo You can retry by running this launcher again.
+        echo ❌ Setup failed! Please check the error message.
         pause
         exit /b 1
     )
     
-    echo.
-    echo ✅ Setup completed successfully!
-    echo.
+    REM Exit after bootstrap (bootstrap will launch main setup wizard)
+    exit /b 0
 )
 
 REM Normal app launch
