@@ -74,6 +74,9 @@ class SetupThread(QThread):
     def _install_all_dependencies(self, detection_results: dict) -> bool:
         """Install all required dependencies"""
         try:
+            # Pass detection results to installer
+            self.installer.detection_results = detection_results
+            
             # Install PyTorch with correct CUDA version
             self.install_progress.emit("PyTorch", 0)
             if not self.installer.install_pytorch():
