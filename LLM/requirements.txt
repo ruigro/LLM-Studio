@@ -13,11 +13,10 @@ numpy<2
 transformers==4.51.3  # Min version required by unsloth 2025.12.9 (>=4.51.3, excludes 4.52-4.55, 4.57.0)
 tokenizers>=0.21,<0.22  # Required by transformers 4.51.3
 accelerate>=0.18.0
-datasets>=2.11.0
+datasets>=2.11.0,<4.4.0  # Upper bound per unsloth requirements (!=4.0.*, !=4.1.0)
 peft>=0.3.0
 safetensors>=0.3.0
 sentencepiece>=0.1.98
-tokenizers>=0.13.2
 bitsandbytes>=0.39.0; python_version>="3.8"
 # wandb>=0.15.0  # commented out by default; set WANDB_MODE=online or install and enable with --enable-wandb
 evaluate>=0.4.0

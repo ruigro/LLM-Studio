@@ -729,6 +729,7 @@ if errorlevel 1 (
                     "xformers",
                     "triton", "triton-windows",
                     "transformers", "tokenizers",  # Also uninstall these to force fresh install
+                    "numpy", "datasets",  # Add numpy and datasets to force correct versions
                 ],
                 capture_output=True,
                 text=True,
@@ -746,10 +747,12 @@ if errorlevel 1 (
                 leftovers = [
                     "torch", "torchvision", "torchaudio", "triton", "xformers",
                     "transformers", "tokenizers",  # Also clean these
+                    "numpy", "datasets",  # Add numpy and datasets cleanup
                     "torch-*.dist-info", "torchvision-*.dist-info", "torchaudio-*.dist-info",
                     "triton-*.dist-info", "triton_windows-*.dist-info", "triton_windows-*.data",
                     "xformers-*.dist-info",
                     "transformers-*.dist-info", "tokenizers-*.dist-info",  # Clean these too
+                    "numpy-*.dist-info", "datasets-*.dist-info",  # Add these too
                     "~~rch", "~orch",  # common temp dirs seen on Windows
                 ]
                 self.log("Repair: Cleaning leftover site-packages folders...")

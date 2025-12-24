@@ -886,38 +886,59 @@ class MainWindow(QMainWindow):
             # Fallback for Python < 3.8
             from importlib_metadata import version, PackageNotFoundError
         
-        required_packages = ['unsloth', 'transformers', 'accelerate', 'peft', 'datasets', 'Pillow']
+        required_packages = ['unsloth', 'transformers', 'accelerate', 'peft', 'datasets', 'Pillow', 'numpy', 'bitsandbytes', 'tokenizers']
         
-        # Version requirements for critical packages
+        # Version requirements for critical packages - mirrors requirements.txt
         version_requirements = {
-            'transformers': ('4.51.3', '4.51.3'),  # exact version needed
-            'tokenizers': ('0.21', '0.22'),  # range: >=0.21, <0.22
+            'numpy': {'operator': '<', 'version': '2.0.0', 'reason': 'Torch/NumPy 2.x incompatibility'},
+            'transformers': {'operator': '==', 'version': '4.51.3', 'reason': 'Unsloth compatibility'},
+            'tokenizers': {'operator': '>=', 'min_version': '0.21', 'operator2': '<', 'max_version': '0.22', 'reason': 'Transformers 4.51.3 requirement'},
+            'datasets': {'operator': '<', 'version': '4.4.0', 'reason': 'Unsloth compatibility'},
+            'accelerate': {'operator': '>=', 'version': '0.18.0', 'reason': 'Training requirement'},
+            'peft': {'operator': '>=', 'version': '0.3.0', 'reason': 'LoRA training'},
+            'bitsandbytes': {'operator': '>=', 'version': '0.39.0', 'reason': '4-bit quantization'},
         }
         
         for pkg in required_packages:
             try:
                 installed_version = version(pkg)
                 
-                # Check version compatibility for critical packages
+                # Check version compatibility for packages with requirements
                 if pkg in version_requirements:
-                    min_ver, max_ver = version_requirements[pkg]
-                    if pkg == 'transformers':
-                        # Exact version check
-                        if not installed_version.startswith(min_ver):
-                            deps_ok = False
-                            missing_packages.append(f"{pkg} (need {min_ver}, have {installed_version})")
-                    elif pkg == 'tokenizers':
-                        # Range check
-                        try:
-                            from packaging import version as pkg_version
-                            ver = pkg_version.parse(installed_version)
-                            min_v = pkg_version.parse(min_ver)
-                            max_v = pkg_version.parse(max_ver)
-                            if not (min_v <= ver < max_v):
+                    req = version_requirements[pkg]
+                    try:
+                        from packaging import version as pkg_version
+                        installed = pkg_version.parse(installed_version)
+                        
+                        # Handle different operator types
+                        if req['operator'] == '==':
+                            target = pkg_version.parse(req['version'])
+                            if installed != target:
                                 deps_ok = False
-                                missing_packages.append(f"{pkg} (need >={min_ver},<{max_ver}, have {installed_version})")
-                        except:
-                            pass  # If version parsing fails, assume OK
+                                missing_packages.append(f"{pkg} (need =={req['version']}, have {installed_version})")
+                        
+                        elif req['operator'] == '<':
+                            target = pkg_version.parse(req['version'])
+                            if installed >= target:
+                                deps_ok = False
+                                missing_packages.append(f"{pkg} (need <{req['version']}, have {installed_version})")
+                        
+                        elif req['operator'] == '>=':
+                            min_ver = pkg_version.parse(req['version'])
+                            if installed < min_ver:
+                                deps_ok = False
+                                missing_packages.append(f"{pkg} (need >={req['version']}, have {installed_version})")
+                            
+                            # Check max version if specified (for range checks like tokenizers)
+                            if 'operator2' in req and req['operator2'] == '<':
+                                max_ver = pkg_version.parse(req['max_version'])
+                                if installed >= max_ver:
+                                    deps_ok = False
+                                    missing_packages.append(f"{pkg} (need <{req['max_version']}, have {installed_version})")
+                    
+                    except Exception as e:
+                        # If version parsing fails, log but don't block
+                        print(f"Version check error for {pkg}: {e}")
                 
             except PackageNotFoundError:
                 deps_ok = False
@@ -2758,7 +2779,7 @@ class MainWindow(QMainWindow):
                 ("transformers", "==4.51.3", "Required by unsloth 2025.12.9 (min version: >=4.51.3)"),
                 ("tokenizers", ">=0.21,<0.22", "Required by transformers 4.51.3"),
                 ("accelerate", ">=0.18.0", "Distributed training"),
-                ("datasets", ">=2.11.0", "Dataset loading"),
+                ("datasets", ">=2.11.0,<4.4.0", "Dataset loading (upper bound per unsloth requirements)"),
                 ("peft", ">=0.3.0", "LoRA and efficient training"),
                 ("safetensors", ">=0.3.0", "Safe model serialization"),
             ],
