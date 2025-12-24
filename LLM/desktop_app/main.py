@@ -730,12 +730,15 @@ class MainWindow(QMainWindow):
         title.setContentsMargins(0, 12, 0, 12)
         layout.addWidget(title)
         
-        # Create 2-column layout with SPLITTER (40/60 split)
-        splitter = QSplitter(Qt.Horizontal)
+        # Create 2-column layout with FIXED 40/60 ratio (not resizable)
+        columns_layout = QHBoxLayout()
+        columns_layout.setSpacing(20)
+        columns_layout.setContentsMargins(0, 0, 0, 0)
         
-        # LEFT: Features (40% width) - wrapped in styled container
+        # LEFT COLUMN: Features + Quick Start Guide (40% width)
         left_container = QFrame()
         left_container.setFrameShape(QFrame.StyledPanel)
+        left_container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         left_container.setStyleSheet("""
             QFrame {
                 background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
@@ -745,13 +748,12 @@ class MainWindow(QMainWindow):
                 padding: 15px;
             }
         """)
-        left_widget = QWidget()
-        left_layout = QVBoxLayout(left_widget)
+        left_layout = QVBoxLayout(left_container)
         left_layout.setSpacing(15)
-        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.setContentsMargins(15, 15, 15, 15)
         
+        # Features section
         left_layout.addWidget(QLabel("<h2>🚀 Features</h2>"))
-        
         features_text = QLabel("""
 <p>This application provides a beautiful, user-friendly interface to:</p>
 <ul style="line-height: 1.8;">
@@ -763,10 +765,11 @@ class MainWindow(QMainWindow):
 </ul>
         """)
         features_text.setWordWrap(True)
+        features_text.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         left_layout.addWidget(features_text)
         
+        # Quick Start Guide section
         left_layout.addWidget(QLabel("<h2>📋 Quick Start Guide</h2>"))
-        
         guide_text = QLabel("""
 <ol style="line-height: 2;">
 <li><b>Prepare Your Dataset:</b> Create a JSONL file with format:
@@ -781,26 +784,18 @@ class MainWindow(QMainWindow):
 </ol>
         """)
         guide_text.setWordWrap(True)
+        guide_text.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         left_layout.addWidget(guide_text)
         
         left_layout.addStretch(1)
         
-        # Put left_widget inside container
-        left_container_layout = QVBoxLayout(left_container)
-        left_container_layout.setContentsMargins(0, 0, 0, 0)
-        left_container_layout.addWidget(left_widget)
+        # Add left container with 40% stretch (2 parts out of 5 total = 40%)
+        columns_layout.addWidget(left_container, 2)
         
-        # Add left container to splitter
-        left_scroll = QScrollArea()
-        left_scroll.setWidgetResizable(True)
-        left_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        left_scroll.setFrameShape(QFrame.NoFrame)
-        left_scroll.setWidget(left_container)
-        splitter.addWidget(left_scroll)
-        
-        # RIGHT: System Status (60% width) - wrapped in styled container
+        # RIGHT COLUMN: System Status + Software Requirements (60% width)
         right_container = QFrame()
         right_container.setFrameShape(QFrame.StyledPanel)
+        right_container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         right_container.setStyleSheet("""
             QFrame {
                 background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
@@ -810,11 +805,11 @@ class MainWindow(QMainWindow):
                 padding: 15px;
             }
         """)
-        right_widget = QWidget()
-        right_layout = QVBoxLayout(right_widget)
-        right_layout.setSpacing(8)  # Tighter spacing
-        right_layout.setContentsMargins(0, 0, 0, 0)
+        right_layout = QVBoxLayout(right_container)
+        right_layout.setSpacing(15)
+        right_layout.setContentsMargins(15, 15, 15, 15)
 
+        # System Status section
         right_layout.addWidget(QLabel("<h2>📊 System Status</h2>"))
 
         # System info cards
@@ -867,9 +862,8 @@ class MainWindow(QMainWindow):
         sys_layout.addLayout(status_row)
 
         right_layout.addWidget(sys_frame)
-
-        # Tips section
-        # Software Requirements & Auto-Installer Card (replaces Tips)
+        
+        # Software Requirements section
         right_layout.addWidget(QLabel("<h2>⚙️ Software Requirements & Setup</h2>"))
 
         setup_frame = QFrame()
@@ -1079,32 +1073,11 @@ class MainWindow(QMainWindow):
         right_layout.addWidget(setup_frame)
         right_layout.addStretch(1)
         
-        # Put right_widget inside container
-        right_container_layout = QVBoxLayout(right_container)
-        right_container_layout.setContentsMargins(0, 0, 0, 0)
-        right_container_layout.addWidget(right_widget)
-
-        right_scroll = QScrollArea()
-        right_scroll.setWidgetResizable(True)
-        right_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        right_scroll.setFrameShape(QFrame.NoFrame)
-        right_scroll.setWidget(right_container)
-        splitter.addWidget(right_scroll)
+        # Add right container with 60% stretch (3 parts out of 5 total = 60%)
+        columns_layout.addWidget(right_container, 3)
         
-        # Set stretch factors (40/60 split)
-        splitter.setStretchFactor(0, 2)  # Left: 40% (2 parts)
-        splitter.setStretchFactor(1, 3)  # Right: 60% (3 parts)
-        
-        # Apply exact 40/60 split after window is shown
-        def _apply_split():
-            w = splitter.width() or 1200
-            left_size = int(w * 0.4)
-            right_size = int(w * 0.6)
-            splitter.setSizes([left_size, right_size])
-        
-        QTimer.singleShot(0, _apply_split)
-        
-        layout.addWidget(splitter)
+        # Add columns to main layout
+        layout.addLayout(columns_layout)
         
         return w
     
