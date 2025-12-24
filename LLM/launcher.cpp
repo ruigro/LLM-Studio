@@ -173,6 +173,50 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
         return 1;
     }
     
+    // Health check: Test if PySide6 can import (if GUI can't start, user can't click Fix Issues)
+    std::wstring healthCheckCmd = L"-c \"import PySide6.QtCore; print('OK')\"";
+    std::wstring healthCheckLog = exeDir + L"\\logs\\health_check.log";
+    
+    int healthCheckResult = LaunchPythonApp(exeDir, pythonExe, healthCheckCmd, healthCheckLog);
+    
+    if (healthCheckResult != 0) {
+        // PySide6 is broken - auto-repair before launching GUI
+        MessageBoxW(NULL,
+                    L"PySide6 (GUI framework) is corrupted.\n\n"
+                    L"Auto-repairing now...\n"
+                    L"This will take 2-3 minutes.",
+                    L"Auto-Repair",
+                    MB_OK | MB_ICONINFORMATION);
+        
+        // Run repair_all()
+        std::wstring repairCmd = L"-c \"from smart_installer import SmartInstaller; installer = SmartInstaller(); installer.run_detection(); installer.repair_all()\"";
+        std::wstring repairLog = exeDir + L"\\logs\\auto_repair.log";
+        
+        int repairResult = LaunchPythonApp(exeDir, pythonExe, repairCmd, repairLog);
+        
+        if (repairResult != 0) {
+            MessageBoxW(NULL,
+                        L"Auto-repair failed!\n\n"
+                        L"Please check logs\\auto_repair.log for details.\n"
+                        L"The repair log will open in Notepad.",
+                        L"Repair Failed",
+                        MB_OK | MB_ICONERROR);
+            OpenLogInNotepad(repairLog);
+            return 1;
+        }
+        
+        // Repair succeeded - verify PySide6 again
+        healthCheckResult = LaunchPythonApp(exeDir, pythonExe, healthCheckCmd, healthCheckLog);
+        if (healthCheckResult != 0) {
+            MessageBoxW(NULL,
+                        L"Repair completed but PySide6 still broken.\n\n"
+                        L"Please check logs\\auto_repair.log for details.",
+                        L"Repair Incomplete",
+                        MB_OK | MB_ICONWARNING);
+            return 1;
+        }
+    }
+    
     // Launch main application
     std::wstring scriptArgs = L"-m desktop_app.main";
     std::wstring logFile = exeDir + L"\\logs\\app.log";
