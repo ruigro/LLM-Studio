@@ -857,20 +857,12 @@ class MainWindow(QMainWindow):
                 deps_ok = False
                 missing_packages.append(pkg)
         
-        # Try to import unsloth to check for runtime errors
+        # IMPORTANT:
+        # Do NOT import unsloth (or other heavy deps) inside the GUI process.
+        # A broken native extension (e.g. xformers) can crash pythonw.exe with a Windows loader dialog
+        # before the user can click "Fix Issues". We only check package metadata here.
         if deps_ok:
-            try:
-                import unsloth
-                deps_msg = "✅ All packages installed"
-            except Exception as e:
-                # Packages are installed but there are compatibility issues
-                error_str = str(e)
-                if "triton" in error_str.lower() or "attrsDescriptor" in error_str:
-                    deps_msg = "⚠️ Installed (minor triton warning, will work)"
-                    deps_ok = True  # Don't block - this is a known non-critical warning
-                else:
-                    deps_msg = f"❌ Import error: {error_str[:50]}..."
-                    deps_ok = False
+            deps_msg = "✅ Packages installed (runtime validated by Fix Issues)"
         else:
             deps_msg = f"Missing: {', '.join(missing_packages)}"
         
