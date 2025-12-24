@@ -222,6 +222,7 @@ class FirstRunSetup(QMainWindow):
         self.log_viewer = QTextEdit()
         self.log_viewer.setReadOnly(True)
         self.log_viewer.setMinimumHeight(200)
+        self.log_viewer.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)  # Wrap long lines
         log_font = QFont("Consolas", 10)
         self.log_viewer.setFont(log_font)
         log_layout.addWidget(self.log_viewer)
@@ -359,7 +360,10 @@ class FirstRunSetup(QMainWindow):
             gpus = cuda.get("gpus", [])
             if gpus:
                 for i, gpu in enumerate(gpus):
-                    lines.append(f"✓ GPU {i}: {gpu.get('name', 'Unknown')}")
+                    gpu_name = gpu.get('name', 'Unknown')
+                    # Shorten GPU name for display (remove NVIDIA prefix if present)
+                    gpu_name = gpu_name.replace("NVIDIA ", "").replace("GeForce ", "")
+                    lines.append(f"✓ GPU {i}: {gpu_name}")
                 cuda_ver = cuda.get("cuda_version", "N/A")
                 lines.append(f"✓ CUDA: {cuda_ver}")
         else:

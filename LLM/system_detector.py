@@ -302,14 +302,33 @@ class SystemDetector:
         
         # Get CPU name/processor info
         try:
-            processor = platform.processor()
-            if processor:
-                result["cpu_name"] = processor
+            if self.platform == "windows":
+                # Use WMI to get actual CPU name on Windows
+                try:
+                    import subprocess
+                    cpu_cmd = subprocess.run(
+                        ["wmic", "cpu", "get", "name"],
+                        capture_output=True, text=True, timeout=5
+                    )
+                    if cpu_cmd.returncode == 0:
+                        lines = cpu_cmd.stdout.strip().split('\n')
+                        if len(lines) > 1:
+                            result["cpu_name"] = lines[1].strip()
+                        else:
+                            result["cpu_name"] = platform.processor()
+                    else:
+                        result["cpu_name"] = platform.processor()
+                except:
+                    result["cpu_name"] = platform.processor()
             else:
-                # Fallback to cores + architecture
-                cores = os.cpu_count()
-                arch = platform.machine()
-                result["cpu_name"] = f"{cores}-core {arch}"
+                processor = platform.processor()
+                if processor:
+                    result["cpu_name"] = processor
+                else:
+                    # Fallback to cores + architecture
+                    cores = os.cpu_count()
+                    arch = platform.machine()
+                    result["cpu_name"] = f"{cores}-core {arch}"
         except:
             result["cpu_name"] = "Unknown"
         
