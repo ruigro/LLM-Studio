@@ -113,7 +113,40 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     // Ensure logs directory exists
     EnsureLogsDirectory(exeDir);
     
-    // Check which Python interpreter to use
+    // Check if first-time setup is needed (check BEFORE checking venv)
+    std::wstring setupCompleteMarker = exeDir + L"\\.setup_complete";
+    bool needsSetup = !FileExists(setupCompleteMarker);
+    
+    std::wstring scriptArgs;
+    std::wstring logFile;
+    int exitCode;
+    
+    if (needsSetup) {
+        // First run: use system Python to run setup wizard
+        std::wstring systemPython = L"python.exe";  // From PATH
+        
+        scriptArgs = L"first_run_setup.py";
+        logFile = exeDir + L"\\logs\\setup.log";
+        
+        exitCode = LaunchPythonApp(exeDir, systemPython, scriptArgs, logFile);
+        
+        if (exitCode != 0) {
+            // Setup failed - open log in Notepad
+            MessageBoxW(NULL, 
+                       L"First-time setup failed!\n\n"
+                       L"The setup log will open in Notepad.\n"
+                       L"Please review the errors and try again.\n\n"
+                       L"Make sure Python 3.8+ is installed and in PATH.",
+                       L"Setup Error", 
+                       MB_OK | MB_ICONERROR);
+            OpenLogInNotepad(logFile);
+            return exitCode;
+        }
+        
+        // Setup succeeded, now continue to launch app
+    }
+    
+    // Check which Python interpreter to use (venv should exist now)
     std::wstring pythonwExe = exeDir + L"\\.venv\\Scripts\\pythonw.exe";
     std::wstring pythonExe = exeDir + L"\\.venv\\Scripts\\python.exe";
     
@@ -125,40 +158,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     } else {
         MessageBoxW(NULL, 
                     L"Python virtual environment not found!\n\n"
-                    L"Please run setup_env.bat first to create the virtual environment.",
+                    L"Setup may have failed. Please check logs\\setup.log",
                     L"LLM Studio Launcher Error", 
                     MB_OK | MB_ICONERROR);
         return 1;
-    }
-    
-    // Check if first-time setup is needed
-    std::wstring setupCompleteMarker = exeDir + L"\\.setup_complete";
-    bool needsSetup = !FileExists(setupCompleteMarker);
-    
-    std::wstring scriptArgs;
-    std::wstring logFile;
-    int exitCode;
-    
-    if (needsSetup) {
-        // Run first-time setup wizard
-        scriptArgs = L"first_run_setup.py";
-        logFile = exeDir + L"\\logs\\setup.log";
-        
-        exitCode = LaunchPythonApp(exeDir, selectedPython, scriptArgs, logFile);
-        
-        if (exitCode != 0) {
-            // Setup failed - open log in Notepad
-            MessageBoxW(NULL, 
-                       L"First-time setup failed!\n\n"
-                       L"The setup log will open in Notepad.\n"
-                       L"Please review the errors and try again.",
-                       L"Setup Error", 
-                       MB_OK | MB_ICONERROR);
-            OpenLogInNotepad(logFile);
-            return exitCode;
-        }
-        
-        // Setup succeeded, now launch the main app
     }
     
     // Launch main application
