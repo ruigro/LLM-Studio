@@ -203,13 +203,24 @@ class SystemDetector:
                             if not result["driver_version"]:
                                 result["driver_version"] = parts[2]
                 
-                # Try to get CUDA version
+                # Try to get CUDA version from nvidia-smi
                 try:
-                    cuda_version_output = subprocess.run(
-                        ["nvidia-smi", "--query-gpu=driver_version", "--format=csv,noheader,nounits"],
+                    cuda_version_cmd = subprocess.run(
+                        ["nvidia-smi", "--query-gpu=compute_cap", "--format=csv,noheader"],
                         capture_output=True, text=True, timeout=5
                     )
-                    # CUDA version can be inferred from driver, but better to check toolkit
+                    if cuda_version_cmd.returncode == 0:
+                        # Get compute capability, map to CUDA version
+                        compute_cap = cuda_version_cmd.stdout.strip().split('\n')[0].strip()
+                        result["cuda_version"] = f"Compute {compute_cap}"
+                except:
+                    pass
+                
+                # Also try to get CUDA version from PyTorch if available
+                try:
+                    import torch
+                    if torch.cuda.is_available() and torch.version.cuda:
+                        result["cuda_version"] = torch.version.cuda
                 except:
                     pass
         except FileNotFoundError:

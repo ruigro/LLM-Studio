@@ -835,13 +835,19 @@ class MainWindow(QMainWindow):
         missing_packages = []
         error_message = None
         
-        import pkg_resources
+        # Use importlib.metadata instead of deprecated pkg_resources
+        try:
+            from importlib.metadata import version, PackageNotFoundError
+        except ImportError:
+            # Fallback for Python < 3.8
+            from importlib_metadata import version, PackageNotFoundError
+        
         required_packages = ['unsloth', 'transformers', 'accelerate', 'peft', 'datasets', 'Pillow']
         
         for pkg in required_packages:
             try:
-                pkg_resources.get_distribution(pkg)
-            except pkg_resources.DistributionNotFound:
+                version(pkg)
+            except PackageNotFoundError:
                 deps_ok = False
                 missing_packages.append(pkg)
         
