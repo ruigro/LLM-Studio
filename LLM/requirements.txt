@@ -10,7 +10,8 @@
 # IMPORTANT: Torch on Windows is currently not fully compatible with NumPy 2.x in all codepaths.
 # Pin NumPy < 2 to avoid "Failed to initialize NumPy: _ARRAY_API not found" and similar issues.
 numpy<2
-transformers==4.46.3  # Pin version for unsloth 2025.12.x compatibility (4.57.x has breaking API changes)
+transformers==4.51.3  # Min version required by unsloth 2025.12.9 (>=4.51.3, excludes 4.52-4.55, 4.57.0)
+tokenizers>=0.21,<0.22  # Required by transformers 4.51.3
 accelerate>=0.18.0
 datasets>=2.11.0
 peft>=0.3.0
