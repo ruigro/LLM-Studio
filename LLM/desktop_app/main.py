@@ -26,48 +26,6 @@ from core.inference import InferenceConfig, build_run_adapter_cmd
 APP_TITLE = "🤖 LLM Fine-tuning Studio"
 
 
-class RightAlignedTabBar(QTabBar):
-    """Custom QTabBar that positions the last tab on the far right"""
-    
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self._right_tab_index = -1  # Index of tab to align right
-    
-    def set_right_aligned_tab(self, index: int):
-        """Set which tab should be aligned to the right"""
-        self._right_tab_index = index
-    
-    def tabSizeHint(self, index: int) -> QSize:
-        """Override to add spacing before the right-aligned tab"""
-        size = super().tabSizeHint(index)
-        
-        # If this is the right-aligned tab, calculate spacing needed
-        if index == self._right_tab_index and self._right_tab_index >= 0:
-            # Calculate total width of all tabs except this one
-            total_other_tabs = 0
-            for i in range(self.count()):
-                if i != index:
-                    total_other_tabs += super().tabSizeHint(i).width()
-            
-            # Available width
-            available_width = self.width()
-            
-            # Space needed to push this tab to the right
-            spacing_needed = available_width - total_other_tabs - size.width()
-            
-            # Add spacing as width (Qt will distribute this)
-            if spacing_needed > 0:
-                size.setWidth(size.width() + spacing_needed - 10)  # -10 for margin
-        
-        return size
-    
-    def resizeEvent(self, event):
-        """Recalculate tab positions when window resizes"""
-        super().resizeEvent(event)
-        # Force layout update
-        self.update()
-
-
 class InstallerThread(QThread):
     """Thread for running smart installer without freezing UI"""
     log_output = Signal(str)
@@ -192,6 +150,15 @@ QListWidget {
 }
 QLabel {
     color: #fafafa;
+}
+QFrame {
+    border: none;
+    background-color: #1a1d23;
+}
+QFrame[frameShape="4"] {
+    border: none;
+    border-radius: 8px;
+    background-color: #1a1d23;
 }
 QToolBar {
     background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #667eea, stop:1 #764ba2);
@@ -379,29 +346,81 @@ class MainWindow(QMainWindow):
         
         main_layout.addWidget(header_widget)
 
-        tabs = QTabWidget()
+        # Create custom navbar with buttons
+        navbar = QWidget()
+        navbar_layout = QHBoxLayout(navbar)
+        navbar_layout.setContentsMargins(0, 0, 0, 0)
+        navbar_layout.setSpacing(2)
         
-        # Use custom tab bar for right-aligned last tab
-        custom_tab_bar = RightAlignedTabBar()
-        tabs.setTabBar(custom_tab_bar)
+        # Tab buttons
+        self.home_btn = QPushButton("🏠 Home")
+        self.train_btn = QPushButton("🎯 Train")
+        self.download_btn = QPushButton("📥 Download")
+        self.test_btn = QPushButton("🧪 Test")
+        self.logs_btn = QPushButton("📊 Logs")
+        self.info_btn = QPushButton("ℹ️ Info")
         
-        tabs.addTab(self._build_home_tab(), "🏠 Home")
-        tabs.addTab(self._build_train_tab(), "🎯 Train")
-        tabs.addTab(self._build_models_tab(), "📥 Download")
-        tabs.addTab(self._build_test_tab(), "🧪 Test")
-        tabs.addTab(self._build_logs_tab(), "📊 Logs")
-        tabs.addTab(self._build_info_tab(), "ℹ️ Info")
-        
-        # Set Info tab (index 5) to be right-aligned
-        custom_tab_bar.set_right_aligned_tab(5)
-        
-        tabs.setStyleSheet("""
-            QTabBar::tab {
+        # Style buttons to look like tabs
+        tab_button_style = """
+            QPushButton {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #667eea, stop:1 #764ba2);
+                color: white;
+                border: none;
                 padding: 10px 20px;
                 font-size: 14pt;
                 font-weight: bold;
+                border-top-left-radius: 4px;
+                border-top-right-radius: 4px;
             }
-        """)
+            QPushButton:checked {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #764ba2, stop:1 #667eea);
+            }
+            QPushButton:hover {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #7c8ef5, stop:1 #8a5cb8);
+            }
+        """
+        
+        for btn in [self.home_btn, self.train_btn, self.download_btn, self.test_btn, self.logs_btn, self.info_btn]:
+            btn.setCheckable(True)
+            btn.setStyleSheet(tab_button_style)
+        
+        # Add left-side buttons
+        navbar_layout.addWidget(self.home_btn)
+        navbar_layout.addWidget(self.train_btn)
+        navbar_layout.addWidget(self.download_btn)
+        navbar_layout.addWidget(self.test_btn)
+        navbar_layout.addWidget(self.logs_btn)
+        
+        # Add stretch to consume remaining space
+        navbar_layout.addStretch(1)
+        
+        # Add Info button on far right
+        navbar_layout.addWidget(self.info_btn)
+        
+        main_layout.addWidget(navbar)
+
+        # Create tab widget for content (hide the tab bar since we're using custom buttons)
+        tabs = QTabWidget()
+        tabs.tabBar().setVisible(False)
+        
+        tabs.addTab(self._build_home_tab(), "Home")
+        tabs.addTab(self._build_train_tab(), "Train")
+        tabs.addTab(self._build_models_tab(), "Download")
+        tabs.addTab(self._build_test_tab(), "Test")
+        tabs.addTab(self._build_logs_tab(), "Logs")
+        tabs.addTab(self._build_info_tab(), "Info")
+        
+        # Connect buttons to tab switching
+        self.home_btn.clicked.connect(lambda: self._switch_tab(tabs, 0))
+        self.train_btn.clicked.connect(lambda: self._switch_tab(tabs, 1))
+        self.download_btn.clicked.connect(lambda: self._switch_tab(tabs, 2))
+        self.test_btn.clicked.connect(lambda: self._switch_tab(tabs, 3))
+        self.logs_btn.clicked.connect(lambda: self._switch_tab(tabs, 4))
+        self.info_btn.clicked.connect(lambda: self._switch_tab(tabs, 5))
+        
+        # Set Home as default
+        self.home_btn.setChecked(True)
+        tabs.setCurrentIndex(0)
 
         main_layout.addWidget(tabs)
         self.setCentralWidget(main_widget)
@@ -410,6 +429,9 @@ class MainWindow(QMainWindow):
         
         # Initialize card lists
         self.model_cards = []
+        
+        # Auto-run system diagnostics on startup (delayed to allow UI to render first)
+        QTimer.singleShot(500, self._auto_check_system)
         self.downloaded_model_cards = []
         self.metric_cards = []
         
@@ -455,6 +477,40 @@ class MainWindow(QMainWindow):
         layout.addWidget(detail_label)
         
         return widget
+    
+    def _auto_check_system(self):
+        """Auto-run system diagnostics on startup"""
+        # Re-detect system info
+        self.system_info = SystemDetector().detect_all()
+        
+        # Log the diagnostics
+        print("=== System Diagnostics ===")
+        print(f"Python: {self.system_info.get('python', {}).get('version', 'Not found')}")
+        pytorch_info = self.system_info.get('pytorch', {})
+        if pytorch_info.get('found'):
+            print(f"PyTorch: {pytorch_info.get('version', 'N/A')} (CUDA: {pytorch_info.get('cuda_available', False)})")
+        else:
+            print("PyTorch: Not installed")
+        
+        cuda_info = self.system_info.get('cuda', {})
+        if cuda_info.get('found'):
+            print(f"CUDA: {cuda_info.get('cuda_version', 'N/A')} (Driver: {cuda_info.get('driver_version', 'N/A')})")
+            gpus = cuda_info.get('gpus', [])
+            for idx, gpu in enumerate(gpus):
+                print(f"  GPU {idx}: {gpu.get('name', 'Unknown')} ({gpu.get('memory', 'Unknown')})")
+        else:
+            print("CUDA: Not found")
+        
+        print("=========================\n")
+    
+    def _switch_tab(self, tab_widget: QTabWidget, index: int):
+        """Switch to a tab and update button states"""
+        tab_widget.setCurrentIndex(index)
+        
+        # Update button checked states
+        buttons = [self.home_btn, self.train_btn, self.download_btn, self.test_btn, self.logs_btn, self.info_btn]
+        for i, btn in enumerate(buttons):
+            btn.setChecked(i == index)
     
     def _install_pytorch(self):
         """Install PyTorch with CUDA"""
@@ -1439,6 +1495,13 @@ class MainWindow(QMainWindow):
             self.gpu_select.addItem("No GPUs available - CPU mode")
             self.gpu_select.setEnabled(False)
             self.training_info_label = QLabel("⚠️ Training will use CPU (slower)")
+        
+        # Connect GPU selection change to update label
+        self.gpu_select.currentIndexChanged.connect(
+            lambda idx: self.training_info_label.setText(
+                f"⚡ Training will use: {self.gpu_select.currentText()}"
+            )
+        )
             
         gpu_layout.addWidget(self.gpu_select)
         
