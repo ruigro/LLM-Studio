@@ -788,21 +788,32 @@ if errorlevel 1 (
         self.log("Repair: Installing core dependencies from requirements.txt...")
         requirements_file = Path(__file__).parent / "requirements.txt"
         if requirements_file.exists():
+            # Use Popen for real-time output
             cmd = [
                 python_executable, "-m", "pip", "install",
                 "--force-reinstall",  # Force reinstall to fix any corruption
                 "-r", str(requirements_file)
             ]
             self.log(f"Running: {' '.join(cmd)}")
-            result = subprocess.run(
+            
+            proc = subprocess.Popen(
                 cmd,
-                capture_output=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
                 text=True,
-                timeout=1800,
+                bufsize=1,
                 **self.subprocess_flags
             )
-            if result.returncode != 0:
-                self.log(f"Repair warning: Some requirements failed: {result.stderr[:500]}")
+            
+            for line in proc.stdout:
+                line = line.strip()
+                if line:
+                    self.log(line)
+            
+            proc.wait()
+            if proc.returncode != 0:
+                self.log(f"ERROR: Requirements installation failed with exit code {proc.returncode}")
+                self.log("Continuing anyway to try PyTorch install...")
         
         # NOW install PyTorch LAST to override any CPU version pulled by dependencies
         self.log("Repair: Installing PyTorch + Triton (FINAL STEP - overrides any wrong versions)...")
