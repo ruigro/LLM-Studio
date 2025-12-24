@@ -780,16 +780,19 @@ if errorlevel 1 (
             timeout=60,
             **self.subprocess_flags
         )
-        # Then install specific stable version
+        # Then install ALL PySide6 packages at the SAME version (critical for compatibility)
         pyside_cmd = [
             python_executable, "-m", "pip", "install",
-            "PySide6==6.8.1"  # Specific stable version for Windows
+            "PySide6==6.8.1",  # Specific stable version for Windows
+            "PySide6-Essentials==6.8.1",  # MUST match PySide6 version
+            "PySide6-Addons==6.8.1",  # MUST match PySide6 version
+            "shiboken6==6.8.1"  # MUST match PySide6 version
         ]
         result = subprocess.run(pyside_cmd, capture_output=True, text=True, timeout=600, **self.subprocess_flags)
         if result.returncode != 0:
             self.log(f"Repair warning: PySide6 installation failed: {result.stderr[:500]}")
         else:
-            self.log("OK: PySide6 6.8.1 installed successfully")
+            self.log("OK: PySide6 6.8.1 (all packages) installed successfully")
         
         # Install requirements FIRST (before PyTorch) to avoid dependencies pulling wrong torch
         self.log("Repair: Installing core dependencies from requirements.txt...")
