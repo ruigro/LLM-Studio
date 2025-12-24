@@ -731,6 +731,8 @@ if errorlevel 1 (
                     "transformers", "tokenizers",  # Also uninstall these to force fresh install
                     "numpy", "datasets",  # Add numpy and datasets to force correct versions
                     "PySide6", "PySide6-Essentials", "PySide6-Addons", "shiboken6",  # Also fix PySide6
+                    "trl",  # Remove trl (requires transformers>=4.56.1, conflicts with our 4.51.3)
+                    "torchao",  # Remove torchao (incompatible, unsloth-zoo wants it but it breaks things)
                 ],
                 capture_output=True,
                 text=True,
@@ -771,38 +773,37 @@ if errorlevel 1 (
             except Exception as e:
                 self.log(f"Repair: Cleanup warning: {e}")
 
-        # Reinstall core stack
-        self.log("Repair: Reinstalling PySide6 (GUI framework)...")
-        # First uninstall completely
+        # Step 1: Uninstall PySide6 packages (will reinstall at end)
+        self.log("Repair: Uninstalling PySide6 packages (will reinstall at correct version at end)...")
         subprocess.run(
             [python_executable, "-m", "pip", "uninstall", "-y", "PySide6", "PySide6-Essentials", "PySide6-Addons", "shiboken6"],
             capture_output=True,
             timeout=60,
             **self.subprocess_flags
         )
-        # Then install ALL PySide6 packages at the SAME version (critical for compatibility)
-        pyside_cmd = [
-            python_executable, "-m", "pip", "install",
-            "PySide6==6.8.1",  # Specific stable version for Windows
-            "PySide6-Essentials==6.8.1",  # MUST match PySide6 version
-            "PySide6-Addons==6.8.1",  # MUST match PySide6 version
-            "shiboken6==6.8.1"  # MUST match PySide6 version
-        ]
-        result = subprocess.run(pyside_cmd, capture_output=True, text=True, timeout=600, **self.subprocess_flags)
-        if result.returncode != 0:
-            self.log(f"Repair warning: PySide6 installation failed: {result.stderr[:500]}")
-        else:
-            self.log("OK: PySide6 6.8.1 (all packages) installed successfully")
         
-        # Install requirements FIRST (before PyTorch) to avoid dependencies pulling wrong torch
-        self.log("Repair: Installing core dependencies from requirements.txt...")
+        # Step 2: Install requirements.txt BUT exclude PySide6 (it's in requirements.txt and would upgrade to wrong version)
+        self.log("Repair: Installing core dependencies from requirements.txt (excluding PySide6)...")
         requirements_file = Path(__file__).parent / "requirements.txt"
         if requirements_file.exists():
-            # Use Popen for real-time output
+            # Read requirements and filter out PySide6 packages
+            with open(requirements_file, 'r', encoding='utf-8') as f:
+                req_lines = f.readlines()
+            
+            # Create temp requirements file without PySide6
+            import tempfile
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False, encoding='utf-8') as tmp:
+                for line in req_lines:
+                    # Skip PySide6 and related packages
+                    if not any(pkg in line.lower() for pkg in ['pyside6', 'shiboken6']):
+                        tmp.write(line)
+                tmp_req_file = tmp.name
+            
+            # Install from filtered requirements
             cmd = [
                 python_executable, "-m", "pip", "install",
                 "--force-reinstall",  # Force reinstall to fix any corruption
-                "-r", str(requirements_file)
+                "-r", tmp_req_file
             ]
             self.log(f"Running: {' '.join(cmd)}")
             
@@ -821,17 +822,36 @@ if errorlevel 1 (
                     self.log(line)
             
             proc.wait()
+            # Clean up temp file
+            try:
+                Path(tmp_req_file).unlink()
+            except:
+                pass
+            
             if proc.returncode != 0:
                 self.log(f"ERROR: Requirements installation failed with exit code {proc.returncode}")
                 self.log("Continuing anyway to try PyTorch install...")
         
-        # NOW install PyTorch LAST to override any CPU version pulled by dependencies
-        self.log("Repair: Installing PyTorch + Triton (FINAL STEP - overrides any wrong versions)...")
+        # Step 2b: Force reinstall transformers and tokenizers with correct versions
+        # (requirements.txt dependencies might have upgraded them)
+        self.log("Repair: Ensuring transformers and tokenizers are at correct versions...")
+        transformers_cmd = [
+            python_executable, "-m", "pip", "install",
+            "--force-reinstall", "--no-deps",
+            "transformers==4.51.3",
+            "tokenizers>=0.21,<0.22"
+        ]
+        result = subprocess.run(transformers_cmd, capture_output=True, text=True, timeout=300, **self.subprocess_flags)
+        if result.returncode != 0:
+            self.log(f"Repair warning: transformers/tokenizers reinstall failed: {result.stderr[:300]}")
+        
+        # Step 3: Install PyTorch (before unsloth, after requirements)
+        self.log("Repair: Installing PyTorch + Triton...")
         if not self.install_pytorch(python_executable=python_executable):
             self.log("Repair failed: Could not install PyTorch.")
             return False
         
-        # Install unsloth separately with --no-deps to prevent torch downgrades
+        # Step 4: Install unsloth separately with --no-deps to prevent torch downgrades
         self.log("Repair: Installing unsloth (with --no-deps to protect torch)...")
         unsloth_cmd = [
             python_executable, "-m", "pip", "install",
@@ -842,7 +862,7 @@ if errorlevel 1 (
         if result.returncode != 0:
             self.log(f"Repair warning: unsloth installation failed: {result.stderr[:200]}")
         
-        # Remove torchao if present
+        # Step 5: Remove torchao if present
         self.log("Repair: Removing torchao (known incompatibility)...")
         try:
             subprocess.run(
@@ -853,6 +873,22 @@ if errorlevel 1 (
             )
         except Exception:
             pass
+        
+        # Step 6: Install PySide6 LAST (after everything) so nothing can upgrade it
+        self.log("Repair: Installing PySide6 6.8.1 (FINAL STEP - after all other packages)...")
+        pyside_cmd = [
+            python_executable, "-m", "pip", "install",
+            "--force-reinstall",  # Force to override any version from requirements.txt
+            "PySide6==6.8.1",  # Specific stable version for Windows
+            "PySide6-Essentials==6.8.1",  # MUST match PySide6 version
+            "PySide6-Addons==6.8.1",  # MUST match PySide6 version
+            "shiboken6==6.8.1"  # MUST match PySide6 version
+        ]
+        result = subprocess.run(pyside_cmd, capture_output=True, text=True, timeout=600, **self.subprocess_flags)
+        if result.returncode != 0:
+            self.log(f"Repair warning: PySide6 installation failed: {result.stderr[:500]}")
+        else:
+            self.log("OK: PySide6 6.8.1 (all packages) installed successfully")
 
         # Final verification (runs inside the same interpreter)
         self.log("Repair: Verifying environment...")
