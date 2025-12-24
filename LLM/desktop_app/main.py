@@ -1309,26 +1309,29 @@ class MainWindow(QMainWindow):
         left_layout = QVBoxLayout(left_widget)
         left_layout.setSpacing(15)
         
-        # Model Configuration Section
-        left_layout.addWidget(QLabel("<h2>🎯 Model Configuration</h2>"))
+        # TOP ROW: Model and Dataset in 2 columns
+        top_row_label = QLabel("<h2>🎯 Model & Dataset Selection</h2>")
+        left_layout.addWidget(top_row_label)
         
-        config_frame = QFrame()
-        config_frame.setFrameShape(QFrame.StyledPanel)
-        config_layout = QVBoxLayout(config_frame)
-        config_layout.setSpacing(12)
+        top_row_widget = QWidget()
+        top_row_layout = QHBoxLayout(top_row_widget)
+        top_row_layout.setSpacing(15)
+        top_row_layout.setContentsMargins(0, 0, 0, 0)
         
-        # Base model selection
-        model_row = QHBoxLayout()
-        model_row.addWidget(QLabel("<b>Select Base Model</b>"))
-        model_row.addStretch(1)
-        config_layout.addLayout(model_row)
+        # LEFT SUB-COLUMN: Model Configuration
+        model_frame = QFrame()
+        model_frame.setFrameShape(QFrame.StyledPanel)
+        model_layout = QVBoxLayout(model_frame)
+        model_layout.setSpacing(12)
+        
+        model_layout.addWidget(QLabel("<b>Select Base Model</b>"))
         
         self.train_base_model = QComboBox()
         self.train_base_model.setEditable(True)
         self.train_base_model.addItems(DEFAULT_BASE_MODELS)
         self.train_base_model.currentTextChanged.connect(self._on_model_selected_for_training)
-        self.train_base_model.currentTextChanged.connect(self._auto_generate_model_name)  # Auto-generate name
-        config_layout.addWidget(self.train_base_model)
+        self.train_base_model.currentTextChanged.connect(self._auto_generate_model_name)
+        model_layout.addWidget(self.train_base_model)
         
         # Model info label
         self.model_info_label = QLabel("Select a model to see details")
@@ -1338,29 +1341,33 @@ class MainWindow(QMainWindow):
         self.model_info_label.setFont(model_info_font)
         self.model_info_label.setStyleSheet("color: #888;")
         self.model_info_label.setMinimumHeight(50)
-        config_layout.addWidget(self.model_info_label)
+        model_layout.addWidget(self.model_info_label)
         
-        left_layout.addWidget(config_frame)
+        top_row_layout.addWidget(model_frame, 1)
         
-        # Dataset Upload Section
-        left_layout.addWidget(QLabel("<h2>📂 Dataset Upload</h2>"))
-        
+        # RIGHT SUB-COLUMN: Dataset Upload
         dataset_frame = QFrame()
         dataset_frame.setFrameShape(QFrame.StyledPanel)
         dataset_layout = QVBoxLayout(dataset_frame)
         dataset_layout.setSpacing(10)
         
-        dataset_layout.addWidget(QLabel("<b>Upload Training Dataset (JSONL format)</b>"))
+        dataset_layout.addWidget(QLabel("<b>Upload Training Dataset</b>"))
         
         self.train_data_path = QLineEdit()
-        self.train_data_path.setPlaceholderText("Drag and drop file here or browse...")
+        self.train_data_path.setPlaceholderText("Drag and drop file or browse...")
         self.train_data_path.textChanged.connect(self._validate_dataset)
-        self.train_data_path.textChanged.connect(self._auto_generate_model_name)  # Auto-generate name when dataset changes
+        self.train_data_path.textChanged.connect(self._auto_generate_model_name)
         dataset_layout.addWidget(self.train_data_path)
         
-        browse_btn = QPushButton("📁 Browse Files")
+        dataset_btn_row = QHBoxLayout()
+        browse_btn = QPushButton("📁 Browse")
         browse_btn.clicked.connect(self._browse_train_data)
-        dataset_layout.addWidget(browse_btn)
+        dataset_btn_row.addWidget(browse_btn)
+        
+        check_btn = QPushButton("🔍 Check Dataset")
+        check_btn.clicked.connect(self._check_dataset)
+        dataset_btn_row.addWidget(check_btn)
+        dataset_layout.addLayout(dataset_btn_row)
         
         # Dataset validation status
         self.dataset_status_label = QLabel("")
@@ -1377,7 +1384,9 @@ class MainWindow(QMainWindow):
         self.examples_label.setMinimumHeight(40)
         dataset_layout.addWidget(self.examples_label)
         
-        left_layout.addWidget(dataset_frame)
+        top_row_layout.addWidget(dataset_frame, 1)
+        
+        left_layout.addWidget(top_row_widget)
         
         # Training Parameters Section
         left_layout.addWidget(QLabel("<h2>⚙️ Training Parameters</h2>"))
@@ -1451,7 +1460,7 @@ class MainWindow(QMainWindow):
         lr_layout.addWidget(self.train_max_seq, 1)
         params_layout.addLayout(lr_layout)
         
-        # Output directory (moved from Advanced Settings)
+        # Output directory
         out_row = QHBoxLayout()
         out_row.addWidget(QLabel("Output dir:"))
         self.train_out_dir = QLineEdit(str(default_output_dir()))
@@ -1465,7 +1474,7 @@ class MainWindow(QMainWindow):
         self.train_batch = QSpinBox()
         self.train_batch.setRange(1, 512)
         self.train_batch.setValue(2)
-        self.train_batch.setVisible(False)  # Hidden, controlled by optimal batch size checkbox
+        self.train_batch.setVisible(False)
         
         left_layout.addWidget(params_frame)
         
@@ -1503,10 +1512,11 @@ class MainWindow(QMainWindow):
             self.gpu_select.setEnabled(False)
             self.training_info_label = QLabel("⚠️ Training will use CPU (slower)")
         
-        # Connect GPU selection change to update label
+        # Connect GPU selection change to update label and switch to dashboard
         self.gpu_select.currentIndexChanged.connect(
-            lambda idx: self.training_info_label.setText(
-                f"⚡ Training will use: {self.gpu_select.currentText()}"
+            lambda idx: (
+                self.training_info_label.setText(f"⚡ Training will use: {self.gpu_select.currentText()}"),
+                self._switch_to_dashboard()
             )
         )
             
@@ -1523,7 +1533,7 @@ class MainWindow(QMainWindow):
         start_btn_layout = QHBoxLayout()
         self.train_start = QPushButton("🚀 Start Training")
         self.train_start.setMinimumHeight(50)
-        self.train_start.clicked.connect(self._start_training)
+        self.train_start.clicked.connect(lambda: (self._start_training(), self._switch_to_dashboard()))
         self.train_start.setStyleSheet("""
             QPushButton {
                 font-size: 16pt;
@@ -1542,157 +1552,19 @@ class MainWindow(QMainWindow):
         
         left_layout.addStretch(1)
         
-        # RIGHT COLUMN: Training Visualization - FUTURISTIC REDESIGN
-        right_widget = QWidget()
-        right_layout = QVBoxLayout(right_widget)
-        right_layout.setSpacing(0)  # NO GAPS - containers touch each other
-        right_layout.setContentsMargins(0, 0, 0, 0)
+        # RIGHT COLUMN: Stacked Widget (Dashboard OR Dataset Viewer)
+        self.train_right_stack = QStackedWidget()
         
-        # Training Dashboard Header
-        dashboard_header = QLabel("📊 TRAINING DASHBOARD")
-        dashboard_header.setAlignment(Qt.AlignCenter)
-        dashboard_header.setMinimumHeight(50)
-        dashboard_header.setStyleSheet("""
-            QLabel {
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, 
-                    stop:0 rgba(102, 126, 234, 0.8), stop:1 rgba(118, 75, 162, 0.8));
-                color: white;
-                font-size: 16pt;
-                font-weight: bold;
-                border: none;
-                border-radius: 12px;
-            }
-        """)
-        right_layout.addWidget(dashboard_header)
+        # Page 0: Training Dashboard
+        dashboard_widget = self._build_training_dashboard()
+        self.train_right_stack.addWidget(dashboard_widget)
         
-        # REMOVED: Status banner (no longer needed)
+        # Page 1: Dataset Viewer
+        dataset_viewer_widget = self._build_dataset_viewer()
+        self.train_right_stack.addWidget(dataset_viewer_widget)
         
-        # Single row with all 4 metrics: EPOCH, STEPS, LOSS, ETA
-        metrics_row = QWidget()
-        metrics_row.setMinimumHeight(90)
-        metrics_row.setMaximumHeight(90)
-        metrics_layout = QHBoxLayout(metrics_row)
-        metrics_layout.setSpacing(8)
-        metrics_layout.setContentsMargins(0, 0, 0, 0)
-        
-        self.epoch_card = self._create_3d_metric_card("EPOCH", "📚", "0/0", "rgba(26, 31, 53, 0.7)")
-        self.steps_card = self._create_3d_metric_card("STEPS", "🔥", "0/0", "rgba(31, 26, 53, 0.7)")
-        self.loss_card = self._create_3d_metric_card("LOSS", "📉", "--·----", "rgba(53, 34, 26, 0.7)")
-        self.eta_card = self._create_3d_metric_card("ETA", "⏱", "--m --s", "rgba(26, 53, 34, 0.7)")
-        
-        metrics_layout.addWidget(self.epoch_card)
-        metrics_layout.addWidget(self.steps_card)
-        metrics_layout.addWidget(self.loss_card)
-        metrics_layout.addWidget(self.eta_card)
-        right_layout.addWidget(metrics_row)
-        
-        # Second row with LR, SPEED, GPU (same height as first row)
-        extra_row = QWidget()
-        extra_row.setMinimumHeight(90)
-        extra_row.setMaximumHeight(90)
-        extra_layout = QHBoxLayout(extra_row)
-        extra_layout.setSpacing(8)
-        extra_layout.setContentsMargins(0, 0, 0, 0)
-        
-        self.learning_rate_card = self._create_3d_metric_card("LR", "📊", "--e-0", "rgba(42, 26, 53, 0.7)")
-        self.speed_card = self._create_3d_metric_card("SPEED", "🚀", "-- s/s", "rgba(26, 37, 53, 0.7)")
-        self.gpu_mem_card = self._create_3d_metric_card("GPU", "💾", "-- GB", "rgba(53, 41, 26, 0.7)")
-        
-        extra_layout.addWidget(self.learning_rate_card)
-        extra_layout.addWidget(self.speed_card)
-        extra_layout.addWidget(self.gpu_mem_card)
-        right_layout.addWidget(extra_row)
-        
-        # Loss Over Time Section (60px taller = 240px)
-        loss_section = QWidget()
-        loss_section.setMinimumHeight(240)
-        loss_section.setMaximumHeight(240)
-        loss_section_layout = QVBoxLayout(loss_section)
-        loss_section_layout.setContentsMargins(15, 10, 15, 10)
-        loss_section_layout.setSpacing(5)
-        
-        loss_title = QLabel("<b>📉 Loss Over Time</b>")
-        loss_title.setStyleSheet("color: white; font-size: 12pt;")
-        loss_section_layout.addWidget(loss_title)
-        
-        self.loss_chart_label = QLabel("Loss chart will appear here once training starts...")
-        self.loss_chart_label.setAlignment(Qt.AlignCenter)
-        self.loss_chart_label.setStyleSheet("color: #888;")
-        loss_section_layout.addWidget(self.loss_chart_label, 1)
-        
-        loss_section.setStyleSheet("""
-            QWidget {
-                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                    stop:0 rgba(15, 15, 26, 0.6), stop:1 rgba(25, 25, 36, 0.8));
-                border: 1px solid rgba(102, 126, 234, 0.3);
-                border-radius: 12px;
-            }
-        """)
-        right_layout.addWidget(loss_section)
-        
-        # Training Logs (takes remaining space with stretch)
-        logs_section = QWidget()
-        logs_section_layout = QVBoxLayout(logs_section)
-        logs_section_layout.setContentsMargins(15, 10, 15, 10)
-        logs_section_layout.setSpacing(5)
-        
-        logs_header = QHBoxLayout()
-        logs_title = QLabel("<b>📋 Training Logs</b>")
-        logs_title.setStyleSheet("color: white; font-size: 12pt;")
-        logs_header.addWidget(logs_title)
-        logs_header.addStretch(1)
-        
-        self.logs_expand_btn = QPushButton("▼ Show Logs")
-        self.logs_expand_btn.setCheckable(True)
-        self.logs_expand_btn.setChecked(True)  # Start expanded
-        self.logs_expand_btn.clicked.connect(self._toggle_logs)
-        self.logs_expand_btn.setStyleSheet("""
-            QPushButton {
-                background: rgba(102, 126, 234, 0.3);
-                color: white;
-                border: none;
-                border-radius: 6px;
-                padding: 5px 15px;
-                font-size: 10pt;
-            }
-            QPushButton:hover {
-                background: rgba(102, 126, 234, 0.5);
-            }
-        """)
-        logs_header.addWidget(self.logs_expand_btn)
-        logs_section_layout.addLayout(logs_header)
-        
-        self.train_log = QPlainTextEdit()
-        self.train_log.setReadOnly(True)
-        self.train_log.setMaximumBlockCount(10000)
-        # NO maximum height - let it expand to fill remaining space!
-        self.train_log.setMinimumHeight(200)  # Just a minimum
-        self.train_log.setVisible(True)  # Start visible
-        self.train_log.setStyleSheet("""
-            QPlainTextEdit {
-                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                    stop:0 rgba(10, 10, 15, 0.9), stop:1 rgba(20, 20, 25, 0.9));
-                color: #00ff00;
-                font-family: 'Consolas', 'Courier New', monospace;
-                font-size: 11pt;
-                border: 1px solid rgba(102, 126, 234, 0.3);
-                border-radius: 8px;
-                padding: 10px;
-            }
-        """)
-        logs_section_layout.addWidget(self.train_log, 1)  # Stretch=1 to fill all remaining space!
-        
-        logs_section.setStyleSheet("""
-            QWidget {
-                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                    stop:0 rgba(15, 15, 26, 0.6), stop:1 rgba(25, 25, 36, 0.8));
-                border: 1px solid rgba(102, 126, 234, 0.3);
-                border-radius: 12px;
-            }
-        """)
-        right_layout.addWidget(logs_section, 1)  # Stretch=1 to expand with window!
-        
-        # NO addStretch here - let logs_section take all remaining space!
+        # Start with dashboard
+        self.train_right_stack.setCurrentIndex(0)
         
         # Add to splitter
         # Left column is long; make it scrollable so larger fonts don't get clipped.
