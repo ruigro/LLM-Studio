@@ -122,23 +122,91 @@ class SmartInstaller:
         if not driver_version or not gpus:
             self.log("No CUDA detected. Using CPU build.")
             return "cpu"
-        
-        # Check GPU compatibility
-        gpu_name = gpus[0].get("name", "") if gpus else ""
-        
-        # Find matching GPU in compatibility matrix
-        for known_gpu, info in self.GPU_COMPAT.items():
-            if known_gpu in gpu_name:
-                recommended = info.get("recommended_cuda", "11.8")
-                self.log(f"Detected {gpu_name} - Recommended CUDA: {recommended}")
-                
-                # Map to PyTorch build
-                if "12.4" in recommended:
-                    return "cu124"
-                elif "12.1" in recommended:
-                    return "cu121"
-                else:
-                    return "cu118"
+
+        def _parse_driver_major(ver: Optional[str]) -> Optional[int]:
+            if not ver:
+                return None
+            try:
+                return int(float(ver.split(".")[0]))
+            except Exception:
+                return None
+
+        def _parse_mem_mib(mem_str: str) -> int:
+            # nvidia-smi often returns like: "24576 MiB" or "24576 MB"
+            if not mem_str:
+                return 0
+            try:
+                digits = "".join(ch for ch in mem_str if ch.isdigit())
+                return int(digits) if digits else 0
+            except Exception:
+                return 0
+
+        def _recommended_to_build(recommended: Optional[str]) -> Optional[str]:
+            if not recommended:
+                return None
+            if "12.4" in recommended:
+                return "cu124"
+            if "12.1" in recommended:
+                return "cu121"
+            if "11.8" in recommended or "11" in recommended or "10" in recommended:
+                return "cu118"
+            return None
+
+        # Choose the best GPU (mixed-GPU systems): prefer higher recommended CUDA / compute / VRAM.
+        driver_major = _parse_driver_major(driver_version)
+        best_gpu = None
+        best_compat = None
+        best_score = (-1, -1.0, -1)  # (recommended_rank, compute, mem_mib)
+
+        for gpu in gpus:
+            name = gpu.get("name", "") or ""
+            mem_mib = _parse_mem_mib(gpu.get("memory", "") or "")
+
+            compat = None
+            for known_gpu, info in self.GPU_COMPAT.items():
+                if known_gpu in name:
+                    compat = info
+                    break
+
+            if compat:
+                recommended = compat.get("recommended_cuda")
+                build = _recommended_to_build(recommended) or "cu118"
+                recommended_rank = {"cu118": 1, "cu121": 2, "cu124": 3}.get(build, 0)
+                try:
+                    compute = float(compat.get("compute", "0") or 0)
+                except Exception:
+                    compute = 0.0
+            else:
+                recommended_rank = 0
+                compute = 0.0
+
+            score = (recommended_rank, compute, mem_mib)
+            if score > best_score:
+                best_score = score
+                best_gpu = gpu
+                best_compat = compat
+
+        selected_name = (best_gpu or {}).get("name", "") if best_gpu else ""
+
+        # If we have a known GPU, start from its recommended build, but don't exceed driver capability.
+        desired_build = None
+        if best_compat:
+            recommended = best_compat.get("recommended_cuda", "11.8")
+            desired_build = _recommended_to_build(recommended)
+            self.log(f"Detected GPUs: {len(gpus)} | Selected: {selected_name} | Recommended CUDA: {recommended}")
+        else:
+            self.log(f"Detected GPUs: {len(gpus)} | Selected: {selected_name} | No known GPU match; using driver-based selection.")
+
+        if driver_major is not None and desired_build is not None:
+            # Gate by driver major version (conservative fallbacks).
+            if desired_build == "cu124" and driver_major < 555:
+                desired_build = "cu121" if driver_major >= 545 else ("cu118" if driver_major >= 450 else "cpu")
+            elif desired_build == "cu121" and driver_major < 545:
+                desired_build = "cu118" if driver_major >= 450 else "cpu"
+            elif desired_build == "cu118" and driver_major < 450:
+                desired_build = "cpu"
+
+            return desired_build
         
         # Fallback: use driver version to determine build
         try:
@@ -174,7 +242,13 @@ class SmartInstaller:
         cuda_build = self.get_optimal_cuda_build()
         
         # Get versions from matrix
-        build_key = cuda_build if cuda_build == "cpu" else f"cuda_{cuda_build[2:]}"
+        build_key_map = {
+            "cu124": "cuda_12.4",
+            "cu121": "cuda_12.1",
+            "cu118": "cuda_11.8",
+            "cpu": "cpu",
+        }
+        build_key = build_key_map.get(cuda_build, "cpu")
         if build_key not in self.VERSION_MATRIX:
             build_key = "cpu"
         
