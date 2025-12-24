@@ -31,7 +31,7 @@ echo SUCCESS: Resource compiled
 
 echo.
 echo [2/3] Compiling C++ source with static linking...
-g++ -O2 -s -static -mwindows launcher.cpp launcher_res.o -o launcher.exe
+g++ -O2 -s -mwindows launcher.cpp launcher_res.o -o launcher.exe -static -static-libgcc -static-libstdc++ -lshlwapi
 if errorlevel 1 (
     echo ERROR: Failed to compile launcher
     pause

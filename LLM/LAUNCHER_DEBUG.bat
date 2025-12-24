@@ -1,17 +1,24 @@
 @echo off
 chcp 65001 >nul
-title 🚀 LLM Fine-tuning Studio Launcher
-color 0D
+title 🐛 LLM Fine-tuning Studio Launcher (DEBUG MODE)
+color 0E
+
+echo.
+echo ═══════════════════════════════════════════════════════
+echo    🐛 LLM Fine-tuning Studio - DEBUG MODE 🐛
+echo ═══════════════════════════════════════════════════════
+echo.
+echo This debug launcher will:
+echo  - Show all console output
+echo  - Keep the window open after exit
+echo  - Display detailed error messages
+echo.
 
 REM Change to script directory
 cd /d "%~dp0"
 
 REM Check if first-time setup has been completed
 if not exist ".setup_complete" (
-    echo.
-    echo ═══════════════════════════════════════════════════════
-    echo    🚀 LLM Fine-tuning Studio - First Run Setup 🚀
-    echo ═══════════════════════════════════════════════════════
     echo.
     echo ⚙️  First-time setup required...
     echo This will detect your hardware and install all dependencies.
@@ -46,11 +53,6 @@ if not exist ".setup_complete" (
 )
 
 REM Normal app launch
-echo.
-echo ═══════════════════════════════════════════════════════
-echo    🚀 LLM Fine-tuning Studio Launcher 🚀
-echo ═══════════════════════════════════════════════════════
-echo.
 echo Starting application...
 echo.
 
@@ -59,12 +61,32 @@ if exist .venv\Scripts\activate.bat (
   call .venv\Scripts\activate.bat
 )
 
-REM Launch with pythonw.exe (no console) if available, else use python.exe
-if exist .venv\Scripts\pythonw.exe (
-    start "" .venv\Scripts\pythonw.exe -m desktop_app.main
-) else (
-    start "" python -m desktop_app.main
+REM Show Python version and environment info
+echo.
+echo === DEBUG INFO ===
+python --version
+echo Virtual Environment: %VIRTUAL_ENV%
+echo Working Directory: %CD%
+echo.
+echo === STARTING APP ===
+echo.
+
+REM Launch with console visible for debugging
+python -m desktop_app.main
+
+if errorlevel 1 (
+    echo.
+    echo ❌ Application failed to start!
+    echo.
+    echo Exit code: %errorlevel%
+    echo.
+    echo Try running: python verify_installation.py
+    echo to check your installation.
+    echo.
 )
 
-REM Exit immediately (don't wait for the app)
-exit
+echo.
+echo === APP CLOSED ===
+echo.
+pause
+
