@@ -784,14 +784,8 @@ if errorlevel 1 (
         else:
             self.log("OK: PySide6 installed successfully")
         
-        self.log("Repair: Reinstalling PyTorch + Triton...")
-        if not self.install_pytorch(python_executable=python_executable):
-            self.log("Repair failed: Could not install PyTorch.")
-            return False
-
-        # Reinstall critical dependencies from requirements.txt WITH their dependencies
-        # This ensures transformers gets huggingface-hub, regex, etc.
-        self.log("Repair: Reinstalling core dependencies from requirements.txt...")
+        # Install requirements FIRST (before PyTorch) to avoid dependencies pulling wrong torch
+        self.log("Repair: Installing core dependencies from requirements.txt...")
         requirements_file = Path(__file__).parent / "requirements.txt"
         if requirements_file.exists():
             cmd = [
@@ -809,6 +803,12 @@ if errorlevel 1 (
             )
             if result.returncode != 0:
                 self.log(f"Repair warning: Some requirements failed: {result.stderr[:500]}")
+        
+        # NOW install PyTorch LAST to override any CPU version pulled by dependencies
+        self.log("Repair: Installing PyTorch + Triton (FINAL STEP - overrides any wrong versions)...")
+        if not self.install_pytorch(python_executable=python_executable):
+            self.log("Repair failed: Could not install PyTorch.")
+            return False
         
         # Install unsloth separately with --no-deps to prevent torch downgrades
         self.log("Repair: Installing unsloth (with --no-deps to protect torch)...")
