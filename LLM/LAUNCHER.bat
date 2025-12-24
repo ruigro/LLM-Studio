@@ -18,10 +18,34 @@ if not exist ".setup_complete" (
     echo Please wait, this may take 5-15 minutes.
     echo.
     
-    REM Activate virtual environment if it exists
+    REM Create virtual environment if it doesn't exist
+    if not exist .venv (
+        echo Creating virtual environment...
+        python -m venv .venv
+        if errorlevel 1 (
+            echo ❌ Failed to create virtual environment!
+            echo Make sure Python 3.8+ is installed and in PATH.
+            pause
+            exit /b 1
+        )
+        echo ✓ Virtual environment created
+        echo.
+    )
+    
+    REM Activate virtual environment
     if exist .venv\Scripts\activate.bat (
         call .venv\Scripts\activate.bat
+        echo ✓ Virtual environment activated
+        echo.
     )
+    
+    REM Install PySide6 for the setup wizard GUI
+    echo Installing PySide6 for setup wizard...
+    python -m pip install --quiet PySide6
+    if errorlevel 1 (
+        echo ⚠️ Warning: Failed to install PySide6
+    )
+    echo.
     
     REM Run first-time setup
     python first_run_setup.py

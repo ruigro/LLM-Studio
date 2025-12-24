@@ -117,33 +117,46 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     std::wstring setupCompleteMarker = exeDir + L"\\.setup_complete";
     bool needsSetup = !FileExists(setupCompleteMarker);
     
-    std::wstring scriptArgs;
-    std::wstring logFile;
-    int exitCode;
-    
     if (needsSetup) {
-        // First run: use system Python to run setup wizard
-        std::wstring systemPython = L"python.exe";  // From PATH
+        // First run: launch LAUNCHER.bat which creates venv and runs setup
+        std::wstring launcherBat = exeDir + L"\\LAUNCHER.bat";
         
-        scriptArgs = L"first_run_setup.py";
-        logFile = exeDir + L"\\logs\\setup.log";
+        SHELLEXECUTEINFOW sei = {0};
+        sei.cbSize = sizeof(sei);
+        sei.fMask = SEE_MASK_NOCLOSEPROCESS;
+        sei.lpVerb = L"open";
+        sei.lpFile = launcherBat.c_str();
+        sei.lpDirectory = exeDir.c_str();
+        sei.nShow = SW_SHOW;
         
-        exitCode = LaunchPythonApp(exeDir, systemPython, scriptArgs, logFile);
-        
-        if (exitCode != 0) {
-            // Setup failed - open log in Notepad
+        if (!ShellExecuteExW(&sei)) {
             MessageBoxW(NULL, 
-                       L"First-time setup failed!\n\n"
-                       L"The setup log will open in Notepad.\n"
-                       L"Please review the errors and try again.\n\n"
-                       L"Make sure Python 3.8+ is installed and in PATH.",
+                       L"Failed to launch first-run setup!\n\n"
+                       L"Please run LAUNCHER.bat manually.",
                        L"Setup Error", 
                        MB_OK | MB_ICONERROR);
-            OpenLogInNotepad(logFile);
-            return exitCode;
+            return 1;
         }
         
-        // Setup succeeded, now continue to launch app
+        // Wait for setup to complete
+        if (sei.hProcess) {
+            WaitForSingleObject(sei.hProcess, INFINITE);
+            
+            DWORD exitCode = 0;
+            GetExitCodeProcess(sei.hProcess, &exitCode);
+            CloseHandle(sei.hProcess);
+            
+            if (exitCode != 0) {
+                MessageBoxW(NULL, 
+                           L"First-time setup failed!\n\n"
+                           L"Please check the console output for errors.",
+                           L"Setup Error", 
+                           MB_OK | MB_ICONERROR);
+                return exitCode;
+            }
+        }
+        
+        // Setup succeeded, continue to launch app
     }
     
     // Check which Python interpreter to use (venv should exist now)
@@ -158,17 +171,17 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     } else {
         MessageBoxW(NULL, 
                     L"Python virtual environment not found!\n\n"
-                    L"Setup may have failed. Please check logs\\setup.log",
+                    L"Setup may have failed. Please run LAUNCHER.bat manually.",
                     L"LLM Studio Launcher Error", 
                     MB_OK | MB_ICONERROR);
         return 1;
     }
     
     // Launch main application
-    scriptArgs = L"-m desktop_app.main";
-    logFile = exeDir + L"\\logs\\app.log";
+    std::wstring scriptArgs = L"-m desktop_app.main";
+    std::wstring logFile = exeDir + L"\\logs\\app.log";
     
-    exitCode = LaunchPythonApp(exeDir, selectedPython, scriptArgs, logFile);
+    int exitCode = LaunchPythonApp(exeDir, selectedPython, scriptArgs, logFile);
     
     if (exitCode != 0) {
         // App failed - open log in Notepad
