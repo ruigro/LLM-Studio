@@ -305,21 +305,24 @@ class SystemDetector:
             if self.platform == "windows":
                 # Use WMI to get actual CPU name on Windows
                 try:
-                    import subprocess
                     cpu_cmd = subprocess.run(
                         ["wmic", "cpu", "get", "name"],
                         capture_output=True, text=True, timeout=5
                     )
                     if cpu_cmd.returncode == 0:
-                        lines = cpu_cmd.stdout.strip().split('\n')
-                        if len(lines) > 1:
-                            result["cpu_name"] = lines[1].strip()
+                        lines = [line.strip() for line in cpu_cmd.stdout.strip().split('\n') if line.strip()]
+                        # First line is "Name", second is the actual CPU name
+                        if len(lines) > 1 and lines[1]:
+                            result["cpu_name"] = lines[1]
+                        elif len(lines) > 0 and lines[0] and lines[0] != "Name":
+                            result["cpu_name"] = lines[0]
                         else:
                             result["cpu_name"] = platform.processor()
                     else:
                         result["cpu_name"] = platform.processor()
-                except:
-                    result["cpu_name"] = platform.processor()
+                except Exception as e:
+                    # Fallback to platform.processor() on error
+                    result["cpu_name"] = platform.processor() or "Unknown CPU"
             else:
                 processor = platform.processor()
                 if processor:
@@ -329,8 +332,8 @@ class SystemDetector:
                     cores = os.cpu_count()
                     arch = platform.machine()
                     result["cpu_name"] = f"{cores}-core {arch}"
-        except:
-            result["cpu_name"] = "Unknown"
+        except Exception as e:
+            result["cpu_name"] = f"Unknown (error: {str(e)[:30]})"
         
         # CPU cores
         try:
