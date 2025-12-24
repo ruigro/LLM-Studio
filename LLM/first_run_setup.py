@@ -132,7 +132,7 @@ class FirstRunSetup(QMainWindow):
         super().__init__()
         self.setWindowTitle("🚀 LLM Fine-tuning Studio - First Time Setup")
         self.setWindowFlags(self.windowFlags() | Qt.WindowStaysOnTopHint)  # Always on top
-        self.setMinimumSize(900, 700)
+        self.setMinimumSize(1000, 700)  # Wider for 2-column layout
         
         # Setup state
         self.setup_complete = False
@@ -149,9 +149,9 @@ class FirstRunSetup(QMainWindow):
         """Build the setup wizard UI"""
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
-        layout = QVBoxLayout(central_widget)
-        layout.setSpacing(20)
-        layout.setContentsMargins(40, 40, 40, 40)
+        main_layout = QVBoxLayout(central_widget)
+        main_layout.setSpacing(20)
+        main_layout.setContentsMargins(40, 40, 40, 40)
         
         # Header
         header = QLabel("🚀 LLM Fine-tuning Studio")
@@ -160,16 +160,16 @@ class FirstRunSetup(QMainWindow):
         header_font.setBold(True)
         header.setFont(header_font)
         header.setAlignment(Qt.AlignCenter)
-        layout.addWidget(header)
+        main_layout.addWidget(header)
         
         subtitle = QLabel("First-Time Setup Wizard")
         subtitle_font = QFont()
         subtitle_font.setPointSize(16)
         subtitle.setFont(subtitle_font)
         subtitle.setAlignment(Qt.AlignCenter)
-        layout.addWidget(subtitle)
+        main_layout.addWidget(subtitle)
         
-        layout.addSpacing(20)
+        main_layout.addSpacing(20)
         
         # Status message
         self.status_label = QLabel("Initializing setup...")
@@ -177,9 +177,17 @@ class FirstRunSetup(QMainWindow):
         status_font.setPointSize(14)
         self.status_label.setFont(status_font)
         self.status_label.setAlignment(Qt.AlignCenter)
-        layout.addWidget(self.status_label)
+        main_layout.addWidget(self.status_label)
         
-        # Hardware detection results
+        # 2-COLUMN LAYOUT
+        columns_layout = QHBoxLayout()
+        columns_layout.setSpacing(20)
+        
+        # LEFT COLUMN: Hardware Detection
+        left_column = QWidget()
+        left_layout = QVBoxLayout(left_column)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        
         hardware_frame = QFrame()
         hardware_frame.setObjectName("hardwareFrame")
         hardware_layout = QVBoxLayout(hardware_frame)
@@ -193,21 +201,29 @@ class FirstRunSetup(QMainWindow):
         
         self.hardware_display = QLabel("Waiting for detection...")
         self.hardware_display.setWordWrap(True)
+        self.hardware_display.setAlignment(Qt.AlignTop | Qt.AlignLeft)
         hardware_display_font = QFont()
         hardware_display_font.setPointSize(12)
         self.hardware_display.setFont(hardware_display_font)
         hardware_layout.addWidget(self.hardware_display)
+        hardware_layout.addStretch(1)  # Push content to top
         
-        layout.addWidget(hardware_frame)
+        left_layout.addWidget(hardware_frame)
+        columns_layout.addWidget(left_column, 1)  # 1 part
+        
+        # RIGHT COLUMN: Installation Progress + Log
+        right_column = QWidget()
+        right_layout = QVBoxLayout(right_column)
+        right_layout.setContentsMargins(0, 0, 0, 0)
         
         # Progress bar
         self.progress_bar = QProgressBar()
         self.progress_bar.setTextVisible(True)
         self.progress_bar.setMinimumHeight(30)
         self.progress_bar.setRange(0, 0)  # Indeterminate
-        layout.addWidget(self.progress_bar)
+        right_layout.addWidget(self.progress_bar)
         
-        # Log viewer
+        # Log viewer with dynamic sizing
         log_frame = QFrame()
         log_frame.setObjectName("logFrame")
         log_layout = QVBoxLayout(log_frame)
@@ -221,13 +237,17 @@ class FirstRunSetup(QMainWindow):
         
         self.log_viewer = QTextEdit()
         self.log_viewer.setReadOnly(True)
-        self.log_viewer.setMinimumHeight(200)
         self.log_viewer.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)  # Wrap long lines
-        log_font = QFont("Consolas", 10)
+        self.log_viewer.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)  # No horizontal scroll
+        self.log_viewer.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        log_font = QFont("Consolas", 9)  # Slightly smaller for more content
         self.log_viewer.setFont(log_font)
-        log_layout.addWidget(self.log_viewer)
+        log_layout.addWidget(self.log_viewer, 1)  # Take all available space
         
-        layout.addWidget(log_frame, 1)  # Stretch to fill
+        right_layout.addWidget(log_frame, 1)  # Stretch to fill
+        columns_layout.addWidget(right_column, 1)  # 1 part (equal width)
+        
+        main_layout.addLayout(columns_layout, 1)  # Take all remaining vertical space
         
         # Buttons
         button_layout = QHBoxLayout()
@@ -244,7 +264,7 @@ class FirstRunSetup(QMainWindow):
         self.finish_btn.clicked.connect(self._finish_setup)
         button_layout.addWidget(self.finish_btn)
         
-        layout.addLayout(button_layout)
+        main_layout.addLayout(button_layout)
     
     def _apply_styles(self):
         """Apply modern styling"""
