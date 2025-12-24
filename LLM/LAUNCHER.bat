@@ -1,7 +1,5 @@
 @echo off
 chcp 65001 >nul
-title 🚀 LLM Fine-tuning Studio Launcher
-color 0D
 
 REM Change to script directory
 cd /d "%~dp0"
@@ -12,8 +10,6 @@ set PYTHON_EXE=python
 REM Check if python is in PATH
 python --version >nul 2>&1
 if errorlevel 1 (
-    echo Python not found in PATH. Searching common install locations...
-    
     REM Check common Python install locations
     for %%P in (
         "%LOCALAPPDATA%\Programs\Python\Python312\python.exe"
@@ -34,22 +30,12 @@ if errorlevel 1 (
     ) do (
         if exist %%P (
             set PYTHON_EXE=%%P
-            echo Found Python at: %%P
             goto :python_found
         )
     )
     
     REM Python not found anywhere
-    echo.
-    echo ❌ Python not found!
-    echo.
-    echo Please install Python 3.8 or later from:
-    echo   https://www.python.org/downloads/
-    echo.
-    echo IMPORTANT: During installation, check the box:
-    echo   "Add Python to PATH"
-    echo.
-    pause
+    msg * "Python not found! Please install Python 3.8+ from: https://www.python.org/downloads/ and check 'Add Python to PATH' during installation."
     exit /b 1
 )
 
@@ -57,40 +43,28 @@ if errorlevel 1 (
 
 REM Check if first-time setup has been completed
 if not exist ".setup_complete" (
-    REM Launch bootstrap GUI (uses tkinter, no deps needed)
-    "%PYTHON_EXE%" bootstrap_setup.py
-    
-    if errorlevel 1 (
-        echo.
-        echo ❌ Setup failed! Please check the error message.
-        pause
-        exit /b 1
+    REM Create venv if needed (silently)
+    if not exist .venv (
+        "%PYTHON_EXE%" -m venv .venv >nul 2>&1
     )
     
-    REM Exit after bootstrap (bootstrap will launch main setup wizard)
+    REM Activate venv and install PySide6 (silently)
+    if exist .venv\Scripts\activate.bat (
+        call .venv\Scripts\activate.bat >nul 2>&1
+        python -m pip install --quiet --upgrade pip >nul 2>&1
+        python -m pip install --quiet PySide6 >nul 2>&1
+    )
+    
+    REM Launch setup wizard GUI (no console)
+    start "" pythonw.exe first_run_setup.py
     exit /b 0
 )
 
-REM Normal app launch
-echo.
-echo ═══════════════════════════════════════════════════════
-echo    🚀 LLM Fine-tuning Studio Launcher 🚀
-echo ═══════════════════════════════════════════════════════
-echo.
-echo Starting application...
-echo.
-
-if exist .venv\Scripts\activate.bat (
-  echo ✓ Activating virtual environment...
-  call .venv\Scripts\activate.bat
-)
-
-REM Launch with pythonw.exe (no console) if available, else use python.exe
+REM Normal app launch (no console)
 if exist .venv\Scripts\pythonw.exe (
     start "" .venv\Scripts\pythonw.exe -m desktop_app.main
 ) else (
     start "" python -m desktop_app.main
 )
 
-REM Exit immediately (don't wait for the app)
 exit
