@@ -174,6 +174,7 @@ class SystemDetector:
         """Detect CUDA installation and GPU hardware"""
         result = {
             "found": False,
+            "available": False,  # Add this for consistency
             "version": None,
             "driver_version": None,
             "gpus": [],
@@ -189,6 +190,7 @@ class SystemDetector:
             
             if nvidia_smi.returncode == 0:
                 result["found"] = True
+                result["available"] = True  # GPU is available
                 lines = nvidia_smi.stdout.strip().split('\n')
                 for line in lines:
                     if line.strip():
@@ -247,6 +249,7 @@ class SystemDetector:
                             result["version"] = versions[0]
                             result["toolkit_path"] = os.path.join(base_path, versions[0])
                             result["found"] = True
+                            # Don't set available=True unless we have actual GPUs
                             break
                     except:
                         continue
@@ -281,6 +284,7 @@ class SystemDetector:
     def detect_hardware(self) -> Dict:
         """Detect hardware capabilities"""
         result = {
+            "cpu_name": None,  # Add top-level cpu_name for easy access
             "cpu": {
                 "cores": None,
                 "architecture": platform.machine(),
@@ -295,6 +299,19 @@ class SystemDetector:
             "ram_gb": None,
             "disk_space_gb": None
         }
+        
+        # Get CPU name/processor info
+        try:
+            processor = platform.processor()
+            if processor:
+                result["cpu_name"] = processor
+            else:
+                # Fallback to cores + architecture
+                cores = os.cpu_count()
+                arch = platform.machine()
+                result["cpu_name"] = f"{cores}-core {arch}"
+        except:
+            result["cpu_name"] = "Unknown"
         
         # CPU cores
         try:
