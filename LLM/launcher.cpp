@@ -91,7 +91,7 @@ int LaunchPythonApp(const std::wstring& exeDir, const std::wstring& pythonExe,
         NULL,                       // Process security attributes
         NULL,                       // Thread security attributes
         TRUE,                       // Inherit handles (for log redirection)
-        0,                          // Creation flags (0 = normal, no console)
+        CREATE_NO_WINDOW,           // Creation flags - no console window
         NULL,                       // Environment
         exeDir.c_str(),             // Working directory
         &si,                        // Startup info
@@ -204,22 +204,24 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     int healthCheckResult = LaunchPythonApp(exeDir, pythonExe, healthCheckCmd, healthCheckLog);
     
     if (healthCheckResult != 0) {
-        // PySide6 is broken - auto-repair before launching GUI
-        MessageBoxW(NULL,
-                    L"PySide6 (GUI framework) is corrupted.\n\n"
-                    L"Auto-repairing now...\n"
-                    L"This will take 2-3 minutes.",
-                    L"Auto-Repair",
-                    MB_OK | MB_ICONINFORMATION);
+        // PySide6 is broken - auto-repair silently before launching GUI
+        // No popup - repair runs in background silently
         
-        // Run repair_all()
+        // Run repair_all() using pythonw.exe (no console window)
         std::wstring repairCmd = L"-c \"from smart_installer import SmartInstaller; installer = SmartInstaller(); installer.run_detection(); installer.repair_all()\"";
         std::wstring repairLog = exeDir + L"\\logs\\auto_repair.log";
         
-        int repairResult = LaunchPythonApp(exeDir, pythonExe, repairCmd, repairLog);
+        // Use pythonw.exe for silent execution (no CMD window)
+        std::wstring repairPython = pythonwExe;
+        if (!FileExists(repairPython)) {
+            repairPython = pythonExe;  // Fallback if pythonw.exe doesn't exist
+        }
+        
+        int repairResult = LaunchPythonApp(exeDir, repairPython, repairCmd, repairLog);
         
         // Always verify PySide6 after repair, regardless of repair exit code
-        healthCheckResult = LaunchPythonApp(exeDir, pythonExe, healthCheckCmd, healthCheckLog);
+        // Use pythonw.exe for silent check too
+        healthCheckResult = LaunchPythonApp(exeDir, repairPython, healthCheckCmd, healthCheckLog);
         
         if (repairResult != 0 || healthCheckResult != 0) {
             // Repair failed OR PySide6 still broken - show error and open log
