@@ -13,7 +13,7 @@ from PySide6.QtWidgets import (
     QLabel, QPushButton, QProgressBar, QTextEdit, QFrame
 )
 from PySide6.QtCore import Qt, QThread, Signal, QTimer
-from PySide6.QtGui import QFont, QPixmap
+from PySide6.QtGui import QFont, QPixmap, QTextCursor
 
 # Import our detection and installation modules
 from system_detector import SystemDetector
@@ -128,6 +128,7 @@ class FirstRunSetup(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("🚀 LLM Fine-tuning Studio - First Time Setup")
+        self.setWindowFlags(self.windowFlags() | Qt.WindowStaysOnTopHint)  # Always on top
         self.setMinimumSize(900, 700)
         
         # Setup state
@@ -323,7 +324,7 @@ class FirstRunSetup(QMainWindow):
         self.log_viewer.append(message)
         # Auto-scroll to bottom
         cursor = self.log_viewer.textCursor()
-        cursor.movePosition(cursor.End)
+        cursor.movePosition(QTextCursor.MoveOperation.End)
         self.log_viewer.setTextCursor(cursor)
     
     def _on_progress(self, message: str):
