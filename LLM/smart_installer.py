@@ -774,10 +774,49 @@ if errorlevel 1 (
             self.log("Repair failed: Could not install PyTorch.")
             return False
 
-        # Reinstall deps (requirements + unsloth) with safe flags
-        self.log("Repair: Reinstalling dependencies...")
-        if not self.install_dependencies(python_executable=python_executable):
-            self.log("Repair warning: Some dependencies may have failed.")
+        # Reinstall critical dependencies from requirements.txt WITH their dependencies
+        # This ensures transformers gets huggingface-hub, regex, etc.
+        self.log("Repair: Reinstalling core dependencies from requirements.txt...")
+        requirements_file = Path(__file__).parent / "requirements.txt"
+        if requirements_file.exists():
+            cmd = [
+                python_executable, "-m", "pip", "install",
+                "--force-reinstall",  # Force reinstall to fix any corruption
+                "-r", str(requirements_file)
+            ]
+            self.log(f"Running: {' '.join(cmd)}")
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=1800,
+                **self.subprocess_flags
+            )
+            if result.returncode != 0:
+                self.log(f"Repair warning: Some requirements failed: {result.stderr[:500]}")
+        
+        # Install unsloth separately with --no-deps to prevent torch downgrades
+        self.log("Repair: Installing unsloth (with --no-deps to protect torch)...")
+        unsloth_cmd = [
+            python_executable, "-m", "pip", "install",
+            "--upgrade", "--no-deps",
+            "unsloth",
+        ]
+        result = subprocess.run(unsloth_cmd, capture_output=True, text=True, timeout=900, **self.subprocess_flags)
+        if result.returncode != 0:
+            self.log(f"Repair warning: unsloth installation failed: {result.stderr[:200]}")
+        
+        # Remove torchao if present
+        self.log("Repair: Removing torchao (known incompatibility)...")
+        try:
+            subprocess.run(
+                [python_executable, "-m", "pip", "uninstall", "-y", "torchao"],
+                capture_output=True,
+                timeout=60,
+                **self.subprocess_flags
+            )
+        except Exception:
+            pass
 
         # Final verification (runs inside the same interpreter)
         self.log("Repair: Verifying environment...")
