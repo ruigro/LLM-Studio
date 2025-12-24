@@ -793,26 +793,6 @@ class MainWindow(QMainWindow):
             sys_layout.addWidget(gpu_status)
             sys_layout.addWidget(QLabel("Training will use CPU (slower)"))
 
-        # Models stats - compact 2-column grid
-        stats_grid = QGridLayout()
-        stats_grid.setSpacing(8)
-        stats_grid.setContentsMargins(0, 0, 0, 0)
-        
-        # Row 1: Models Trained | Models Downloaded
-        stats_grid.addWidget(QLabel("<b>Models Trained</b>"), 0, 0)
-        stats_grid.addWidget(QLabel("<b>Models Downloaded</b>"), 0, 1)
-        
-        # Row 2: Count values
-        models_count = QLabel("<span style='font-size: 24pt; font-weight: bold;'>7</span>")
-        models_count.setAlignment(Qt.AlignCenter)
-        stats_grid.addWidget(models_count, 1, 0)
-        
-        downloads_count = QLabel("<span style='font-size: 24pt; font-weight: bold;'>5</span>")
-        downloads_count.setAlignment(Qt.AlignCenter)
-        stats_grid.addWidget(downloads_count, 1, 1)
-        
-        sys_layout.addLayout(stats_grid)
-
         sys_layout.addWidget(QLabel("<hr>"))
 
         # Status - compact single line
