@@ -545,12 +545,15 @@ class MainWindow(QMainWindow):
         self.installer_thread.start()
     
     def _install_dependencies(self):
-        """Install application dependencies"""
+        """Install application dependencies - runs FULL smart installer (PyTorch + deps)"""
         reply = QMessageBox.question(
             self,
-            "Install Dependencies",
-            "This will install all required dependencies including unsloth.\n\n"
-            "Time: 5-10 minutes\n\n"
+            "Install All Components",
+            "This will install:\n"
+            "• PyTorch (correct CUDA version for your GPU)\n"
+            "• All dependencies (unsloth, transformers, etc.)\n\n"
+            "Time: 10-15 minutes\n"
+            "Download size: ~2.5GB\n\n"
             "Continue?",
             QMessageBox.Yes | QMessageBox.No
         )
@@ -561,10 +564,11 @@ class MainWindow(QMainWindow):
         # Show log area
         self.install_log.setVisible(True)
         self.install_log.clear()
-        self.install_log.appendPlainText("=== Installing Dependencies ===\n")
+        self.install_log.appendPlainText("=== Running Full Smart Installer ===\n")
+        self.install_log.appendPlainText("This will install PyTorch with correct CUDA version + all dependencies\n\n")
         
-        # Start installer thread
-        self.installer_thread = InstallerThread("dependencies")
+        # Start installer thread with "all" to run full smart installer
+        self.installer_thread = InstallerThread("all")
         self.installer_thread.log_output.connect(lambda msg: self.install_log.appendPlainText(msg))
         self.installer_thread.finished_signal.connect(self._on_install_complete)
         self.installer_thread.start()

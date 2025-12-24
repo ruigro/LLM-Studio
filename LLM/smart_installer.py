@@ -617,14 +617,16 @@ if errorlevel 1 (
                 self.log("Warning: Visual C++ Redistributables installation failed.")
                 self.log("The application may not work correctly.")
         
-        # Step 4: Install PyTorch
+        # Step 4: Install PyTorch (always reinstall to ensure correct version/CUDA build)
         pytorch_info = self.detection_results.get("pytorch", {})
-        if not pytorch_info.get("found"):
-            if not self.install_pytorch():
-                self.log("Warning: PyTorch installation failed.")
-                self.log("You can install it manually later.")
-        else:
-            self.log(f"PyTorch {pytorch_info.get('version')} already installed")
+        if pytorch_info.get("found"):
+            self.log(f"PyTorch {pytorch_info.get('version')} detected - checking if correct version...")
+        
+        # Always run install_pytorch - it will uninstall old version and install correct one
+        if not self.install_pytorch():
+            self.log("Warning: PyTorch installation failed.")
+            self.log("You can install it manually later.")
+            return False
         
         # Step 5: Install dependencies
         if not self.install_dependencies():

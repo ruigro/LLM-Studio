@@ -1,9 +1,11 @@
 # Requirements for finetuning and running the model in this `LLM` folder
 # Notes:
-# - Install CPU-only PyTorch if you don't have CUDA (see https://pytorch.org).
+# - PyTorch is installed separately by SmartInstaller with correct CUDA version
 # - `bitsandbytes` is optional (for 8-bit training/inference) and may require special install steps.
 
-torch>=2.0.0
+# NOTE: PyTorch, torchvision, torchaudio are installed by SmartInstaller
+# Do NOT include them here as pip will install wrong (CPU-only) version
+# torch>=2.0.0  # REMOVED - SmartInstaller handles this
 transformers>=4.30.0
 accelerate>=0.18.0
 datasets>=2.11.0
