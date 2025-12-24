@@ -817,8 +817,28 @@ class MainWindow(QMainWindow):
         
         # Add install button if needed
         if not pytorch_ok:
-            self.install_pytorch_btn = QPushButton("Install CUDA Version")
-            self.install_pytorch_btn.setMaximumWidth(160)
+            self.install_pytorch_btn = QPushButton("🔧 Install CUDA Version")
+            self.install_pytorch_btn.setMinimumWidth(180)
+            self.install_pytorch_btn.setMinimumHeight(35)
+            self.install_pytorch_btn.setStyleSheet("""
+                QPushButton {
+                    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                        stop:0 #667eea, stop:1 #764ba2);
+                    color: white;
+                    font-size: 12pt;
+                    font-weight: bold;
+                    border-radius: 6px;
+                    padding: 8px 16px;
+                }
+                QPushButton:hover {
+                    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                        stop:0 #7b8ff0, stop:1 #8a5ab8);
+                }
+                QPushButton:pressed {
+                    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                        stop:0 #556bd0, stop:1 #623a88);
+                }
+            """)
             self.install_pytorch_btn.clicked.connect(self._install_pytorch)
             pytorch_row.addWidget(self.install_pytorch_btn)
         
@@ -881,8 +901,28 @@ class MainWindow(QMainWindow):
         deps_row.addWidget(deps_status_widget, 1)
         
         if not deps_ok:
-            install_deps_btn = QPushButton("Install Dependencies")
-            install_deps_btn.setMaximumWidth(160)
+            install_deps_btn = QPushButton("🚀 Install All Components")
+            install_deps_btn.setMinimumWidth(200)
+            install_deps_btn.setMinimumHeight(35)
+            install_deps_btn.setStyleSheet("""
+                QPushButton {
+                    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                        stop:0 #f093fb, stop:1 #f5576c);
+                    color: white;
+                    font-size: 12pt;
+                    font-weight: bold;
+                    border-radius: 6px;
+                    padding: 8px 16px;
+                }
+                QPushButton:hover {
+                    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                        stop:0 #f5a3ff, stop:1 #ff6a7e);
+                }
+                QPushButton:pressed {
+                    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                        stop:0 #d083db, stop:1 #d5475c);
+                }
+            """)
             install_deps_btn.clicked.connect(self._install_dependencies)
             deps_row.addWidget(install_deps_btn)
         
