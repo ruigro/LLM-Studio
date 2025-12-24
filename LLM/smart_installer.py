@@ -730,6 +730,7 @@ if errorlevel 1 (
                     "triton", "triton-windows",
                     "transformers", "tokenizers",  # Also uninstall these to force fresh install
                     "numpy", "datasets",  # Add numpy and datasets to force correct versions
+                    "PySide6", "PySide6-Essentials", "PySide6-Addons", "shiboken6",  # Also fix PySide6
                 ],
                 capture_output=True,
                 text=True,
@@ -748,11 +749,13 @@ if errorlevel 1 (
                     "torch", "torchvision", "torchaudio", "triton", "xformers",
                     "transformers", "tokenizers",  # Also clean these
                     "numpy", "datasets",  # Add numpy and datasets cleanup
+                    "PySide6", "shiboken6",  # Add PySide6 cleanup
                     "torch-*.dist-info", "torchvision-*.dist-info", "torchaudio-*.dist-info",
                     "triton-*.dist-info", "triton_windows-*.dist-info", "triton_windows-*.data",
                     "xformers-*.dist-info",
                     "transformers-*.dist-info", "tokenizers-*.dist-info",  # Clean these too
                     "numpy-*.dist-info", "datasets-*.dist-info",  # Add these too
+                    "PySide6-*.dist-info", "PySide6_*.dist-info", "shiboken6-*.dist-info",  # PySide6 cleanup
                     "~~rch", "~orch",  # common temp dirs seen on Windows
                 ]
                 self.log("Repair: Cleaning leftover site-packages folders...")
@@ -769,6 +772,18 @@ if errorlevel 1 (
                 self.log(f"Repair: Cleanup warning: {e}")
 
         # Reinstall core stack
+        self.log("Repair: Reinstalling PySide6 (GUI framework)...")
+        pyside_cmd = [
+            python_executable, "-m", "pip", "install",
+            "--force-reinstall",
+            "PySide6==6.8.1"  # Use stable version known to work on Windows
+        ]
+        result = subprocess.run(pyside_cmd, capture_output=True, text=True, timeout=600, **self.subprocess_flags)
+        if result.returncode != 0:
+            self.log(f"Repair warning: PySide6 installation failed: {result.stderr[:500]}")
+        else:
+            self.log("✅ PySide6 installed successfully")
+        
         self.log("Repair: Reinstalling PyTorch + Triton...")
         if not self.install_pytorch(python_executable=python_executable):
             self.log("Repair failed: Could not install PyTorch.")
