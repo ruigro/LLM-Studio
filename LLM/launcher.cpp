@@ -34,6 +34,9 @@ void OpenLogInNotepad(const std::wstring& logPath) {
 // Main launcher function
 int LaunchPythonApp(const std::wstring& exeDir, const std::wstring& pythonExe, 
                     const std::wstring& scriptArgs, const std::wstring& logFile) {
+    // Ensure logs directory exists before creating log file
+    EnsureLogsDirectory(exeDir);
+    
     // Build command line: "pythonw.exe" <args>
     std::wstring cmdLine = L"\"" + pythonExe + L"\" " + scriptArgs;
     
@@ -60,6 +63,24 @@ int LaunchPythonApp(const std::wstring& exeDir, const std::wstring& pythonExe,
     if (hLogFile != INVALID_HANDLE_VALUE) {
         si.hStdOutput = hLogFile;
         si.hStdError = hLogFile;
+    } else {
+        // Log file creation failed - write error to a fallback location
+        std::wstring fallbackLog = exeDir + L"\\launcher_error.log";
+        HANDLE hFallback = CreateFileW(
+            fallbackLog.c_str(),
+            GENERIC_WRITE,
+            FILE_SHARE_READ,
+            &sa,
+            CREATE_ALWAYS,
+            FILE_ATTRIBUTE_NORMAL,
+            NULL
+        );
+        if (hFallback != INVALID_HANDLE_VALUE) {
+            std::wstring errorMsg = L"Failed to create log file: " + logFile + L"\n";
+            DWORD written = 0;
+            WriteFile(hFallback, errorMsg.c_str(), errorMsg.length() * sizeof(wchar_t), &written, NULL);
+            CloseHandle(hFallback);
+        }
     }
     
     // Create the process
@@ -172,6 +193,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
                     MB_OK | MB_ICONERROR);
         return 1;
     }
+    
+    // Ensure logs directory exists
+    EnsureLogsDirectory(exeDir);
     
     // Health check: Test if PySide6 can import (if GUI can't start, user can't click Fix Issues)
     std::wstring healthCheckCmd = L"-c \"import PySide6.QtCore; print('OK')\"";
