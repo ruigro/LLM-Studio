@@ -944,6 +944,19 @@ class MainWindow(QMainWindow):
                 deps_ok = False
                 missing_packages.append(pkg)
         
+        # Runtime import test for transformers to detect broken installations
+        # (e.g., missing transformers.modeling_layers submodule)
+        if deps_ok and 'transformers' in required_packages:
+            try:
+                import transformers.modeling_layers
+                # If import succeeds, transformers is properly installed
+            except ImportError as e:
+                deps_ok = False
+                missing_packages.append(f"transformers (corrupted: {str(e)[:50]})")
+            except Exception:
+                # Other errors (e.g., CUDA issues) are not dependency problems
+                pass
+        
         # IMPORTANT:
         # Do NOT import unsloth (or other heavy deps) inside the GUI process.
         # A broken native extension (e.g. xformers) can crash pythonw.exe with a Windows loader dialog
