@@ -49,6 +49,7 @@ class InstallerThread(QThread):
             installer.log = gui_log
             
             # Run detection
+            self.log_output.emit("Detecting system configuration...")
             installer.run_detection()
             
             # Install based on type
@@ -57,13 +58,20 @@ class InstallerThread(QThread):
             elif self.install_type == "dependencies":
                 success = installer.install_dependencies()
             elif self.install_type == "repair":
+                self.log_output.emit("Starting repair process...")
                 success = installer.repair_all()
+                self.log_output.emit(f"Repair completed with result: {success}")
             else:  # "all"
                 success = installer.install()
             
             self.finished_signal.emit(success)
         except Exception as e:
-            self.log_output.emit(f"[ERROR] Installation failed: {e}")
+            import traceback
+            error_details = traceback.format_exc()
+            self.log_output.emit(f"\n[ERROR] Installation failed with exception:")
+            self.log_output.emit(str(e))
+            self.log_output.emit("\nFull traceback:")
+            self.log_output.emit(error_details)
             self.finished_signal.emit(False)
 
 
@@ -585,7 +593,15 @@ class MainWindow(QMainWindow):
         
         # Start installer thread with "repair" (deterministic self-heal)
         self.installer_thread = InstallerThread("repair")
-        self.installer_thread.log_output.connect(lambda msg: self.install_log.appendPlainText(msg))
+        
+        def append_log(msg):
+            self.install_log.appendPlainText(msg)
+            # Auto-scroll to bottom
+            cursor = self.install_log.textCursor()
+            cursor.movePosition(cursor.MoveOperation.End)
+            self.install_log.setTextCursor(cursor)
+        
+        self.installer_thread.log_output.connect(append_log)
         self.installer_thread.finished_signal.connect(self._on_install_complete)
         self.installer_thread.start()
     
