@@ -361,6 +361,7 @@ class MainWindow(QMainWindow):
         self.download_btn = QPushButton("📥 Download")
         self.test_btn = QPushButton("🧪 Test")
         self.logs_btn = QPushButton("📊 Logs")
+        self.requirements_btn = QPushButton("🔧")  # Tool icon only
         self.info_btn = QPushButton("ℹ️ Info")
         
         # Style buttons to look like tabs
@@ -383,9 +384,12 @@ class MainWindow(QMainWindow):
             }
         """
         
-        for btn in [self.home_btn, self.train_btn, self.download_btn, self.test_btn, self.logs_btn, self.info_btn]:
+        for btn in [self.home_btn, self.train_btn, self.download_btn, self.test_btn, self.logs_btn, self.requirements_btn, self.info_btn]:
             btn.setCheckable(True)
             btn.setStyleSheet(tab_button_style)
+        
+        # Special styling for requirements button (icon only, smaller)
+        self.requirements_btn.setMaximumWidth(60)
         
         # Add left-side buttons
         navbar_layout.addWidget(self.home_btn)
@@ -397,7 +401,8 @@ class MainWindow(QMainWindow):
         # Add stretch to consume remaining space
         navbar_layout.addStretch(1)
         
-        # Add Info button on far right
+        # Add Requirements and Info buttons on far right
+        navbar_layout.addWidget(self.requirements_btn)
         navbar_layout.addWidget(self.info_btn)
         
         main_layout.addWidget(navbar)
@@ -411,6 +416,7 @@ class MainWindow(QMainWindow):
         tabs.addTab(self._build_models_tab(), "Download")
         tabs.addTab(self._build_test_tab(), "Test")
         tabs.addTab(self._build_logs_tab(), "Logs")
+        tabs.addTab(self._build_requirements_tab(), "Requirements")
         tabs.addTab(self._build_info_tab(), "Info")
         
         # Connect buttons to tab switching
@@ -419,7 +425,8 @@ class MainWindow(QMainWindow):
         self.download_btn.clicked.connect(lambda: self._switch_tab(tabs, 2))
         self.test_btn.clicked.connect(lambda: self._switch_tab(tabs, 3))
         self.logs_btn.clicked.connect(lambda: self._switch_tab(tabs, 4))
-        self.info_btn.clicked.connect(lambda: self._switch_tab(tabs, 5))
+        self.requirements_btn.clicked.connect(lambda: self._switch_tab(tabs, 5))
+        self.info_btn.clicked.connect(lambda: self._switch_tab(tabs, 6))
         
         # Set Home as default
         self.home_btn.setChecked(True)
@@ -511,7 +518,7 @@ class MainWindow(QMainWindow):
         tab_widget.setCurrentIndex(index)
         
         # Update button checked states
-        buttons = [self.home_btn, self.train_btn, self.download_btn, self.test_btn, self.logs_btn, self.info_btn]
+        buttons = [self.home_btn, self.train_btn, self.download_btn, self.test_btn, self.logs_btn, self.requirements_btn, self.info_btn]
         for i, btn in enumerate(buttons):
             btn.setChecked(i == index)
     
@@ -582,12 +589,17 @@ class MainWindow(QMainWindow):
         """Handle installation completion"""
         if success:
             self.install_log.appendPlainText("\n✅ Installation completed successfully!")
-            QMessageBox.information(
+            reply = QMessageBox.information(
                 self,
                 "Installation Complete",
                 "✅ Installation completed successfully!\n\n"
-                "Please restart the application for changes to take effect."
+                "The application will restart automatically when you click OK.",
+                QMessageBox.Ok
             )
+            
+            # Restart application after user clicks OK
+            if reply == QMessageBox.Ok:
+                self._restart_application()
         else:
             self.install_log.appendPlainText("\n❌ Installation failed!")
             QMessageBox.critical(
@@ -601,6 +613,28 @@ class MainWindow(QMainWindow):
         if hasattr(self, 'install_pytorch_btn'):
             self.install_pytorch_btn.setEnabled(True)
             self.install_pytorch_btn.setText("Install CUDA Version")
+    
+    def _restart_application(self):
+        """Restart the application"""
+        import sys
+        import os
+        from pathlib import Path
+        
+        # Get the path to launcher.exe
+        app_dir = Path(__file__).parent.parent
+        launcher_exe = app_dir / "launcher.exe"
+        
+        if launcher_exe.exists():
+            # Launch using launcher.exe
+            import subprocess
+            subprocess.Popen([str(launcher_exe)], cwd=str(app_dir))
+        else:
+            # Fallback: restart with python
+            python = sys.executable
+            subprocess.Popen([python, "-m", "desktop_app.main"], cwd=str(app_dir))
+        
+        # Close current instance
+        QApplication.quit()
     
     def _toggle_theme(self) -> None:
         """Toggle between dark and light themes"""
@@ -2643,6 +2677,122 @@ class MainWindow(QMainWindow):
         self.test_prompt.clear()
 
     # ---------------- Info/About tab ----------------
+    def _build_requirements_tab(self) -> QWidget:
+        """Build Requirements tab with hardcoded package list"""
+        w = QWidget()
+        layout = QVBoxLayout(w)
+        layout.setContentsMargins(40, 30, 40, 30)
+        layout.setSpacing(20)
+        
+        # Title
+        title = QLabel("<h1>🔧 Required Packages & Versions</h1>")
+        title.setAlignment(Qt.AlignCenter)
+        layout.addWidget(title)
+        
+        # Info text
+        info = QLabel("These are the exact package versions used by this application:")
+        info.setAlignment(Qt.AlignCenter)
+        info.setStyleSheet("color: #888; font-size: 11pt; margin-bottom: 20px;")
+        layout.addWidget(info)
+        
+        # Package list in scrollable area
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        
+        content = QWidget()
+        content_layout = QVBoxLayout(content)
+        content_layout.setSpacing(15)
+        
+        # Hardcoded requirements from requirements.txt
+        requirements = {
+            "Core ML Libraries": [
+                ("numpy", "<2", "Pinned for Windows/PyTorch compatibility"),
+                ("transformers", "==4.46.3", "Pinned for unsloth 2025.12.x compatibility"),
+                ("accelerate", ">=0.18.0", "Distributed training"),
+                ("datasets", ">=2.11.0", "Dataset loading"),
+                ("peft", ">=0.3.0", "LoRA and efficient training"),
+                ("safetensors", ">=0.3.0", "Safe model serialization"),
+            ],
+            "Tokenization": [
+                ("sentencepiece", ">=0.1.98", "Text tokenization"),
+                ("tokenizers", ">=0.13.2", "Fast tokenizers"),
+            ],
+            "Quantization & Optimization": [
+                ("bitsandbytes", ">=0.39.0", "4-bit/8-bit quantization (Python 3.8+)"),
+            ],
+            "Utilities": [
+                ("evaluate", ">=0.4.0", "Model evaluation metrics"),
+                ("filelock", ">=3.0.0", "File locking"),
+                ("tqdm", ">=4.60.0", "Progress bars"),
+            ],
+            "GUI & Visualization": [
+                ("streamlit", ">=1.28.0", "Web interface (optional)"),
+                ("pandas", ">=2.0.0", "Data manipulation"),
+                ("PySide6", ">=6.6.0", "Qt desktop GUI"),
+            ],
+            "Hugging Face Integration": [
+                ("huggingface_hub", ">=0.36.0", "Model download/upload"),
+            ],
+            "Vision Model Support": [
+                ("psutil", ">=5.9.0", "System monitoring"),
+                ("timm", ">=0.9.0", "Vision models"),
+                ("einops", ">=0.6.0", "Tensor operations"),
+                ("open-clip-torch", ">=2.20.0", "CLIP models"),
+                ("Pillow", "", "Image processing"),
+            ],
+            "PyTorch Ecosystem (SmartInstaller)": [
+                ("torch", "==2.5.1+cu118", "Deep learning framework (CUDA 11.8)"),
+                ("torchvision", "==0.20.1+cu118", "Computer vision"),
+                ("torchaudio", "==2.5.1+cu118", "Audio processing"),
+                ("triton-windows", "==3.5.1.post22", "GPU programming (Windows)"),
+            ],
+            "Fast Fine-tuning": [
+                ("unsloth", "2025.12.9", "2x faster LLM fine-tuning"),
+                ("unsloth_zoo", "2025.12.7", "Unsloth model patches"),
+            ],
+        }
+        
+        for category, packages in requirements.items():
+            # Category header
+            cat_label = QLabel(f"<h3 style='color: #667eea;'>{category}</h3>")
+            content_layout.addWidget(cat_label)
+            
+            # Packages in this category
+            for pkg_name, version, description in packages:
+                pkg_frame = QFrame()
+                pkg_frame.setFrameShape(QFrame.StyledPanel)
+                pkg_frame.setStyleSheet("""
+                    QFrame {
+                        background: rgba(60, 60, 80, 0.3);
+                        border: 1px solid #555;
+                        border-radius: 6px;
+                        padding: 8px;
+                    }
+                """)
+                pkg_layout = QVBoxLayout(pkg_frame)
+                pkg_layout.setSpacing(4)
+                
+                # Package name and version
+                name_ver = QLabel(f"<b>{pkg_name}</b> {version}")
+                name_ver.setStyleSheet("font-size: 12pt; color: #4CAF50;")
+                pkg_layout.addWidget(name_ver)
+                
+                # Description
+                if description:
+                    desc = QLabel(description)
+                    desc.setStyleSheet("font-size: 10pt; color: #aaa;")
+                    desc.setWordWrap(True)
+                    pkg_layout.addWidget(desc)
+                
+                content_layout.addWidget(pkg_frame)
+        
+        content_layout.addStretch(1)
+        scroll.setWidget(content)
+        layout.addWidget(scroll)
+        
+        return w
+    
     def _build_info_tab(self) -> QWidget:
         w = QWidget()
         layout = QVBoxLayout(w)
@@ -2717,12 +2867,12 @@ class MainWindow(QMainWindow):
         license_inner.addWidget(license_title)
         
         license_text = QLabel("""
-<p style="line-height: 1.3; font-size: 12pt;">
+<p style="line-height: 1.3; font-size: 10pt;">
 This application uses the following open-source libraries and tools:
 </p>
 
-<h3 style="color: #667eea; margin-top: 12px;">Core Libraries</h3>
-<ul style="line-height: 1.4;">
+<h3 style="color: #667eea; margin-top: 12px; font-size: 12pt;">Core Libraries</h3>
+<ul style="line-height: 1.4; font-size: 10pt;">
 <li><b>Python 3.10+</b> - PSF License</li>
 <li><b>PySide6 (Qt for Python)</b> - LGPL v3<br>
     <span style="color: #888;">GUI framework</span></li>
@@ -2734,8 +2884,8 @@ This application uses the following open-source libraries and tools:
     <span style="color: #888;">Fast LLM fine-tuning</span></li>
 </ul>
 
-<h3 style="color: #667eea; margin-top: 12px;">Training & Data</h3>
-<ul style="line-height: 1.4;">
+<h3 style="color: #667eea; margin-top: 12px; font-size: 12pt;">Training & Data</h3>
+<ul style="line-height: 1.4; font-size: 10pt;">
 <li><b>TRL</b> - Apache 2.0<br>
     <span style="color: #888;">SFTTrainer for supervised fine-tuning</span></li>
 <li><b>Datasets</b> - Apache 2.0<br>
@@ -2746,8 +2896,8 @@ This application uses the following open-source libraries and tools:
     <span style="color: #888;">4-bit/8-bit quantization</span></li>
 </ul>
 
-<h3 style="color: #667eea; margin-top: 12px;">Acceleration</h3>
-<ul style="line-height: 1.4;">
+<h3 style="color: #667eea; margin-top: 12px; font-size: 12pt;">Acceleration</h3>
+<ul style="line-height: 1.4; font-size: 10pt;">
 <li><b>xFormers</b> - BSD (Meta)<br>
     <span style="color: #888;">Memory-efficient attention</span></li>
 <li><b>CUDA Toolkit 12.4</b> - NVIDIA EULA<br>
@@ -2756,8 +2906,8 @@ This application uses the following open-source libraries and tools:
     <span style="color: #888;">GPU programming</span></li>
 </ul>
 
-<h3 style="color: #667eea; margin-top: 12px;">Utilities</h3>
-<ul style="line-height: 1.4;">
+<h3 style="color: #667eea; margin-top: 12px; font-size: 12pt;">Utilities</h3>
+<ul style="line-height: 1.4; font-size: 10pt;">
 <li><b>huggingface_hub</b> - Apache 2.0</li>
 <li><b>psutil</b> - BSD-3-Clause</li>
 <li><b>pandas</b> - BSD-3-Clause</li>
