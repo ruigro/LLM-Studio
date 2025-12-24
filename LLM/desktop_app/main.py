@@ -691,18 +691,31 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(40, 30, 40, 30)
         layout.setSpacing(20)
         
-        # Welcome title
+        # Welcome title with 12px top and bottom margin
         title = QLabel("<h1>Welcome to LLM Fine-tuning Studio</h1>")
         title.setAlignment(Qt.AlignCenter)
+        title.setContentsMargins(0, 12, 0, 12)
         layout.addWidget(title)
         
-        # Create 2-column layout with SPLITTER for true equal sizing
+        # Create 2-column layout with SPLITTER (40/60 split)
         splitter = QSplitter(Qt.Horizontal)
         
-        # LEFT: Features
+        # LEFT: Features (40% width) - wrapped in styled container
+        left_container = QFrame()
+        left_container.setFrameShape(QFrame.StyledPanel)
+        left_container.setStyleSheet("""
+            QFrame {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 rgba(60, 60, 80, 0.4), stop:1 rgba(40, 40, 60, 0.4));
+                border: 2px solid #667eea;
+                border-radius: 12px;
+                padding: 15px;
+            }
+        """)
         left_widget = QWidget()
         left_layout = QVBoxLayout(left_widget)
         left_layout.setSpacing(15)
+        left_layout.setContentsMargins(0, 0, 0, 0)
         
         left_layout.addWidget(QLabel("<h2>🚀 Features</h2>"))
         
@@ -739,19 +752,35 @@ class MainWindow(QMainWindow):
         
         left_layout.addStretch(1)
         
-        # Add left to splitter
+        # Put left_widget inside container
+        left_container_layout = QVBoxLayout(left_container)
+        left_container_layout.setContentsMargins(0, 0, 0, 0)
+        left_container_layout.addWidget(left_widget)
+        
+        # Add left container to splitter
         left_scroll = QScrollArea()
         left_scroll.setWidgetResizable(True)
         left_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         left_scroll.setFrameShape(QFrame.NoFrame)
-        left_scroll.setWidget(left_widget)
+        left_scroll.setWidget(left_container)
         splitter.addWidget(left_scroll)
         
-        # RIGHT: System Status (scrollable to prevent clipping when fonts are larger)
+        # RIGHT: System Status (60% width) - wrapped in styled container
+        right_container = QFrame()
+        right_container.setFrameShape(QFrame.StyledPanel)
+        right_container.setStyleSheet("""
+            QFrame {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 rgba(60, 60, 80, 0.4), stop:1 rgba(40, 40, 60, 0.4));
+                border: 2px solid #667eea;
+                border-radius: 12px;
+                padding: 15px;
+            }
+        """)
         right_widget = QWidget()
         right_layout = QVBoxLayout(right_widget)
         right_layout.setSpacing(8)  # Tighter spacing
-        right_layout.setContentsMargins(5, 5, 5, 5)  # Tighter margins
+        right_layout.setContentsMargins(0, 0, 0, 0)
 
         right_layout.addWidget(QLabel("<h2>📊 System Status</h2>"))
 
@@ -1016,25 +1045,31 @@ class MainWindow(QMainWindow):
 
         right_layout.addWidget(setup_frame)
         right_layout.addStretch(1)
+        
+        # Put right_widget inside container
+        right_container_layout = QVBoxLayout(right_container)
+        right_container_layout.setContentsMargins(0, 0, 0, 0)
+        right_container_layout.addWidget(right_widget)
 
         right_scroll = QScrollArea()
         right_scroll.setWidgetResizable(True)
         right_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         right_scroll.setFrameShape(QFrame.NoFrame)
-        right_scroll.setWidget(right_widget)
+        right_scroll.setWidget(right_container)
         splitter.addWidget(right_scroll)
         
-        # Set equal stretch factors (50/50 split)
-        splitter.setStretchFactor(0, 1)
-        splitter.setStretchFactor(1, 1)
+        # Set stretch factors (40/60 split)
+        splitter.setStretchFactor(0, 2)  # Left: 40% (2 parts)
+        splitter.setStretchFactor(1, 3)  # Right: 60% (3 parts)
         
-        # Apply exact 50/50 split after window is shown
-        def _apply_equal_split():
+        # Apply exact 40/60 split after window is shown
+        def _apply_split():
             w = splitter.width() or 1200
-            half = w // 2
-            splitter.setSizes([half, half])
+            left_size = int(w * 0.4)
+            right_size = int(w * 0.6)
+            splitter.setSizes([left_size, right_size])
         
-        QTimer.singleShot(0, _apply_equal_split)
+        QTimer.singleShot(0, _apply_split)
         
         layout.addWidget(splitter)
         
