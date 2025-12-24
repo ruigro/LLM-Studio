@@ -836,7 +836,7 @@ class MainWindow(QMainWindow):
         error_message = None
         
         import pkg_resources
-        required_packages = ['unsloth', 'transformers', 'accelerate', 'peft', 'datasets']
+        required_packages = ['unsloth', 'transformers', 'accelerate', 'peft', 'datasets', 'Pillow']
         
         for pkg in required_packages:
             try:
