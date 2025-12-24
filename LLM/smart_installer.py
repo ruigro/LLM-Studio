@@ -782,7 +782,7 @@ if errorlevel 1 (
         if result.returncode != 0:
             self.log(f"Repair warning: PySide6 installation failed: {result.stderr[:500]}")
         else:
-            self.log("✅ PySide6 installed successfully")
+            self.log("OK: PySide6 installed successfully")
         
         self.log("Repair: Reinstalling PyTorch + Triton...")
         if not self.install_pytorch(python_executable=python_executable):
