@@ -739,8 +739,9 @@ class MainWindow(QMainWindow):
         left_container = QFrame()
         left_container.setFrameShape(QFrame.StyledPanel)
         left_container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        left_container.setObjectName("leftColumnContainer")  # Give it a unique name
         left_container.setStyleSheet("""
-            QFrame {
+            QFrame#leftColumnContainer {
                 background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
                     stop:0 rgba(60, 60, 80, 0.4), stop:1 rgba(40, 40, 60, 0.4));
                 border: 2px solid #667eea;
@@ -796,8 +797,9 @@ class MainWindow(QMainWindow):
         right_container = QFrame()
         right_container.setFrameShape(QFrame.StyledPanel)
         right_container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        right_container.setObjectName("rightColumnContainer")  # Give it a unique name
         right_container.setStyleSheet("""
-            QFrame {
+            QFrame#rightColumnContainer {
                 background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
                     stop:0 rgba(60, 60, 80, 0.4), stop:1 rgba(40, 40, 60, 0.4));
                 border: 2px solid #667eea;
@@ -814,6 +816,7 @@ class MainWindow(QMainWindow):
 
         # System info cards
         sys_frame = QWidget()
+        sys_frame.setStyleSheet("background: transparent; border: none;")  # Explicitly no styling
         sys_layout = QVBoxLayout(sys_frame)
         sys_layout.setSpacing(6)  # Tighter spacing
         sys_layout.setContentsMargins(10, 8, 10, 8)  # Tighter margins
@@ -866,6 +869,7 @@ class MainWindow(QMainWindow):
         right_layout.addWidget(QLabel("<h2>⚙️ Software Requirements & Setup</h2>"))
 
         setup_frame = QWidget()
+        setup_frame.setStyleSheet("background: transparent; border: none;")  # Explicitly no styling
         setup_layout = QVBoxLayout(setup_frame)
         setup_layout.setSpacing(8)
         setup_layout.setContentsMargins(10, 10, 10, 10)
