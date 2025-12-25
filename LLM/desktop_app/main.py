@@ -812,9 +812,16 @@ class MainWindow(QMainWindow):
         # System Status section
         right_layout.addWidget(QLabel("<h2>📊 System Status</h2>"))
 
+        # System info cards
+        sys_frame = QFrame()
+        sys_frame.setFrameShape(QFrame.StyledPanel)
+        sys_layout = QVBoxLayout(sys_frame)
+        sys_layout.setSpacing(6)  # Tighter spacing
+        sys_layout.setContentsMargins(10, 8, 10, 8)  # Tighter margins
+
         refresh_btn = QPushButton("🔄 Refresh GPU Detection")
         refresh_btn.setMaximumWidth(200)  # Compact button
-        right_layout.addWidget(refresh_btn)
+        sys_layout.addWidget(refresh_btn)
 
         # Get real GPU info
         cuda_info = self.system_info.get("cuda", {})
@@ -823,7 +830,7 @@ class MainWindow(QMainWindow):
         if gpus:
             gpu_status = QLabel(f"✅ <b>{len(gpus)} GPU{'s' if len(gpus) > 1 else ''} detected</b>")
             gpu_status.setStyleSheet("color: #4CAF50; font-weight: bold;")
-            right_layout.addWidget(gpu_status)
+            sys_layout.addWidget(gpu_status)
             
             # Display each GPU
             for idx, gpu in enumerate(gpus):
@@ -836,14 +843,14 @@ class MainWindow(QMainWindow):
                 gpu_row.addStretch(1)
                 gpu_mem_label = QLabel(f"💾 <b>{gpu_mem}</b>")
                 gpu_row.addWidget(gpu_mem_label)
-                right_layout.addLayout(gpu_row)
+                sys_layout.addLayout(gpu_row)
         else:
             gpu_status = QLabel("⚠️ <b>No GPUs detected</b>")
             gpu_status.setStyleSheet("color: #FF9800; font-weight: bold;")
-            right_layout.addWidget(gpu_status)
-            right_layout.addWidget(QLabel("Training will use CPU (slower)"))
+            sys_layout.addWidget(gpu_status)
+            sys_layout.addWidget(QLabel("Training will use CPU (slower)"))
 
-        right_layout.addWidget(QLabel("<hr>"))
+        sys_layout.addWidget(QLabel("<hr>"))
 
         # Status - compact single line
         status_row = QHBoxLayout()
@@ -852,10 +859,18 @@ class MainWindow(QMainWindow):
         status_val = QLabel("<span style='font-size: 16pt; font-weight: bold; color: #4CAF50;'>Ready</span>")
         status_row.addWidget(status_val)
         status_row.addStretch(1)
-        right_layout.addLayout(status_row)
+        sys_layout.addLayout(status_row)
+
+        right_layout.addWidget(sys_frame)
         
         # Software Requirements section
         right_layout.addWidget(QLabel("<h2>⚙️ Software Requirements & Setup</h2>"))
+
+        setup_frame = QFrame()
+        setup_frame.setFrameShape(QFrame.StyledPanel)
+        setup_layout = QVBoxLayout(setup_frame)
+        setup_layout.setSpacing(8)
+        setup_layout.setContentsMargins(10, 10, 10, 10)
         
         # Check each requirement
         python_info = self.system_info.get("python", {})
@@ -868,7 +883,7 @@ class MainWindow(QMainWindow):
             python_info.get("found", False),
             f"Version {python_info.get('version', 'N/A')}" if python_info.get("found") else "Not found"
         )
-        right_layout.addLayout(python_status)
+        setup_layout.addLayout(python_status)
         
         # PyTorch status with install button
         pytorch_ok = pytorch_info.get("found", False) and pytorch_info.get("cuda_available", False)
@@ -898,7 +913,7 @@ class MainWindow(QMainWindow):
         # We intentionally do NOT show a separate PyTorch button here.
         # Use the single "Fix Issues" button (below) to repair everything deterministically.
         
-        right_layout.addLayout(pytorch_row)
+        setup_layout.addLayout(pytorch_row)
         
         # CUDA drivers status
         cuda_status = self._create_status_row(
@@ -906,7 +921,7 @@ class MainWindow(QMainWindow):
             cuda_info.get("found", False),
             f"Version {cuda_info.get('driver_version', 'N/A')}" if cuda_info.get("found") else "Not found"
         )
-        right_layout.addLayout(cuda_status)
+        setup_layout.addLayout(cuda_status)
         
         # Dependencies status with install button
         deps_row = QHBoxLayout()
@@ -1034,9 +1049,9 @@ class MainWindow(QMainWindow):
                 }
             """)
             fix_btn.clicked.connect(self._install_dependencies)
-            right_layout.addWidget(fix_btn)
+            setup_layout.addWidget(fix_btn)
         
-        right_layout.addLayout(deps_row)
+        setup_layout.addLayout(deps_row)
         
         # Installation log area (hidden by default)
         self.install_log = QPlainTextEdit()
@@ -1053,7 +1068,9 @@ class MainWindow(QMainWindow):
                 border-radius: 4px;
             }
         """)
-        right_layout.addWidget(self.install_log)
+        setup_layout.addWidget(self.install_log)
+        
+        right_layout.addWidget(setup_frame)
         right_layout.addStretch(1)
         
         # Add right container with 60% stretch (3 parts out of 5 total = 60%)
