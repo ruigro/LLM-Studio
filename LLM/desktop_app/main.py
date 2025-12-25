@@ -9,7 +9,7 @@ from PySide6.QtWidgets import (
     QLabel, QLineEdit, QPushButton, QFileDialog, QComboBox, QTextEdit, QPlainTextEdit,
     QSpinBox, QDoubleSpinBox, QMessageBox, QListWidget, QListWidgetItem, QSplitter, QToolBar, QScrollArea, QGridLayout, QFrame, QProgressBar, QSizePolicy, QTabBar, QStyleOptionTab, QStyle, QStackedWidget
 )
-from PySide6.QtGui import QAction, QIcon, QFont
+from PySide6.QtGui import QAction, QIcon, QFont, QMouseEvent, QCursor
 
 from desktop_app.model_card_widget import ModelCard, DownloadedModelCard
 from desktop_app.training_widgets import MetricCard
@@ -59,7 +59,10 @@ class InstallerThread(QThread):
                 success = installer.install_dependencies()
             elif self.install_type == "repair":
                 self.log_output.emit("Starting repair process...")
-                success = installer.repair_all()
+                # Use the current Python executable (should be venv Python if running from venv)
+                python_exe = sys.executable
+                self.log_output.emit(f"Using Python: {python_exe}")
+                success = installer.repair_all(python_executable=python_exe)
                 self.log_output.emit(f"Repair completed with result: {success}")
             else:  # "all"
                 success = installer.install()
@@ -114,7 +117,13 @@ class DownloadThread(QThread):
 
 # Dark theme stylesheet with gradient accents
 DARK_THEME = """
-QMainWindow, QWidget {
+QMainWindow {
+    background-color: #0e1117;
+    color: #fafafa;
+    border: 2px solid #667eea;
+    border-radius: 12px;
+}
+QWidget {
     background-color: #0e1117;
     color: #fafafa;
 }
@@ -181,7 +190,13 @@ QToolBar {
 
 # Light theme stylesheet with gradient accents
 LIGHT_THEME = """
-QMainWindow, QWidget {
+QMainWindow {
+    background-color: #ffffff;
+    color: #262730;
+    border: 2px solid #667eea;
+    border-radius: 12px;
+}
+QWidget {
     background-color: #ffffff;
     color: #262730;
 }
@@ -241,12 +256,23 @@ QToolBar {
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
+        # Remove native Windows title bar but keep window resizable
+        self.setWindowFlags(Qt.FramelessWindowHint | Qt.Window | Qt.WindowMinMaxButtonsHint)
         self.setWindowTitle(APP_TITLE)
         self.resize(1400, 900)
         self.setMinimumSize(800, 600)  # Allow resizing with reasonable minimum
 
         self.root = get_app_root()
         self.dark_mode = True  # Start in dark mode
+        
+        # Window dragging and resizing support
+        self.drag_position = None
+        self.resize_edge = None  # Track which edge is being resized
+        self.resize_start_pos = None
+        self.resize_start_geometry = None
+        self.edge_margin = 8  # Pixels from edge to trigger resize (increased for easier detection)
+        self.cursor_override_active = False  # Track if we have an override cursor active
+        self.current_cursor_shape = None  # Track current cursor shape to avoid unnecessary changes
         
         # Model integrity checker
         self.model_checker = ModelIntegrityChecker()
@@ -255,15 +281,25 @@ class MainWindow(QMainWindow):
         self.system_info = SystemDetector().detect_all()
 
         # Create a beautiful unified header
-        header_widget = QWidget()
+        header_widget = QFrame()
+        header_widget.setFrameShape(QFrame.StyledPanel)
         header_widget.setMinimumHeight(80)
         header_widget.setStyleSheet("""
-            QWidget {
+            QFrame {
                 background: qlineargradient(x1:0, y1:0, x2:1, y2:0, 
                     stop:0 #667eea, stop:0.5 #764ba2, stop:1 #f093fb);
-                border: none;
+                border: 2px solid #667eea;
+                border-radius: 12px;
+                padding: 15px;
             }
         """)
+        # Store header reference for dragging
+        self.header_widget = header_widget
+        # Make header draggable
+        header_widget.mousePressEvent = lambda e: self._header_mouse_press(e)
+        header_widget.mouseMoveEvent = lambda e: self._header_mouse_move(e)
+        # Install event filter on header to catch top edge resize events
+        header_widget.installEventFilter(self)
         
         header_layout = QHBoxLayout(header_widget)
         header_layout.setContentsMargins(20, 10, 20, 10)
@@ -274,17 +310,19 @@ class MainWindow(QMainWindow):
         theme_btn.setMinimumHeight(50)
         theme_btn.setStyleSheet("""
             QPushButton {
-                background: rgba(255, 255, 255, 0.2);
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 rgba(60, 60, 80, 0.6), stop:1 rgba(40, 40, 60, 0.6));
                 color: white;
-                border: 2px solid rgba(255, 255, 255, 0.3);
-                border-radius: 25px;
+                border: 2px solid rgba(255, 255, 255, 0.4);
+                border-radius: 12px;
                 padding: 10px 20px;
                 font-size: 14pt;
                 font-weight: bold;
             }
             QPushButton:hover {
-                background: rgba(255, 255, 255, 0.3);
-                border: 2px solid rgba(255, 255, 255, 0.5);
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 rgba(80, 80, 100, 0.7), stop:1 rgba(60, 60, 80, 0.7));
+                border: 2px solid rgba(255, 255, 255, 0.6);
             }
         """)
         theme_btn.clicked.connect(self._toggle_theme)
@@ -295,11 +333,14 @@ class MainWindow(QMainWindow):
         title_label = QLabel(APP_TITLE)
         title_label.setAlignment(Qt.AlignCenter)
         title_label.setStyleSheet("""
-            background: transparent;
-            color: white; 
-            font-size: 24pt; 
-            font-weight: bold;
-            border: none;
+            QLabel {
+                background: transparent;
+                color: white; 
+                font-size: 24pt; 
+                font-weight: bold;
+                border: none;
+                padding: 0px;
+            }
         """)
         header_layout.addWidget(title_label, 1)
         
@@ -352,6 +393,29 @@ class MainWindow(QMainWindow):
         sys_info_layout.addWidget(ram_label)
         
         header_layout.addWidget(sys_info_widget)
+        
+        # Close button (X) in top right
+        close_btn = QPushButton("❌")
+        close_btn.setFixedSize(30, 30)
+        close_btn.setStyleSheet("""
+            QPushButton {
+                background: transparent;
+                color: #f44336;
+                border: none;
+                font-size: 16pt;
+                font-weight: bold;
+                padding: 0px;
+            }
+            QPushButton:hover {
+                background: rgba(244, 67, 54, 0.2);
+                border-radius: 4px;
+            }
+            QPushButton:pressed {
+                background: rgba(244, 67, 54, 0.3);
+            }
+        """)
+        close_btn.clicked.connect(self.close)
+        header_layout.addWidget(close_btn)
         
         # Create main layout
         main_widget = QWidget()
@@ -445,7 +509,29 @@ class MainWindow(QMainWindow):
         tabs.setCurrentIndex(0)
 
         main_layout.addWidget(tabs)
-        self.setCentralWidget(main_widget)
+        
+        # Wrap main widget in a bordered container to create window border effect
+        border_container = QFrame()
+        border_container.setFrameShape(QFrame.NoFrame)
+        border_container.setObjectName("windowBorderContainer")
+        border_container.setStyleSheet("""
+            QFrame#windowBorderContainer {
+                background: transparent;
+                border: 2px solid #667eea;
+                border-radius: 12px;
+            }
+        """)
+        border_layout = QVBoxLayout(border_container)
+        border_layout.setContentsMargins(2, 2, 2, 2)  # Small margin for border visibility
+        border_layout.setSpacing(0)
+        border_layout.addWidget(main_widget)
+        
+        self.setCentralWidget(border_container)
+        
+        # Install event filter on central widget and main widget to catch mouse events for resizing
+        # This allows us to intercept mouse events at the window edges even when child widgets would normally consume them
+        border_container.installEventFilter(self)
+        main_widget.installEventFilter(self)
 
         self.train_proc: QProcess | None = None
         
@@ -468,13 +554,13 @@ class MainWindow(QMainWindow):
         color = "#4CAF50" if is_ok else "#f44336"
         
         main_label = QLabel(f"{status_icon} <b>{label}</b>")
-        main_label.setStyleSheet(f"color: {color};")
+        main_label.setStyleSheet(f"background: transparent; color: {color};")
         row.addWidget(main_label)
         
         row.addStretch(1)
         
         detail_label = QLabel(detail)
-        detail_label.setStyleSheet("color: #888; font-size: 10pt;")
+        detail_label.setStyleSheet("background: transparent; color: #888; font-size: 10pt;")
         row.addWidget(detail_label)
         
         return row
@@ -489,19 +575,19 @@ class MainWindow(QMainWindow):
         color = "#4CAF50" if is_ok else "#f44336"
         
         main_label = QLabel(f"{status_icon} <b>{label}</b>")
-        main_label.setStyleSheet(f"color: {color};")
+        main_label.setStyleSheet(f"background: transparent; color: {color};")
         layout.addWidget(main_label)
         
         layout.addStretch(1)
         
         detail_label = QLabel(detail)
-        detail_label.setStyleSheet("color: #888; font-size: 10pt;")
+        detail_label.setStyleSheet("background: transparent; color: #888; font-size: 10pt;")
         layout.addWidget(detail_label)
         
         return widget
     
     def _auto_check_system(self):
-        """Auto-run system diagnostics on startup"""
+        """Auto-run system diagnostics on startup with automatic retry for CUDA"""
         # Re-detect system info
         self.system_info = SystemDetector().detect_all()
         
@@ -516,14 +602,397 @@ class MainWindow(QMainWindow):
         
         cuda_info = self.system_info.get('cuda', {})
         if cuda_info.get('found'):
-            print(f"CUDA: {cuda_info.get('cuda_version', 'N/A')} (Driver: {cuda_info.get('driver_version', 'N/A')})")
+            print(f"CUDA: {cuda_info.get('version', 'N/A')} (Driver: {cuda_info.get('driver_version', 'N/A')})")
             gpus = cuda_info.get('gpus', [])
             for idx, gpu in enumerate(gpus):
                 print(f"  GPU {idx}: {gpu.get('name', 'Unknown')} ({gpu.get('memory', 'Unknown')})")
         else:
             print("CUDA: Not found")
+            # If CUDA detection failed, retry once after 2 seconds
+            print("CUDA detection failed on first attempt, retrying in 2 seconds...")
+            QTimer.singleShot(2000, self._retry_cuda_detection)
         
         print("=========================\n")
+    
+    def _retry_cuda_detection(self):
+        """Retry CUDA detection after initial failure"""
+        print("=== CUDA Detection Retry ===")
+        detector = SystemDetector()
+        cuda_result = detector.detect_cuda()
+        
+        # Update system_info with new CUDA detection
+        self.system_info["cuda"] = cuda_result
+        
+        if cuda_result.get('found'):
+            print(f"✅ CUDA detected on retry: {cuda_result.get('version', 'N/A')}")
+            gpus = cuda_result.get('gpus', [])
+            if gpus:
+                for idx, gpu in enumerate(gpus):
+                    print(f"  GPU {idx}: {gpu.get('name', 'Unknown')} ({gpu.get('memory', 'Unknown')})")
+            # Rebuild Home tab to show updated status
+            current_index = self.tabs.currentIndex()
+            self.tabs.removeTab(0)
+            self.tabs.insertTab(0, self._build_home_tab(), "🏠 Home")
+            if current_index == 0:
+                self.tabs.setCurrentIndex(0)
+        else:
+            print("❌ CUDA still not detected after retry")
+            if cuda_result.get('error'):
+                print(f"   Error: {cuda_result['error']}")
+            if cuda_result.get('warnings'):
+                for warning in cuda_result['warnings']:
+                    print(f"   Warning: {warning}")
+        
+        print("===========================\n")
+    
+    def _refresh_gpu_detection(self):
+        """Refresh GPU/CUDA detection and update the Home tab"""
+        # Get the sender button if available
+        sender = self.sender()
+        if isinstance(sender, QPushButton):
+            sender.setEnabled(False)
+            sender.setText("🔄 Refreshing...")
+            sender.repaint()  # Force UI update
+        
+        # Re-detect system info
+        try:
+            self.system_info = SystemDetector().detect_all()
+            cuda_info = self.system_info.get("cuda", {})
+            
+            # Show success message
+            if cuda_info.get("found"):
+                gpus = cuda_info.get("gpus", [])
+                if gpus:
+                    msg = f"✅ {len(gpus)} GPU(s) detected"
+                else:
+                    msg = "⚠️ CUDA toolkit found but no GPUs detected"
+            else:
+                msg = "❌ CUDA not detected"
+            
+            # Rebuild Home tab to show updated info
+            current_index = self.tabs.currentIndex()
+            self.tabs.removeTab(0)
+            self.tabs.insertTab(0, self._build_home_tab(), "🏠 Home")
+            if current_index == 0:
+                self.tabs.setCurrentIndex(0)
+            
+            # Show brief status message
+            print(f"GPU Detection Refresh: {msg}")
+            
+        except Exception as e:
+            print(f"Error refreshing GPU detection: {e}")
+            # Button will be recreated when tab is rebuilt, so no need to restore state
+    
+    def _get_resize_edge(self, pos) -> str:
+        """Determine which edge the mouse is near for resizing"""
+        rect = self.rect()
+        x, y = pos.x(), pos.y()
+        w, h = rect.width(), rect.height()
+        
+        # Check corners first (for diagonal resize)
+        if x <= self.edge_margin and y <= self.edge_margin:
+            return "top-left"
+        elif x >= w - self.edge_margin and y <= self.edge_margin:
+            return "top-right"
+        elif x <= self.edge_margin and y >= h - self.edge_margin:
+            return "bottom-left"
+        elif x >= w - self.edge_margin and y >= h - self.edge_margin:
+            return "bottom-right"
+        # Check edges
+        elif x <= self.edge_margin:
+            return "left"
+        elif x >= w - self.edge_margin:
+            return "right"
+        elif y <= self.edge_margin:
+            return "top"
+        elif y >= h - self.edge_margin:
+            return "bottom"
+        return None
+    
+    def mousePressEvent(self, event: QMouseEvent) -> None:
+        """Handle mouse press for window resizing"""
+        if event.button() == Qt.LeftButton:
+            edge = self._get_resize_edge(event.position().toPoint())
+            if edge:
+                self.resize_edge = edge
+                self.resize_start_pos = event.globalPosition().toPoint()
+                self.resize_start_geometry = self.geometry()
+                event.accept()
+                return
+        super().mousePressEvent(event)
+    
+    def mouseMoveEvent(self, event: QMouseEvent) -> None:
+        """Handle mouse move for window resizing and cursor changes"""
+        pos = event.position().toPoint()
+        global_pos = event.globalPosition().toPoint()
+        
+        # If resizing, handle resize using global coordinates
+        if self.resize_edge and event.buttons() == Qt.LeftButton:
+            if self.resize_start_pos and self.resize_start_geometry:
+                # Use global position delta for accurate resize
+                delta = global_pos - self.resize_start_pos
+                geom = QRect(self.resize_start_geometry)
+                
+                if "left" in self.resize_edge:
+                    new_x = geom.x() + delta.x()
+                    new_width = geom.width() - delta.x()
+                    if new_width >= self.minimumWidth():
+                        geom.setX(new_x)
+                        geom.setWidth(new_width)
+                if "right" in self.resize_edge:
+                    new_width = geom.width() + delta.x()
+                    if new_width >= self.minimumWidth():
+                        geom.setWidth(new_width)
+                if "top" in self.resize_edge:
+                    new_y = geom.y() + delta.y()
+                    new_height = geom.height() - delta.y()
+                    if new_height >= self.minimumHeight():
+                        geom.setY(new_y)
+                        geom.setHeight(new_height)
+                if "bottom" in self.resize_edge:
+                    new_height = geom.height() + delta.y()
+                    if new_height >= self.minimumHeight():
+                        geom.setHeight(new_height)
+                
+                self.setGeometry(geom)
+                # Update start position for next move to prevent accumulation
+                self.resize_start_pos = global_pos
+                self.resize_start_geometry = geom
+                event.accept()
+                return
+        
+        # Always check cursor on mouse move (even when not resizing)
+        edge = self._get_resize_edge(pos)
+        if edge:
+            cursor_shape = None
+            if edge in ["top-left", "bottom-right"]:
+                cursor_shape = Qt.SizeFDiagCursor
+            elif edge in ["top-right", "bottom-left"]:
+                cursor_shape = Qt.SizeBDiagCursor
+            elif edge in ["left", "right"]:
+                cursor_shape = Qt.SizeHorCursor
+            elif edge in ["top", "bottom"]:
+                cursor_shape = Qt.SizeVerCursor
+            
+            # Only change cursor if it's different from current
+            if cursor_shape and cursor_shape != self.current_cursor_shape:
+                if self.cursor_override_active:
+                    # Change existing override instead of restoring and setting new one
+                    QApplication.changeOverrideCursor(QCursor(cursor_shape))
+                else:
+                    # Set new override
+                    QApplication.setOverrideCursor(QCursor(cursor_shape))
+                # Also set on widget as fallback
+                self.setCursor(QCursor(cursor_shape))
+                self.cursor_override_active = True
+                self.current_cursor_shape = cursor_shape
+        else:
+            # Not on edge - restore normal cursor
+            if self.cursor_override_active:
+                QApplication.restoreOverrideCursor()
+                self.cursor_override_active = False
+                self.current_cursor_shape = None
+            # Also restore widget cursor
+            self.unsetCursor()
+        
+        super().mouseMoveEvent(event)
+    
+    def mouseReleaseEvent(self, event: QMouseEvent) -> None:
+        """Handle mouse release to stop resizing"""
+        if event.button() == Qt.LeftButton:
+            self.resize_edge = None
+            self.resize_start_pos = None
+            self.resize_start_geometry = None
+            if self.cursor_override_active:
+                QApplication.restoreOverrideCursor()
+                self.cursor_override_active = False
+        super().mouseReleaseEvent(event)
+    
+    def eventFilter(self, obj, event) -> bool:
+        """Event filter to catch mouse events for window resizing from child widgets"""
+        if isinstance(event, QMouseEvent):
+            # Always use global position for accurate calculations
+            global_pos = event.globalPosition().toPoint()
+            # Convert to window coordinates for edge detection
+            window_pos = self.mapFromGlobal(global_pos)
+            
+            # Handle mouse enter to ensure cursor updates
+            if event.type() == QMouseEvent.Type.Enter:
+                # When mouse enters a child widget, check if we're near an edge
+                if not self.resize_edge:
+                    edge = self._get_resize_edge(window_pos)
+                    if edge:
+                        cursor_shape = None
+                        if edge in ["top-left", "bottom-right"]:
+                            cursor_shape = Qt.SizeFDiagCursor
+                        elif edge in ["top-right", "bottom-left"]:
+                            cursor_shape = Qt.SizeBDiagCursor
+                        elif edge in ["left", "right"]:
+                            cursor_shape = Qt.SizeHorCursor
+                        elif edge in ["top", "bottom"]:
+                            cursor_shape = Qt.SizeVerCursor
+                        
+                        # Only change cursor if it's different from current
+                        if cursor_shape and cursor_shape != self.current_cursor_shape:
+                            if self.cursor_override_active:
+                                # Change existing override instead of restoring and setting new one
+                                QApplication.changeOverrideCursor(QCursor(cursor_shape))
+                            else:
+                                # Set new override
+                                QApplication.setOverrideCursor(QCursor(cursor_shape))
+                            # Also set on widget as fallback
+                            self.setCursor(QCursor(cursor_shape))
+                            self.cursor_override_active = True
+                            self.current_cursor_shape = cursor_shape
+                return False  # Let event propagate
+            
+            # Handle mouse leave to restore cursor
+            if event.type() == QMouseEvent.Type.Leave:
+                if self.cursor_override_active and not self.resize_edge:
+                    QApplication.restoreOverrideCursor()
+                    self.cursor_override_active = False
+                    self.current_cursor_shape = None
+                return False  # Let event propagate
+            
+            # Handle mouse move for cursor changes and resizing
+            if event.type() == QMouseEvent.Type.MouseMove:
+                # If currently resizing, handle resize using global coordinates
+                if self.resize_edge and event.buttons() == Qt.LeftButton:
+                    if self.resize_start_pos and self.resize_start_geometry:
+                        # Use global position delta for accurate resize
+                        delta = global_pos - self.resize_start_pos
+                        geom = QRect(self.resize_start_geometry)
+                        
+                        if "left" in self.resize_edge:
+                            new_x = geom.x() + delta.x()
+                            new_width = geom.width() - delta.x()
+                            if new_width >= self.minimumWidth():
+                                geom.setX(new_x)
+                                geom.setWidth(new_width)
+                        if "right" in self.resize_edge:
+                            new_width = geom.width() + delta.x()
+                            if new_width >= self.minimumWidth():
+                                geom.setWidth(new_width)
+                        if "top" in self.resize_edge:
+                            new_y = geom.y() + delta.y()
+                            new_height = geom.height() - delta.y()
+                            if new_height >= self.minimumHeight():
+                                geom.setY(new_y)
+                                geom.setHeight(new_height)
+                        if "bottom" in self.resize_edge:
+                            new_height = geom.height() + delta.y()
+                            if new_height >= self.minimumHeight():
+                                geom.setHeight(new_height)
+                        
+                        self.setGeometry(geom)
+                        # Update start position for next move to prevent accumulation
+                        self.resize_start_pos = global_pos
+                        self.resize_start_geometry = geom
+                        return True  # Consume event
+                
+                # Always check cursor on mouse move (even when not resizing)
+                edge = self._get_resize_edge(window_pos)
+                if edge:
+                    cursor_shape = None
+                    if edge in ["top-left", "bottom-right"]:
+                        cursor_shape = Qt.SizeFDiagCursor
+                    elif edge in ["top-right", "bottom-left"]:
+                        cursor_shape = Qt.SizeBDiagCursor
+                    elif edge in ["left", "right"]:
+                        cursor_shape = Qt.SizeHorCursor
+                    elif edge in ["top", "bottom"]:
+                        cursor_shape = Qt.SizeVerCursor
+                    
+                    # Only change cursor if it's different from current
+                    if cursor_shape and cursor_shape != self.current_cursor_shape:
+                        if self.cursor_override_active:
+                            # Change existing override instead of restoring and setting new one
+                            QApplication.changeOverrideCursor(QCursor(cursor_shape))
+                        else:
+                            # Set new override
+                            QApplication.setOverrideCursor(QCursor(cursor_shape))
+                        # Also set on widget as fallback
+                        self.setCursor(QCursor(cursor_shape))
+                        self.cursor_override_active = True
+                        self.current_cursor_shape = cursor_shape
+                    # Return False to let event propagate, but cursor is set
+                else:
+                    # Restore cursor when not on edge
+                    if self.cursor_override_active:
+                        QApplication.restoreOverrideCursor()
+                        self.cursor_override_active = False
+                        self.current_cursor_shape = None
+                    # Also restore widget cursor
+                    self.unsetCursor()
+            
+            # Handle mouse press for resize start
+            elif event.type() == QMouseEvent.Type.MouseButtonPress and event.button() == Qt.LeftButton:
+                edge = self._get_resize_edge(window_pos)
+                if edge:
+                    self.resize_edge = edge
+                    self.resize_start_pos = global_pos
+                    self.resize_start_geometry = self.geometry()
+                    return True  # Consume event to start resize
+            
+            # Handle mouse release
+            elif event.type() == QMouseEvent.Type.MouseButtonRelease and event.button() == Qt.LeftButton:
+                if self.resize_edge:
+                    self.resize_edge = None
+                    self.resize_start_pos = None
+                    self.resize_start_geometry = None
+                    # Check current position and set cursor accordingly
+                    edge = self._get_resize_edge(window_pos)
+                    if edge:
+                        cursor_shape = None
+                        if edge in ["top-left", "bottom-right"]:
+                            cursor_shape = Qt.SizeFDiagCursor
+                        elif edge in ["top-right", "bottom-left"]:
+                            cursor_shape = Qt.SizeBDiagCursor
+                        elif edge in ["left", "right"]:
+                            cursor_shape = Qt.SizeHorCursor
+                        elif edge in ["top", "bottom"]:
+                            cursor_shape = Qt.SizeVerCursor
+                        
+                        if cursor_shape and cursor_shape != self.current_cursor_shape:
+                            if self.cursor_override_active:
+                                QApplication.restoreOverrideCursor()
+                            QApplication.setOverrideCursor(QCursor(cursor_shape))
+                            self.cursor_override_active = True
+                            self.current_cursor_shape = cursor_shape
+                    else:
+                        if self.cursor_override_active:
+                            QApplication.restoreOverrideCursor()
+                            self.cursor_override_active = False
+                            self.current_cursor_shape = None
+                    return True  # Consume event
+        
+        return super().eventFilter(obj, event)
+    
+    def _header_mouse_press(self, event: QMouseEvent) -> None:
+        """Handle mouse press on header for window dragging"""
+        if event.button() == Qt.LeftButton:
+            # Check for top edge FIRST before allowing drag (to prioritize resize)
+            # Convert header widget position to window coordinates
+            header_pos = self.header_widget.mapTo(self, event.position().toPoint())
+            edge = self._get_resize_edge(header_pos)
+            # If on top edge (or any edge), don't set drag_position - let resize handler take over
+            if not edge:
+                self.drag_position = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+                event.accept()
+            # If on edge, don't accept event - let event filter handle resize
+    
+    def _header_mouse_move(self, event: QMouseEvent) -> None:
+        """Handle mouse move on header for window dragging"""
+        if event.buttons() == Qt.LeftButton and self.drag_position is not None:
+            # Check if we're currently resizing FIRST - if so, don't handle drag
+            if not self.resize_edge:
+                # Also check if we're on an edge now (might have moved to edge)
+                header_pos = self.header_widget.mapTo(self, event.position().toPoint())
+                edge = self._get_resize_edge(header_pos)
+                if not edge:
+                    self.move(event.globalPosition().toPoint() - self.drag_position)
+                    event.accept()
+            # If resizing, don't handle drag - let resize take precedence
     
     def _switch_tab(self, tab_widget: QTabWidget, index: int):
         """Switch to a tab and update button states"""
@@ -566,44 +1035,57 @@ class MainWindow(QMainWindow):
         self.installer_thread.start()
     
     def _install_dependencies(self):
-        """Fix Issues (repair mode): deterministically repair PyTorch + deps"""
-        reply = QMessageBox.question(
-            self,
-            "Fix Issues",
-            "This will automatically fix the environment:\n"
-            "• Force reinstall PyTorch with the correct CUDA build\n"
-            "• Fix common corruption (missing metadata / partial installs)\n"
-            "• Install correct Triton for Windows\n"
-            "• Install all required dependencies (unsloth, transformers, etc.)\n"
-            "• Remove xformers if it would break torch compatibility\n\n"
-            "Time: 10-15 minutes\n"
-            "Download size: ~2.5GB\n\n"
-            "Continue?",
-            QMessageBox.Yes | QMessageBox.No
-        )
+        """Fix Issues: Launch installer GUI for repair"""
+        import subprocess
+        from pathlib import Path
         
-        if reply != QMessageBox.Yes:
-            return
+        # Find run_installer.bat (preferred) or installer_gui.py (fallback)
+        app_dir = Path(__file__).parent.parent
+        run_installer_bat = app_dir / "run_installer.bat"
+        installer_gui = app_dir / "installer_gui.py"
         
-        # Show log area
-        self.install_log.setVisible(True)
-        self.install_log.clear()
-        self.install_log.appendPlainText("=== Fix Issues (Repair Mode) ===\n")
-        self.install_log.appendPlainText("This will repair PyTorch CUDA + dependencies and verify the environment.\n\n")
+        # Prefer run_installer.bat which ensures bootstrap is used
+        if run_installer_bat.exists():
+            try:
+                subprocess.Popen(
+                    [str(run_installer_bat)],
+                    cwd=str(app_dir),
+                    shell=True,
+                    creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
+                )
+                # Close main app - installer will handle everything
+                self.close()
+                return
+            except Exception as e:
+                # Fall through to installer_gui.py fallback
+                pass
         
-        # Start installer thread with "repair" (deterministic self-heal)
-        self.installer_thread = InstallerThread("repair")
-        
-        def append_log(msg):
-            self.install_log.appendPlainText(msg)
-            # Auto-scroll to bottom
-            cursor = self.install_log.textCursor()
-            cursor.movePosition(cursor.MoveOperation.End)
-            self.install_log.setTextCursor(cursor)
-        
-        self.installer_thread.log_output.connect(append_log)
-        self.installer_thread.finished_signal.connect(self._on_install_complete)
-        self.installer_thread.start()
+        # Fallback: launch installer_gui.py directly (it has bootstrap guard)
+        if installer_gui.exists():
+            python_exe = sys.executable
+            try:
+                subprocess.Popen(
+                    [python_exe, str(installer_gui)],
+                    cwd=str(app_dir),
+                    creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
+                )
+                # Close main app - installer will handle everything
+                self.close()
+                return
+            except Exception as e:
+                QMessageBox.critical(
+                    self,
+                    "Launch Failed",
+                    f"Failed to launch installer GUI:\n{str(e)}\n\n"
+                    "Please run run_installer.bat or installer_gui.py manually."
+                )
+        else:
+            QMessageBox.critical(
+                self,
+                "Installer Not Found",
+                f"Installer not found.\n\n"
+                "Please ensure run_installer.bat or installer_gui.py is in the LLM directory."
+            )
     
     def _on_install_complete(self, success: bool):
         """Handle installation completion"""
@@ -724,11 +1206,25 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(40, 30, 40, 30)
         layout.setSpacing(20)
         
-        # Welcome title with 12px top and bottom margin
+        # Welcome title in a styled container
+        title_frame = QFrame()
+        title_frame.setFrameShape(QFrame.StyledPanel)
+        title_frame.setStyleSheet("""
+            QFrame {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 rgba(60, 60, 80, 0.4), stop:1 rgba(40, 40, 60, 0.4));
+                border: 2px solid #667eea;
+                border-radius: 12px;
+                padding: 15px;
+            }
+        """)
+        title_layout = QVBoxLayout(title_frame)
+        title_layout.setContentsMargins(0, 12, 0, 12)
         title = QLabel("<h1>Welcome to LLM Fine-tuning Studio</h1>")
         title.setAlignment(Qt.AlignCenter)
-        title.setContentsMargins(0, 12, 0, 12)
-        layout.addWidget(title)
+        title.setStyleSheet("color: white; background: transparent; border: none; padding: 0;")
+        title_layout.addWidget(title)
+        layout.addWidget(title_frame)
         
         # Create 2-column layout with FIXED 40/60 ratio (not resizable)
         columns_layout = QHBoxLayout()
@@ -754,7 +1250,9 @@ class MainWindow(QMainWindow):
         left_layout.setContentsMargins(15, 15, 15, 15)
         
         # Features section
-        left_layout.addWidget(QLabel("<h2>🚀 Features</h2>"))
+        features_header = QLabel("<h2>🚀 Features</h2>")
+        features_header.setStyleSheet("background: transparent; color: white;")
+        left_layout.addWidget(features_header)
         features_text = QLabel("""
 <p>This application provides a beautiful, user-friendly interface to:</p>
 <ul style="line-height: 1.8;">
@@ -767,10 +1265,13 @@ class MainWindow(QMainWindow):
         """)
         features_text.setWordWrap(True)
         features_text.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        features_text.setStyleSheet("background: transparent; color: white;")
         left_layout.addWidget(features_text)
         
         # Quick Start Guide section
-        left_layout.addWidget(QLabel("<h2>📋 Quick Start Guide</h2>"))
+        guide_header = QLabel("<h2>📋 Quick Start Guide</h2>")
+        guide_header.setStyleSheet("background: transparent; color: white;")
+        left_layout.addWidget(guide_header)
         guide_text = QLabel("""
 <ol style="line-height: 2;">
 <li><b>Prepare Your Dataset:</b> Create a JSONL file with format:
@@ -786,6 +1287,7 @@ class MainWindow(QMainWindow):
         """)
         guide_text.setWordWrap(True)
         guide_text.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        guide_text.setStyleSheet("background: transparent; color: white;")
         left_layout.addWidget(guide_text)
         
         left_layout.addStretch(1)
@@ -812,7 +1314,9 @@ class MainWindow(QMainWindow):
         right_layout.setContentsMargins(15, 15, 15, 15)
 
         # System Status section
-        right_layout.addWidget(QLabel("<h2>📊 System Status</h2>"))
+        sys_status_header = QLabel("<h2>📊 System Status</h2>")
+        sys_status_header.setStyleSheet("background: transparent; color: white;")
+        right_layout.addWidget(sys_status_header)
 
         # System info cards
         sys_frame = QWidget()
@@ -823,6 +1327,28 @@ class MainWindow(QMainWindow):
 
         refresh_btn = QPushButton("🔄 Refresh GPU Detection")
         refresh_btn.setMaximumWidth(200)  # Compact button
+        refresh_btn.setStyleSheet("""
+            QPushButton {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 rgba(60, 60, 80, 0.4), stop:1 rgba(40, 40, 60, 0.4));
+                border: 2px solid #667eea;
+                border-radius: 12px;
+                padding: 8px 15px;
+                color: white;
+                font-size: 11pt;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 rgba(80, 80, 100, 0.5), stop:1 rgba(60, 60, 80, 0.5));
+                border: 2px solid #7c8ef5;
+            }
+            QPushButton:pressed {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 rgba(50, 50, 70, 0.5), stop:1 rgba(30, 30, 50, 0.5));
+            }
+        """)
+        refresh_btn.clicked.connect(self._refresh_gpu_detection)
         sys_layout.addWidget(refresh_btn)
 
         # Get real GPU info
@@ -831,7 +1357,7 @@ class MainWindow(QMainWindow):
         
         if gpus:
             gpu_status = QLabel(f"✅ <b>{len(gpus)} GPU{'s' if len(gpus) > 1 else ''} detected</b>")
-            gpu_status.setStyleSheet("color: #4CAF50; font-weight: bold;")
+            gpu_status.setStyleSheet("background: transparent; color: #4CAF50; font-weight: bold;")
             sys_layout.addWidget(gpu_status)
             
             # Display each GPU
@@ -841,24 +1367,32 @@ class MainWindow(QMainWindow):
                 gpu_mem = gpu.get("memory", "Unknown")
                 
                 gpu_label = QLabel(f"<b>GPU {idx}:</b> {gpu_name}")
+                gpu_label.setStyleSheet("background: transparent; color: white;")
                 gpu_row.addWidget(gpu_label)
                 gpu_row.addStretch(1)
                 gpu_mem_label = QLabel(f"💾 <b>{gpu_mem}</b>")
+                gpu_mem_label.setStyleSheet("background: transparent; color: white;")
                 gpu_row.addWidget(gpu_mem_label)
                 sys_layout.addLayout(gpu_row)
         else:
             gpu_status = QLabel("⚠️ <b>No GPUs detected</b>")
-            gpu_status.setStyleSheet("color: #FF9800; font-weight: bold;")
+            gpu_status.setStyleSheet("background: transparent; color: #FF9800; font-weight: bold;")
             sys_layout.addWidget(gpu_status)
-            sys_layout.addWidget(QLabel("Training will use CPU (slower)"))
+            cpu_label = QLabel("Training will use CPU (slower)")
+            cpu_label.setStyleSheet("background: transparent; color: white;")
+            sys_layout.addWidget(cpu_label)
 
-        sys_layout.addWidget(QLabel("<hr>"))
+        hr_label = QLabel("<hr>")
+        hr_label.setStyleSheet("background: transparent;")
+        sys_layout.addWidget(hr_label)
 
         # Status - compact single line
         status_row = QHBoxLayout()
         status_label = QLabel("<b>Status:</b>")
+        status_label.setStyleSheet("background: transparent; color: white;")
         status_row.addWidget(status_label)
         status_val = QLabel("<span style='font-size: 16pt; font-weight: bold; color: #4CAF50;'>Ready</span>")
+        status_val.setStyleSheet("background: transparent;")
         status_row.addWidget(status_val)
         status_row.addStretch(1)
         sys_layout.addLayout(status_row)
@@ -866,7 +1400,9 @@ class MainWindow(QMainWindow):
         right_layout.addWidget(sys_frame)
         
         # Software Requirements section
-        right_layout.addWidget(QLabel("<h2>⚙️ Software Requirements & Setup</h2>"))
+        requirements_header = QLabel("<h2>⚙️ Software Requirements & Setup</h2>")
+        requirements_header.setStyleSheet("background: transparent; color: white;")
+        right_layout.addWidget(requirements_header)
 
         setup_frame = QWidget()
         setup_frame.setStyleSheet("background: transparent; border: none;")  # Explicitly no styling
@@ -1033,21 +1569,23 @@ class MainWindow(QMainWindow):
             fix_btn.setMinimumHeight(42)
             fix_btn.setStyleSheet("""
                 QPushButton {
-                    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
-                        stop:0 #f093fb, stop:1 #f5576c);
+                    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                        stop:0 rgba(240, 147, 251, 0.6), stop:1 rgba(245, 87, 108, 0.6));
+                    border: 2px solid #f093fb;
+                    border-radius: 12px;
                     color: white;
                     font-size: 13pt;
                     font-weight: bold;
-                    border-radius: 8px;
                     padding: 10px 18px;
                 }
                 QPushButton:hover {
-                    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
-                        stop:0 #f5a3ff, stop:1 #ff6a7e);
+                    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                        stop:0 rgba(245, 163, 255, 0.7), stop:1 rgba(255, 106, 126, 0.7));
+                    border: 2px solid #f5a3ff;
                 }
                 QPushButton:pressed {
-                    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
-                        stop:0 #d083db, stop:1 #d5475c);
+                    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                        stop:0 rgba(208, 131, 219, 0.7), stop:1 rgba(213, 71, 92, 0.7));
                 }
             """)
             fix_btn.clicked.connect(self._install_dependencies)
@@ -1472,8 +2010,11 @@ class MainWindow(QMainWindow):
         main_layout.setSpacing(20)
         main_layout.setContentsMargins(15, 15, 15, 15)
         
-        # Create splitter for left/right layout
-        splitter = QSplitter(Qt.Horizontal)
+        # Use QHBoxLayout with fixed stretch factors for 75/25 ratio (no splitter)
+        # This guarantees the ratio and prevents manual resizing
+        columns_layout = QHBoxLayout()
+        columns_layout.setSpacing(20)
+        columns_layout.setContentsMargins(0, 0, 0, 0)
         
         # LEFT COLUMN: Configuration
         left_widget = QWidget()
@@ -1865,23 +2406,16 @@ class MainWindow(QMainWindow):
         left_scroll.setMinimumWidth(520)
         self.train_right_stack.setMinimumWidth(400)
 
-        splitter.addWidget(left_scroll)
-        splitter.addWidget(self.train_right_stack)
-
-        # Dashboard = 1/3 of width, Config = 2/3
-        splitter.setStretchFactor(0, 2)
-        splitter.setStretchFactor(1, 1)
-
-        # Important: apply the initial size AFTER the widget is shown, otherwise Qt may override it.
-        def _apply_initial_split():
-            w = splitter.width() or 1400
-            left_w = int(w * 0.67)  # Config = 2/3
-            right_w = w - left_w    # Dashboard = 1/3
-            splitter.setSizes([left_w, right_w])
-
-        QTimer.singleShot(0, _apply_initial_split)
+        # Add to layout with fixed 75/25 ratio using stretch factors
+        # Stretch factor 3:1 = 75%:25% ratio (guaranteed, no manual resizing possible)
+        columns_layout.addWidget(left_scroll, 3)  # Left = 75% (3 parts)
+        columns_layout.addWidget(self.train_right_stack, 1)  # Right = 25% (1 part)
         
-        main_layout.addWidget(splitter)
+        # Create a container widget for the columns layout
+        columns_widget = QWidget()
+        columns_widget.setLayout(columns_layout)
+        
+        main_layout.addWidget(columns_widget)
         
         # Store metric cards for updates (they're now just QWidgets with value_label and set_value)
         self.metric_cards = [
@@ -2798,7 +3332,7 @@ class MainWindow(QMainWindow):
 
     # ---------------- Info/About tab ----------------
     def _build_requirements_tab(self) -> QWidget:
-        """Build Requirements tab with hardcoded package list"""
+        """Build Requirements tab showing required vs installed versions (source of truth)"""
         w = QWidget()
         layout = QVBoxLayout(w)
         layout.setContentsMargins(40, 30, 40, 30)
@@ -2807,13 +3341,60 @@ class MainWindow(QMainWindow):
         # Title
         title = QLabel("<h1>🔧 Required Packages & Versions</h1>")
         title.setAlignment(Qt.AlignCenter)
+        title.setStyleSheet("background: transparent; color: white;")
         layout.addWidget(title)
         
         # Info text
-        info = QLabel("These are the exact package versions used by this application:")
+        info = QLabel("This is the source of truth showing required vs installed versions:")
         info.setAlignment(Qt.AlignCenter)
-        info.setStyleSheet("color: #888; font-size: 11pt; margin-bottom: 20px;")
+        info.setStyleSheet("background: transparent; color: #888; font-size: 11pt; margin-bottom: 20px;")
         layout.addWidget(info)
+        
+        # Get installed versions
+        try:
+            from importlib.metadata import version, PackageNotFoundError
+        except ImportError:
+            from importlib_metadata import version, PackageNotFoundError
+        
+        # Parse requirements.txt
+        requirements_file = Path(__file__).parent.parent / "requirements.txt"
+        required_packages = {}
+        if requirements_file.exists():
+            with open(requirements_file, 'r', encoding='utf-8') as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith('#'):
+                        continue
+                    # Parse package name and version spec
+                    # Handle formats like: "package==1.0.0", "package>=1.0.0", "package>=1.0.0,<2.0.0"
+                    parts = line.split(';')
+                    pkg_line = parts[0].strip()
+                    # Extract package name and version
+                    if '>=' in pkg_line or '==' in pkg_line or '<=' in pkg_line or '!=' in pkg_line or '<' in pkg_line or '>' in pkg_line:
+                        # Has version spec
+                        import re
+                        match = re.match(r'^([a-zA-Z0-9_-]+(?:\[[^\]]+\])?)(.*)$', pkg_line)
+                        if match:
+                            pkg_name = match.group(1).split('[')[0]  # Remove extras like package[extra]
+                            version_spec = match.group(2).strip()
+                            required_packages[pkg_name] = version_spec
+                        else:
+                            # Fallback: just use the line as-is
+                            pkg_name = pkg_line.split()[0]
+                            required_packages[pkg_name] = ""
+                    else:
+                        # No version spec
+                        required_packages[pkg_line] = ""
+        
+        # Add PyTorch packages (from SmartInstaller, not in requirements.txt)
+        required_packages["torch"] = "==2.5.1+cu118"
+        required_packages["torchvision"] = "==0.20.1+cu118"
+        required_packages["torchaudio"] = "==2.5.1+cu118"
+        required_packages["triton-windows"] = "==3.0.0"  # Note: Windows uses triton-windows but module is triton
+        required_packages["PySide6"] = "==6.8.1"
+        required_packages["PySide6-Essentials"] = "==6.8.1"
+        required_packages["PySide6-Addons"] = "==6.8.1"
+        required_packages["shiboken6"] = "==6.8.1"
         
         # Package list in scrollable area
         scroll = QScrollArea()
@@ -2824,87 +3405,173 @@ class MainWindow(QMainWindow):
         content_layout = QVBoxLayout(content)
         content_layout.setSpacing(15)
         
-        # Hardcoded requirements from requirements.txt
-        requirements = {
-            "Core ML Libraries": [
-                ("numpy", "<2", "Pinned for Windows/PyTorch compatibility"),
-                ("transformers", "==4.51.3", "Required by unsloth 2025.12.9 (min version: >=4.51.3)"),
-                ("tokenizers", ">=0.21,<0.22", "Required by transformers 4.51.3"),
-                ("accelerate", ">=0.18.0", "Distributed training"),
-                ("datasets", ">=2.11.0,<4.4.0", "Dataset loading (upper bound per unsloth requirements)"),
-                ("peft", ">=0.3.0", "LoRA and efficient training"),
-                ("safetensors", ">=0.3.0", "Safe model serialization"),
-            ],
-            "Tokenization": [
-                ("sentencepiece", ">=0.1.98", "Text tokenization"),
-            ],
-            "Quantization & Optimization": [
-                ("bitsandbytes", ">=0.39.0", "4-bit/8-bit quantization (Python 3.8+)"),
-            ],
-            "Utilities": [
-                ("evaluate", ">=0.4.0", "Model evaluation metrics"),
-                ("filelock", ">=3.0.0", "File locking"),
-                ("tqdm", ">=4.60.0", "Progress bars"),
-            ],
-            "GUI & Visualization": [
-                ("streamlit", ">=1.28.0", "Web interface (optional)"),
-                ("pandas", ">=2.0.0", "Data manipulation"),
-                ("PySide6", "==6.8.1", "Qt desktop GUI (ALL components must match)"),
-                ("PySide6-Essentials", "==6.8.1", "PySide6 essentials (must match PySide6 version)"),
-                ("PySide6-Addons", "==6.8.1", "PySide6 addons (must match PySide6 version)"),
-                ("shiboken6", "==6.8.1", "PySide6 binding generator (must match PySide6 version)"),
-            ],
-            "Hugging Face Integration": [
-                ("huggingface_hub", ">=0.36.0", "Model download/upload"),
-            ],
-            "Vision Model Support": [
-                ("psutil", ">=5.9.0", "System monitoring"),
-                ("timm", ">=0.9.0", "Vision models"),
-                ("einops", ">=0.6.0", "Tensor operations"),
-                ("open-clip-torch", ">=2.20.0", "CLIP models"),
-                ("Pillow", "", "Image processing"),
-            ],
-            "PyTorch Ecosystem (SmartInstaller)": [
-                ("torch", "==2.5.1+cu118", "Deep learning framework (CUDA 11.8)"),
-                ("torchvision", "==0.20.1+cu118", "Computer vision"),
-                ("torchaudio", "==2.5.1+cu118", "Audio processing"),
-                ("triton-windows", "==3.5.1.post22", "GPU programming (Windows)"),
-            ],
-            "Fast Fine-tuning": [
-                ("unsloth", "2025.12.9", "2x faster LLM fine-tuning"),
-                ("unsloth_zoo", "2025.12.7", "Unsloth model patches"),
-            ],
+        # Organize packages into categories with descriptions
+        categories = {
+            "Core ML Libraries": ["numpy", "transformers", "tokenizers", "accelerate", "datasets", "peft", "safetensors"],
+            "Tokenization": ["sentencepiece"],
+            "Quantization & Optimization": ["bitsandbytes"],
+            "Utilities": ["evaluate", "filelock", "tqdm"],
+            "GUI & Visualization": ["streamlit", "pandas", "PySide6", "PySide6-Essentials", "PySide6-Addons", "shiboken6"],
+            "Hugging Face Integration": ["huggingface_hub"],
+            "Vision Model Support": ["psutil", "timm", "einops", "open-clip-torch", "Pillow"],
+            "PyTorch Ecosystem (SmartInstaller)": ["torch", "torchvision", "torchaudio", "triton-windows"],
+            "Fast Fine-tuning": ["unsloth"],
         }
         
-        for category, packages in requirements.items():
+        descriptions = {
+            "numpy": "Pinned for Windows/PyTorch compatibility",
+            "transformers": "Required by unsloth 2025.12.9 (min version: >=4.51.3)",
+            "tokenizers": "Required by transformers 4.51.3",
+            "accelerate": "Distributed training",
+            "datasets": "Dataset loading (upper bound per unsloth requirements)",
+            "peft": "LoRA and efficient training",
+            "safetensors": "Safe model serialization",
+            "sentencepiece": "Text tokenization",
+            "bitsandbytes": "4-bit/8-bit quantization (Python 3.8+)",
+            "evaluate": "Model evaluation metrics",
+            "filelock": "File locking",
+            "tqdm": "Progress bars",
+            "streamlit": "Web interface (optional)",
+            "pandas": "Data manipulation",
+            "PySide6": "Qt desktop GUI (ALL components must match)",
+            "PySide6-Essentials": "PySide6 essentials (must match PySide6 version)",
+            "PySide6-Addons": "PySide6 addons (must match PySide6 version)",
+            "shiboken6": "PySide6 binding generator (must match PySide6 version)",
+            "huggingface_hub": "Model download/upload",
+            "psutil": "System monitoring",
+            "timm": "Vision models",
+            "einops": "Tensor operations",
+            "open-clip-torch": "CLIP models",
+            "Pillow": "Image processing",
+            "torch": "Deep learning framework (CUDA 11.8)",
+            "torchvision": "Computer vision",
+            "torchaudio": "Audio processing",
+            "triton-windows": "GPU programming (Windows)",
+            "unsloth": "2x faster LLM fine-tuning",
+        }
+        
+        # Version comparison helper
+        try:
+            from packaging import version as pkg_version
+            from packaging.specifiers import SpecifierSet
+            has_packaging = True
+        except ImportError:
+            has_packaging = False
+        
+        def check_version_match(installed_ver, required_spec):
+            """Check if installed version matches required spec"""
+            if not installed_ver or not required_spec:
+                return None  # Can't check
+            if not has_packaging:
+                # Simple check for == cases
+                if required_spec.startswith("=="):
+                    expected = required_spec[2:].strip()
+                    return installed_ver == expected
+                return None
+            try:
+                installed = pkg_version.parse(installed_ver)
+                spec = SpecifierSet(required_spec)
+                return installed in spec
+            except:
+                return None
+        
+        for category, package_names in categories.items():
             # Category header
             cat_label = QLabel(f"<h3 style='color: #667eea;'>{category}</h3>")
+            cat_label.setStyleSheet("background: transparent; color: #667eea;")
             content_layout.addWidget(cat_label)
             
             # Packages in this category
-            for pkg_name, version, description in packages:
+            for pkg_name in package_names:
+                if pkg_name not in required_packages:
+                    continue
+                
+                required_version = required_packages[pkg_name]
+                
+                # Get installed version
+                installed_version = None
+                is_installed = False
+                try:
+                    # Handle special case: triton-windows package name but triton module
+                    check_name = "triton" if pkg_name == "triton-windows" else pkg_name
+                    installed_version = version(check_name)
+                    is_installed = True
+                except PackageNotFoundError:
+                    is_installed = False
+                
+                # Determine status and color
+                status = "unknown"
+                status_color = "#888"
+                status_text = ""
+                
+                if not is_installed:
+                    status = "missing"
+                    status_color = "#f44336"  # Red
+                    status_text = "❌ NOT INSTALLED"
+                elif installed_version and required_version:
+                    matches = check_version_match(installed_version, required_version)
+                    if matches is True:
+                        status = "ok"
+                        status_color = "#4CAF50"  # Green
+                        status_text = "✅ OK"
+                    elif matches is False:
+                        status = "mismatch"
+                        status_color = "#FF9800"  # Yellow/Orange
+                        status_text = "⚠️ VERSION MISMATCH"
+                    else:
+                        status = "unknown"
+                        status_color = "#888"
+                        status_text = "❓ CANNOT VERIFY"
+                elif installed_version:
+                    status = "installed"
+                    status_color = "#4CAF50"  # Green (installed but no version requirement)
+                    status_text = "✅ INSTALLED"
+                else:
+                    status = "unknown"
+                    status_color = "#888"
+                    status_text = "❓ UNKNOWN"
+                
                 pkg_frame = QFrame()
                 pkg_frame.setFrameShape(QFrame.StyledPanel)
-                pkg_frame.setStyleSheet("""
-                    QFrame {
+                pkg_frame.setStyleSheet(f"""
+                    QFrame {{
                         background: rgba(60, 60, 80, 0.3);
-                        border: 1px solid #555;
+                        border: 2px solid {status_color};
                         border-radius: 6px;
                         padding: 8px;
-                    }
+                    }}
                 """)
                 pkg_layout = QVBoxLayout(pkg_frame)
                 pkg_layout.setSpacing(4)
                 
-                # Package name and version
-                name_ver = QLabel(f"<b>{pkg_name}</b> {version}")
-                name_ver.setStyleSheet("font-size: 12pt; color: #4CAF50;")
-                pkg_layout.addWidget(name_ver)
+                # Package name and status
+                name_status = QLabel(f"<b>{pkg_name}</b> <span style='color: {status_color};'>{status_text}</span>")
+                name_status.setStyleSheet("background: transparent; font-size: 12pt; color: white;")
+                pkg_layout.addWidget(name_status)
+                
+                # Required version
+                req_label = QLabel(f"<b>Required:</b> {required_version if required_version else 'any'}")
+                req_label.setStyleSheet("background: transparent; font-size: 10pt; color: #aaa;")
+                pkg_layout.addWidget(req_label)
+                
+                # Installed version
+                if is_installed and installed_version:
+                    inst_label = QLabel(f"<b>Installed:</b> {installed_version}")
+                    inst_label.setStyleSheet(f"background: transparent; font-size: 10pt; color: {status_color};")
+                    pkg_layout.addWidget(inst_label)
+                elif is_installed:
+                    inst_label = QLabel("<b>Installed:</b> (version unknown)")
+                    inst_label.setStyleSheet("background: transparent; font-size: 10pt; color: #888;")
+                    pkg_layout.addWidget(inst_label)
+                else:
+                    inst_label = QLabel("<b>Installed:</b> NOT INSTALLED")
+                    inst_label.setStyleSheet("background: transparent; font-size: 10pt; color: #f44336;")
+                    pkg_layout.addWidget(inst_label)
                 
                 # Description
-                if description:
-                    desc = QLabel(description)
-                    desc.setStyleSheet("font-size: 10pt; color: #aaa;")
+                if pkg_name in descriptions:
+                    desc = QLabel(descriptions[pkg_name])
+                    desc.setStyleSheet("background: transparent; font-size: 9pt; color: #888;")
                     desc.setWordWrap(True)
                     pkg_layout.addWidget(desc)
                 
@@ -2913,6 +3580,14 @@ class MainWindow(QMainWindow):
         content_layout.addStretch(1)
         scroll.setWidget(content)
         layout.addWidget(scroll)
+        
+        # Last updated timestamp
+        from datetime import datetime
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        timestamp_label = QLabel(f"<i>Last updated: {timestamp}</i>")
+        timestamp_label.setAlignment(Qt.AlignCenter)
+        timestamp_label.setStyleSheet("background: transparent; color: #666; font-size: 9pt; margin-top: 10px;")
+        layout.addWidget(timestamp_label)
         
         return w
     

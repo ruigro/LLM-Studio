@@ -1,9 +1,13 @@
 #include <windows.h>
 #include <string>
 #include <vector>
+#include <fstream>
 #include <shlwapi.h>
+#include <winreg.h>
+#include <urlmon.h>
 
 #pragma comment(lib, "shlwapi.lib")
+#pragma comment(lib, "urlmon.lib")
 
 // Helper to convert std::string to std::wstring
 std::wstring StringToWString(const std::string& str) {
@@ -29,6 +33,100 @@ void EnsureLogsDirectory(const std::wstring& exeDir) {
 // Helper to open log file in Notepad
 void OpenLogInNotepad(const std::wstring& logPath) {
     ShellExecuteW(NULL, L"open", L"notepad.exe", logPath.c_str(), NULL, SW_SHOW);
+}
+
+// Helper to find Python in PATH or registry
+std::wstring FindSystemPython() {
+    // First, try to find python.exe in PATH
+    wchar_t pythonPath[MAX_PATH];
+    DWORD result = SearchPathW(NULL, L"python.exe", NULL, MAX_PATH, pythonPath, NULL);
+    if (result > 0 && result < MAX_PATH) {
+        return std::wstring(pythonPath);
+    }
+    
+    // Try pythonw.exe in PATH
+    result = SearchPathW(NULL, L"pythonw.exe", NULL, MAX_PATH, pythonPath, NULL);
+    if (result > 0 && result < MAX_PATH) {
+        return std::wstring(pythonPath);
+    }
+    
+    // Check registry for Python installation
+    HKEY hKey;
+    // Check Python 3.x in registry (HKEY_LOCAL_MACHINE\SOFTWARE\Python\PythonCore\<version>\InstallPath)
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\Python\\PythonCore", 0, KEY_READ, &hKey) == ERROR_SUCCESS) {
+        DWORD index = 0;
+        wchar_t versionKey[256];
+        DWORD versionKeySize = sizeof(versionKey) / sizeof(wchar_t);
+        
+        while (RegEnumKeyExW(hKey, index, versionKey, &versionKeySize, NULL, NULL, NULL, NULL) == ERROR_SUCCESS) {
+            std::wstring installPathKey = std::wstring(L"SOFTWARE\\Python\\PythonCore\\") + versionKey + L"\\InstallPath";
+            HKEY hInstallKey;
+            if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, installPathKey.c_str(), 0, KEY_READ, &hInstallKey) == ERROR_SUCCESS) {
+                wchar_t installPath[MAX_PATH];
+                DWORD pathSize = MAX_PATH * sizeof(wchar_t);
+                DWORD type = REG_SZ;
+                if (RegQueryValueExW(hInstallKey, L"ExecutablePath", NULL, &type, (LPBYTE)installPath, &pathSize) == ERROR_SUCCESS) {
+                    if (FileExists(installPath)) {
+                        RegCloseKey(hInstallKey);
+                        RegCloseKey(hKey);
+                        return std::wstring(installPath);
+                    }
+                }
+                RegCloseKey(hInstallKey);
+            }
+            index++;
+            versionKeySize = sizeof(versionKey) / sizeof(wchar_t);
+        }
+        RegCloseKey(hKey);
+    }
+    
+    return L"";  // Not found
+}
+
+// Helper to download Python installer
+bool DownloadPythonInstaller(const std::wstring& downloadPath) {
+    // Download Python 3.10.x installer (64-bit) from python.org
+    // Using embeddable package URL for smaller download, or full installer
+    const wchar_t* pythonUrl = L"https://www.python.org/ftp/python/3.10.11/python-3.10.11-amd64.exe";
+    
+    // Use URLDownloadToFileW to download
+    HRESULT hr = URLDownloadToFileW(NULL, pythonUrl, downloadPath.c_str(), 0, NULL);
+    return (hr == S_OK);
+}
+
+// Helper to install Python silently
+bool InstallPython(const std::wstring& installerPath) {
+    // Run Python installer with /quiet and /PrependPath flags
+    // /quiet = silent installation
+    // /PrependPath = add Python to PATH
+    std::wstring cmdLine = L"\"" + installerPath + L"\" /quiet PrependPath=1 InstallAllUsers=1";
+    
+    SHELLEXECUTEINFOW sei = {0};
+    sei.cbSize = sizeof(sei);
+    sei.fMask = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_FLAG_NO_UI;
+    sei.lpVerb = L"runas";  // Run as administrator (may be needed)
+    sei.lpFile = installerPath.c_str();
+    sei.lpParameters = L"/quiet PrependPath=1 InstallAllUsers=1";
+    sei.nShow = SW_HIDE;
+    
+    if (!ShellExecuteExW(&sei)) {
+        // Try without runas if that fails
+        sei.lpVerb = L"open";
+        if (!ShellExecuteExW(&sei)) {
+            return false;
+        }
+    }
+    
+    // Wait for installation to complete (max 5 minutes)
+    if (sei.hProcess) {
+        WaitForSingleObject(sei.hProcess, 300000);  // 5 minutes timeout
+        DWORD exitCode = 0;
+        GetExitCodeProcess(sei.hProcess, &exitCode);
+        CloseHandle(sei.hProcess);
+        return (exitCode == 0);
+    }
+    
+    return false;
 }
 
 // Main launcher function
@@ -135,191 +233,192 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     // Ensure logs directory exists
     EnsureLogsDirectory(exeDir);
     
-    // Check if first-time setup is needed (check BEFORE checking venv)
-    std::wstring setupCompleteMarker = exeDir + L"\\.setup_complete";
-    bool needsSetup = !FileExists(setupCompleteMarker);
+    // Step 1: Check if system Python exists
+    std::wstring systemPython = FindSystemPython();
     
-    if (needsSetup) {
-        // First run: launch LAUNCHER.bat (has better Python detection)
-        std::wstring launcherBat = exeDir + L"\\LAUNCHER.bat";
+    if (systemPython.empty()) {
+        // Python not found - need to install it
+        int result = MessageBoxW(NULL,
+            L"Python is not installed on this system.\n\n"
+            L"This application requires Python 3.10+ to run.\n\n"
+            L"Would you like to download and install Python now?",
+            L"Python Required",
+            MB_YESNO | MB_ICONQUESTION);
         
-        SHELLEXECUTEINFOW sei = {0};
-        sei.cbSize = sizeof(sei);
-        sei.fMask = SEE_MASK_NOCLOSEPROCESS;
-        sei.lpVerb = L"open";
-        sei.lpFile = launcherBat.c_str();
-        sei.lpDirectory = exeDir.c_str();
-        sei.nShow = SW_SHOW;
-        
-        if (!ShellExecuteExW(&sei)) {
+        if (result != IDYES) {
             MessageBoxW(NULL,
-                       L"Failed to launch setup!\n\n"
-                       L"Please run LAUNCHER.bat manually.",
-                       L"Setup Error",
-                       MB_OK | MB_ICONERROR);
+                L"Python installation is required.\n\n"
+                L"Please install Python 3.10+ from https://www.python.org/downloads/\n"
+                L"Make sure to check 'Add Python to PATH' during installation.",
+                L"Python Required",
+                MB_OK | MB_ICONINFORMATION);
             return 1;
         }
         
-        // Wait for setup to complete
-        if (sei.hProcess) {
-            WaitForSingleObject(sei.hProcess, INFINITE);
-            
-            DWORD exitCode = 0;
-            GetExitCodeProcess(sei.hProcess, &exitCode);
-            CloseHandle(sei.hProcess);
-            
-            if (exitCode != 0) {
-                return exitCode;
-            }
+        // Download Python installer
+        std::wstring tempDir = exeDir + L"\\temp";
+        CreateDirectoryW(tempDir.c_str(), NULL);
+        std::wstring installerPath = tempDir + L"\\python-installer.exe";
+        
+        MessageBoxW(NULL, L"Downloading Python installer...\n\nThis may take a few minutes.", L"Downloading", MB_OK | MB_ICONINFORMATION);
+        
+        if (!DownloadPythonInstaller(installerPath)) {
+            MessageBoxW(NULL,
+                L"Failed to download Python installer.\n\n"
+                L"Please download and install Python 3.10+ manually from:\n"
+                L"https://www.python.org/downloads/",
+                L"Download Failed",
+                MB_OK | MB_ICONERROR);
+            return 1;
         }
         
-        // Setup done, continue to launch app
+        // Install Python
+        MessageBoxW(NULL, L"Installing Python...\n\nThis may take a few minutes.\n\nPlease wait...", L"Installing", MB_OK | MB_ICONINFORMATION);
+        
+        if (!InstallPython(installerPath)) {
+            MessageBoxW(NULL,
+                L"Python installation failed or was cancelled.\n\n"
+                L"Please install Python 3.10+ manually from:\n"
+                L"https://www.python.org/downloads/",
+                L"Installation Failed",
+                MB_OK | MB_ICONERROR);
+            return 1;
+        }
+        
+        // Clean up installer
+        DeleteFileW(installerPath.c_str());
+        
+        // Refresh PATH and try to find Python again
+        // Note: PATH refresh may require restart, but we'll try anyway
+        systemPython = FindSystemPython();
+        if (systemPython.empty()) {
+            MessageBoxW(NULL,
+                L"Python was installed, but the launcher cannot find it.\n\n"
+                L"Please restart your computer or manually add Python to PATH,\n"
+                L"then run this launcher again.",
+                L"Python Installed",
+                MB_OK | MB_ICONINFORMATION);
+            return 1;
+        }
     }
     
-    // Check which Python interpreter to use (venv should exist now)
+    // Step 2: Check if venv exists, if not, create it or launch installer GUI
     std::wstring pythonwExe = exeDir + L"\\.venv\\Scripts\\pythonw.exe";
     std::wstring pythonExe = exeDir + L"\\.venv\\Scripts\\python.exe";
+    std::wstring venvPython = systemPython;  // Default to system Python
     
-    std::wstring selectedPython;
     if (FileExists(pythonwExe)) {
-        selectedPython = pythonwExe;  // Prefer pythonw.exe (no console)
+        venvPython = pythonwExe;
     } else if (FileExists(pythonExe)) {
-        selectedPython = pythonExe;   // Fallback to python.exe
+        venvPython = pythonExe;
     } else {
-        MessageBoxW(NULL, 
-                    L"Python virtual environment not found!\n\n"
-                    L"Setup may have failed. Please run LAUNCHER.bat manually.",
-                    L"LLM Studio Launcher Error", 
+        // Venv doesn't exist - launch installer GUI via bootstrap
+        std::wstring runInstallerBat = exeDir + L"\\run_installer.bat";
+        if (FileExists(runInstallerBat)) {
+            // Use run_installer.bat which ensures bootstrap is used
+            ShellExecuteW(NULL, L"open", runInstallerBat.c_str(), NULL, exeDir.c_str(), SW_SHOW);
+            return 0;
+        } else {
+            // Fallback: try installer_gui.py directly (it has bootstrap guard)
+            std::wstring installerGui = exeDir + L"\\installer_gui.py";
+            if (FileExists(installerGui)) {
+                ShellExecuteW(NULL, L"open", systemPython.c_str(), installerGui.c_str(), exeDir.c_str(), SW_SHOW);
+                return 0;
+            } else {
+                MessageBoxW(NULL,
+                    L"Virtual environment not found and installer GUI not available.\n\n"
+                    L"Please run the setup manually.",
+                    L"Setup Required",
                     MB_OK | MB_ICONERROR);
-        return 1;
+                return 1;
+            }
+        }
     }
     
     // Ensure logs directory exists
     EnsureLogsDirectory(exeDir);
     
-    // Health check: Test if PySide6 can import (if GUI can't start, user can't click Fix Issues)
+    // Step 3: Health check - Test if PySide6 can import
     // NOTE: All PySide6 packages MUST be at version 6.8.1 (PySide6, Essentials, Addons, shiboken6)
     // Version mismatches cause "procedure could not be found" DLL errors
     std::wstring healthCheckCmd = L"-c \"import PySide6.QtCore; print('OK')\"";
     std::wstring healthCheckLog = exeDir + L"\\logs\\health_check.log";
     
-    int healthCheckResult = LaunchPythonApp(exeDir, pythonExe, healthCheckCmd, healthCheckLog);
+    int healthCheckResult = LaunchPythonApp(exeDir, venvPython, healthCheckCmd, healthCheckLog);
     
     if (healthCheckResult != 0) {
-        // PySide6 is broken - auto-repair silently before launching GUI
-        // Repair will install all PySide6 packages at 6.8.1 to prevent version mismatches
-        // No popup - repair runs in background silently
-        
-        // Run repair_all() using pythonw.exe (no console window)
-        std::wstring repairCmd = L"-c \"from smart_installer import SmartInstaller; installer = SmartInstaller(); installer.run_detection(); installer.repair_all()\"";
-        std::wstring repairLog = exeDir + L"\\logs\\auto_repair.log";
-        
-        // Use pythonw.exe for silent execution (no CMD window)
-        std::wstring repairPython = pythonwExe;
-        if (!FileExists(repairPython)) {
-            repairPython = pythonExe;  // Fallback if pythonw.exe doesn't exist
-        }
-        
-        int repairResult = LaunchPythonApp(exeDir, repairPython, repairCmd, repairLog);
-        
-        // Always verify PySide6 after repair, regardless of repair exit code
-        // Use pythonw.exe for silent check too
-        healthCheckResult = LaunchPythonApp(exeDir, repairPython, healthCheckCmd, healthCheckLog);
-        
-        if (repairResult != 0 || healthCheckResult != 0) {
-            // Repair failed OR PySide6 still broken - write error to app.log (not Notepad)
-            std::wstring appLog = exeDir + L"\\logs\\app.log";
-            HANDLE hAppLog = CreateFileW(
-                appLog.c_str(),
-                GENERIC_WRITE,
-                FILE_SHARE_READ | FILE_SHARE_WRITE,
-                NULL,
-                OPEN_ALWAYS,  // Open existing or create new
-                FILE_ATTRIBUTE_NORMAL,
-                NULL
-            );
-            
-            if (hAppLog != INVALID_HANDLE_VALUE) {
-                // Append to end of file
-                SetFilePointer(hAppLog, 0, NULL, FILE_END);
-                
-                wchar_t errorMsgBuf[512];
-                if (repairResult != 0) {
-                    swprintf_s(errorMsgBuf, 512,
-                        L"\n=== AUTO-REPAIR FAILED ===\n"
-                        L"Repair process failed (exit code: %d)\n"
-                        L"Detailed repair log: logs\\auto_repair.log\n"
-                        L"Please check the repair log for details.\n"
-                        L"=====================================\n\n",
-                        repairResult);
-                } else {
-                    swprintf_s(errorMsgBuf, 512,
-                        L"\n=== AUTO-REPAIR FAILED ===\n"
-                        L"Repair completed but PySide6 is still broken (exit code: %d)\n"
-                        L"Detailed repair log: logs\\auto_repair.log\n"
-                        L"Please check the repair log for details.\n"
-                        L"=====================================\n\n",
-                        healthCheckResult);
-                }
-                std::wstring errorMsg(errorMsgBuf);
-                
-                DWORD written = 0;
-                WriteFile(hAppLog, errorMsg.c_str(), errorMsg.length() * sizeof(wchar_t), &written, NULL);
-                
-                // Also append repair log content if it exists
-                if (FileExists(repairLog)) {
-                    HANDLE hRepairLog = CreateFileW(
-                        repairLog.c_str(),
-                        GENERIC_READ,
-                        FILE_SHARE_READ,
-                        NULL,
-                        OPEN_EXISTING,
-                        FILE_ATTRIBUTE_NORMAL,
-                        NULL
-                    );
-                    if (hRepairLog != INVALID_HANDLE_VALUE) {
-                        DWORD fileSize = GetFileSize(hRepairLog, NULL);
-                        if (fileSize > 0 && fileSize < 1024 * 1024) {  // Max 1MB
-                            std::vector<char> buffer(fileSize);
-                            DWORD read = 0;
-                            if (ReadFile(hRepairLog, buffer.data(), fileSize, &read, NULL)) {
-                                WriteFile(hAppLog, L"\n--- Repair Log Content ---\n", 
-                                         wcslen(L"\n--- Repair Log Content ---\n") * sizeof(wchar_t), &written, NULL);
-                                // Convert to wide string and write
-                                int wideSize = MultiByteToWideChar(CP_UTF8, 0, buffer.data(), read, NULL, 0);
-                                if (wideSize > 0) {
-                                    std::vector<wchar_t> wideBuffer(wideSize);
-                                    MultiByteToWideChar(CP_UTF8, 0, buffer.data(), read, wideBuffer.data(), wideSize);
-                                    WriteFile(hAppLog, wideBuffer.data(), wideSize * sizeof(wchar_t), &written, NULL);
-                                }
-                                WriteFile(hAppLog, L"\n--- End Repair Log ---\n", 
-                                         wcslen(L"\n--- End Repair Log ---\n") * sizeof(wchar_t), &written, NULL);
-                            }
-                        }
-                        CloseHandle(hRepairLog);
-                    }
-                }
-                
-                CloseHandle(hAppLog);
+        // PySide6 is broken - launch installer GUI via bootstrap
+        std::wstring runInstallerBat = exeDir + L"\\run_installer.bat";
+        if (FileExists(runInstallerBat)) {
+            // Use run_installer.bat which ensures bootstrap is used
+            ShellExecuteW(NULL, L"open", runInstallerBat.c_str(), NULL, exeDir.c_str(), SW_SHOW);
+            return 0;  // Exit - installer GUI will handle repair
+        } else {
+            // Fallback: try installer_gui.py directly (it has bootstrap guard)
+            std::wstring installerGui = exeDir + L"\\installer_gui.py";
+            if (FileExists(installerGui)) {
+                ShellExecuteW(NULL, L"open", systemPython.c_str(), installerGui.c_str(), exeDir.c_str(), SW_SHOW);
+                return 0;
+            } else {
+                MessageBoxW(NULL,
+                    L"Critical dependencies are broken and installer GUI is not available.\n\n"
+                    L"Please run the setup manually or check the installation.",
+                    L"Setup Required",
+                    MB_OK | MB_ICONERROR);
+                return 1;
             }
-            
-            // Show brief error message (no Notepad)
-            MessageBoxW(NULL,
-                        L"Auto-repair failed!\n\n"
-                        L"The error has been written to logs\\app.log\n"
-                        L"Check the Logs tab in the application for details.",
-                        L"Repair Failed",
-                        MB_OK | MB_ICONERROR);
-            
-            return 1;
         }
     }
     
-    // Launch main application
+    // Step 4: Dependency health check - Verify critical packages are installed
+    std::wstring dependencyCheckScript = exeDir + L"\\check_dependencies.py";
+    std::wstring dependencyCheckLog = exeDir + L"\\logs\\dependency_check.log";
+    
+    if (FileExists(dependencyCheckScript)) {
+        // Run check_dependencies.py as a script
+        std::wstring dependencyCheckCmd = L"\"" + dependencyCheckScript + L"\"";
+        int dependencyCheckResult = LaunchPythonApp(exeDir, venvPython, dependencyCheckCmd, dependencyCheckLog);
+        
+        if (dependencyCheckResult != 0) {
+            // Dependencies are missing or wrong - launch installer GUI via bootstrap
+            std::wstring runInstallerBat = exeDir + L"\\run_installer.bat";
+            if (FileExists(runInstallerBat)) {
+                // Use run_installer.bat which ensures bootstrap is used
+                ShellExecuteW(NULL, L"open", runInstallerBat.c_str(), NULL, exeDir.c_str(), SW_SHOW);
+                return 0;  // Exit - installer GUI will handle repair
+            } else {
+                // Fallback: try installer_gui.py directly (it has bootstrap guard)
+                std::wstring installerGui = exeDir + L"\\installer_gui.py";
+                if (FileExists(installerGui)) {
+                    ShellExecuteW(NULL, L"open", systemPython.c_str(), installerGui.c_str(), exeDir.c_str(), SW_SHOW);
+                    return 0;
+                } else {
+                    MessageBoxW(NULL,
+                        L"Critical dependencies are missing or have wrong versions.\n\n"
+                        L"Installer GUI is not available.\n"
+                        L"Please run the setup manually or check the installation.",
+                        L"Setup Required",
+                        MB_OK | MB_ICONERROR);
+                    return 1;
+                }
+            }
+        }
+    } else {
+        // Dependency check script missing - log warning but continue
+        // (This shouldn't happen in normal operation, but don't block launch)
+        std::wstring warnLog = exeDir + L"\\logs\\launcher_warning.log";
+        std::ofstream warnFile(warnLog, std::ios::app);
+        if (warnFile.is_open()) {
+            warnFile << "WARNING: check_dependencies.py not found, skipping dependency check\n";
+            warnFile.close();
+        }
+    }
+    
+    // Step 5: Launch main application (PySide6 and dependencies are working)
     std::wstring scriptArgs = L"-m desktop_app.main";
     std::wstring logFile = exeDir + L"\\logs\\app.log";
     
-    int exitCode = LaunchPythonApp(exeDir, selectedPython, scriptArgs, logFile);
+    int exitCode = LaunchPythonApp(exeDir, venvPython, scriptArgs, logFile);
     
     if (exitCode != 0) {
         // App failed - open log in Notepad

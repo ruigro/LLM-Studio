@@ -1,0 +1,797 @@
+#!/usr/bin/env python3
+"""
+Independent Installation GUI for LLM Fine-tuning Studio
+Uses tkinter (no dependencies required) to install and repair all components
+"""
+
+import sys
+import os
+import subprocess
+import threading
+import platform
+from pathlib import Path
+from tkinter import (
+    Tk, ttk, Frame, Label, Button, Text, Scrollbar, Checkbutton, 
+    StringVar, BooleanVar, messagebox
+)
+
+# ============================================================================
+# HARD BOOTSTRAP GUARD - MUST BE FIRST
+# ============================================================================
+def _ensure_bootstrap():
+    """
+    Hard guard: Ensure installer NEVER runs from target venv (LLM\.venv).
+    If running from target venv, auto-relaunch from bootstrap\.venv.
+    """
+    current_exe = Path(sys.executable).resolve()
+    current_exe_str = str(current_exe)
+    
+    # Check if running from LLM\.venv (case-insensitive, handle both / and \)
+    current_exe_normalized = current_exe_str.replace('\\', '/').lower()
+    if '/llm/.venv/' in current_exe_normalized or '\\llm\\.venv\\' in current_exe_str.lower():
+        # CRITICAL: Running from target venv - must relaunch from bootstrap
+        print("=" * 60, file=sys.stderr)
+        print("CRITICAL: Installer launched from target venv:", file=sys.stderr)
+        print(f"  {sys.executable}", file=sys.stderr)
+        print("Relaunching from bootstrap...", file=sys.stderr)
+        print("=" * 60, file=sys.stderr)
+        
+        # Locate project root (parent of LLM directory)
+        llm_dir = Path(__file__).parent.resolve()
+        if llm_dir.name == "LLM":
+            project_root = llm_dir.parent
+        else:
+            project_root = llm_dir
+        
+        bootstrap_venv = project_root / "bootstrap" / ".venv"
+        bootstrap_python = bootstrap_venv / "Scripts" / "python.exe" if platform.system() == "Windows" else bootstrap_venv / "bin" / "python"
+        
+        # Ensure bootstrap venv exists
+        if not bootstrap_venv.exists() or not bootstrap_python.exists():
+            print("Creating bootstrap venv...", file=sys.stderr)
+            bootstrap_venv.parent.mkdir(parents=True, exist_ok=True)
+            
+            # Find system Python
+            system_python = None
+            # Try py launcher first (Windows)
+            if platform.system() == "Windows":
+                for py_arg in ["-3.10", "-3"]:
+                    try:
+                        result = subprocess.run(
+                            ["py", py_arg, "-c", "import sys; print(sys.executable)"],
+                            capture_output=True,
+                            text=True,
+                            timeout=5
+                        )
+                        if result.returncode == 0:
+                            system_python = result.stdout.strip()
+                            break
+                    except Exception:
+                        continue
+            
+            # Try direct python commands
+            if not system_python:
+                for py_cmd in ["python3.10", "python3", "python"]:
+                    try:
+                        result = subprocess.run(
+                            [py_cmd, "-c", "import sys; print(sys.executable)"],
+                            capture_output=True,
+                            text=True,
+                            timeout=5
+                        )
+                        if result.returncode == 0:
+                            system_python = result.stdout.strip()
+                            break
+                    except Exception:
+                        continue
+            
+            if not system_python:
+                print("ERROR: Cannot find system Python to create bootstrap venv!", file=sys.stderr)
+                print("Please install Python 3.10+ and try again.", file=sys.stderr)
+                sys.exit(1)
+            
+            # Create bootstrap venv
+            try:
+                subprocess.run(
+                    [system_python, "-m", "venv", str(bootstrap_venv)],
+                    check=True,
+                    timeout=60
+                )
+                print("Bootstrap venv created.", file=sys.stderr)
+            except Exception as e:
+                print(f"ERROR: Failed to create bootstrap venv: {e}", file=sys.stderr)
+                sys.exit(1)
+        
+        # Install installer dependencies into bootstrap
+        installer_reqs = llm_dir / "installer_requirements.txt"
+        if installer_reqs.exists():
+            print("Installing installer dependencies into bootstrap...", file=sys.stderr)
+            try:
+                # Upgrade pip first
+                subprocess.run(
+                    [str(bootstrap_python), "-m", "pip", "install", "-U", "pip"],
+                    check=True,
+                    timeout=300,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL
+                )
+                # Install requirements
+                subprocess.run(
+                    [str(bootstrap_python), "-m", "pip", "install", "-r", str(installer_reqs)],
+                    check=True,
+                    timeout=600,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL
+                )
+                print("Installer dependencies installed.", file=sys.stderr)
+            except Exception as e:
+                print(f"WARNING: Failed to install some dependencies: {e}", file=sys.stderr)
+                print("Continuing anyway...", file=sys.stderr)
+        
+        # Relaunch from bootstrap
+        installer_script = llm_dir / "installer_gui.py"
+        print(f"Relaunching installer from bootstrap: {bootstrap_python}", file=sys.stderr)
+        try:
+            subprocess.Popen(
+                [str(bootstrap_python), str(installer_script)],
+                cwd=str(llm_dir)
+            )
+        except Exception as e:
+            print(f"ERROR: Failed to relaunch installer: {e}", file=sys.stderr)
+            sys.exit(1)
+        
+        # Exit current process
+        sys.exit(0)
+
+# Execute bootstrap check immediately
+_ensure_bootstrap()
+
+# Add current directory to path for imports
+sys.path.insert(0, str(Path(__file__).parent))
+
+try:
+    from system_detector import SystemDetector
+    from smart_installer import SmartInstaller
+except ImportError as e:
+    # If imports fail, show error and exit
+    root = Tk()
+    root.withdraw()
+    messagebox.showerror(
+        "Import Error",
+        f"Failed to import required modules:\n{str(e)}\n\n"
+        "Please ensure system_detector.py and smart_installer.py are in the same directory."
+    )
+    sys.exit(1)
+
+
+class InstallerGUI:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("LLM Fine-tuning Studio - Installation & Repair")
+        self.root.geometry("1000x800")
+        self.root.minsize(900, 700)
+        self.root.resizable(True, True)
+        
+        # State
+        self.installer = SmartInstaller()
+        self.detector = SystemDetector()
+        self.checklist_data = []
+        self.install_thread = None
+        self.installing = False
+        self._root_destroyed = False
+        
+        # Track if root is destroyed
+        self.root.protocol("WM_DELETE_WINDOW", self._on_closing)
+        
+        # Run detection on startup
+        self.detector.detect_all()
+        self.installer.detection_results = self.detector.detection_results
+        
+        # Build UI
+        self._build_ui()
+        
+        # Populate checklist
+        self._populate_checklist()
+    
+    def _build_ui(self):
+        """Build the user interface"""
+        # Main container - use grid layout
+        main_frame = Frame(self.root, padx=20, pady=20)
+        main_frame.grid(row=0, column=0, sticky="nsew")
+        
+        # Configure root window grid weights
+        self.root.grid_rowconfigure(0, weight=1)
+        self.root.grid_columnconfigure(0, weight=1)
+        
+        # Configure main_frame grid weights
+        main_frame.grid_rowconfigure(3, weight=1)  # Checklist row - can expand
+        main_frame.grid_rowconfigure(6, weight=1)  # Log row - can expand
+        main_frame.grid_rowconfigure(7, weight=0)  # Button row - fixed, always visible
+        main_frame.grid_columnconfigure(0, weight=1)
+        
+        # Row 0: Title
+        title = Label(
+            main_frame,
+            text="🔧 LLM Fine-tuning Studio - Installation & Repair",
+            font=("Arial", 16, "bold")
+        )
+        title.grid(row=0, column=0, sticky="w", pady=(0, 10))
+        
+        # Row 1: System Detection Panel
+        detection_frame = Frame(main_frame, relief="ridge", borderwidth=2, padx=10, pady=10)
+        detection_frame.grid(row=1, column=0, sticky="ew", pady=(0, 10))
+        detection_frame.grid_columnconfigure(0, weight=1)
+        
+        Label(detection_frame, text="System Detection", font=("Arial", 12, "bold")).grid(row=0, column=0, sticky="w")
+        
+        self.detection_text = Text(detection_frame, height=6, wrap="word", state="disabled")
+        self.detection_text.grid(row=1, column=0, sticky="ew", pady=(5, 0))
+        self._update_detection_info()
+        
+        # Row 2: Installation Checklist Label
+        checklist_label = Label(main_frame, text="Installation Checklist", font=("Arial", 12, "bold"))
+        checklist_label.grid(row=2, column=0, sticky="w", pady=(0, 5))
+        
+        # Row 3: Treeview for checklist (weight=1, can expand but height constrained)
+        checklist_frame = Frame(main_frame)
+        checklist_frame.grid(row=3, column=0, sticky="nsew", pady=(0, 10))
+        checklist_frame.grid_rowconfigure(0, weight=1)
+        checklist_frame.grid_columnconfigure(0, weight=1)
+        
+        # Scrollbar
+        scrollbar = Scrollbar(checklist_frame)
+        scrollbar.grid(row=0, column=1, sticky="ns")
+        
+        # Treeview - reduced height from 15 to 8
+        self.checklist_tree = ttk.Treeview(
+            checklist_frame,
+            columns=("Version", "Status"),
+            show="tree headings",
+            yscrollcommand=scrollbar.set,
+            height=8
+        )
+        scrollbar.config(command=self.checklist_tree.yview)
+        
+        # Configure columns
+        self.checklist_tree.heading("#0", text="Component")
+        self.checklist_tree.heading("Version", text="Version")
+        self.checklist_tree.heading("Status", text="Status")
+        self.checklist_tree.column("#0", width=300)
+        self.checklist_tree.column("Version", width=200)
+        self.checklist_tree.column("Status", width=200)
+        
+        # Configure tags for color coding
+        self.checklist_tree.tag_configure("installed", foreground="green")
+        self.checklist_tree.tag_configure("not_installed", foreground="red")
+        self.checklist_tree.tag_configure("wrong_version", foreground="orange")
+        self.checklist_tree.tag_configure("default", foreground="black")
+        
+        self.checklist_tree.grid(row=0, column=0, sticky="nsew")
+        
+        # Row 4: Progress frame
+        progress_frame = Frame(main_frame)
+        progress_frame.grid(row=4, column=0, sticky="ew", pady=(0, 10))
+        progress_frame.grid_columnconfigure(0, weight=1)
+        
+        Label(progress_frame, text="Progress:", font=("Arial", 10, "bold")).grid(row=0, column=0, sticky="w")
+        self.progress_var = StringVar(value="Ready")
+        self.progress_label = Label(progress_frame, textvariable=self.progress_var, anchor="w")
+        self.progress_label.grid(row=1, column=0, sticky="ew", pady=(5, 0))
+        
+        self.progress_bar = ttk.Progressbar(progress_frame, mode="indeterminate")
+        self.progress_bar.grid(row=2, column=0, sticky="ew", pady=(5, 0))
+        
+        # Row 5: Log label
+        log_label = Label(main_frame, text="Installation Log:", font=("Arial", 10, "bold"))
+        log_label.grid(row=5, column=0, sticky="w", pady=(0, 5))
+        
+        # Row 6: Log frame (weight=1, can expand but height constrained)
+        log_frame = Frame(main_frame)
+        log_frame.grid(row=6, column=0, sticky="nsew", pady=(0, 10))
+        log_frame.grid_rowconfigure(0, weight=1)
+        log_frame.grid_columnconfigure(0, weight=1)
+        
+        log_scrollbar = Scrollbar(log_frame)
+        log_scrollbar.grid(row=0, column=1, sticky="ns")
+        
+        # Log text - increased height from 8 to 12
+        self.log_text = Text(log_frame, wrap="word", yscrollcommand=log_scrollbar.set, height=12)
+        log_scrollbar.config(command=self.log_text.yview)
+        self.log_text.grid(row=0, column=0, sticky="nsew")
+        
+        # Row 7: Buttons (weight=0, fixed size, always visible)
+        button_frame = Frame(main_frame)
+        button_frame.grid(row=7, column=0, sticky="ew", pady=(10, 0))
+        
+        self.install_button = Button(
+            button_frame,
+            text="🛠️ Install/Repair All",
+            command=self._start_installation,
+            font=("Arial", 11, "bold"),
+            bg="#4CAF50",
+            fg="white",
+            padx=20,
+            pady=10,
+            state="normal"
+        )
+        self.install_button.grid(row=0, column=0, padx=(0, 10))
+        
+        self.launch_button = Button(
+            button_frame,
+            text="🚀 Launch App",
+            command=self._launch_app,
+            font=("Arial", 11, "bold"),
+            bg="#2196F3",
+            fg="white",
+            padx=20,
+            pady=10,
+            state="disabled"
+        )
+        self.launch_button.grid(row=0, column=1, padx=(0, 10))
+        
+        self.refresh_button = Button(
+            button_frame,
+            text="🔄 Refresh Status",
+            command=self._refresh_status,
+            font=("Arial", 11),
+            padx=20,
+            pady=10
+        )
+        self.refresh_button.grid(row=0, column=2)
+    
+    def _update_detection_info(self):
+        """Update system detection information display"""
+        results = self.detector.detection_results
+        info_lines = []
+        
+        # Python
+        python_info = results.get("python", {})
+        if python_info.get("found"):
+            info_lines.append(f"✓ Python {python_info.get('version', 'Unknown')} at {python_info.get('executable', 'Unknown')}")
+        else:
+            info_lines.append("✗ Python: Not found")
+        
+        # PyTorch
+        pytorch_info = results.get("pytorch", {})
+        if pytorch_info.get("found"):
+            version = pytorch_info.get("version", "Unknown")
+            cuda = " (CUDA)" if pytorch_info.get("cuda_available") else " (CPU)"
+            info_lines.append(f"✓ PyTorch {version}{cuda}")
+        else:
+            info_lines.append("✗ PyTorch: Not installed")
+        
+        # CUDA
+        cuda_info = results.get("cuda", {})
+        if cuda_info.get("found"):
+            gpus = cuda_info.get("gpus", [])
+            info_lines.append(f"✓ CUDA {cuda_info.get('version', 'Unknown')} - {len(gpus)} GPU(s) detected")
+        else:
+            info_lines.append("ℹ CUDA: Not detected (CPU-only mode)")
+        
+        # Hardware
+        hw_info = results.get("hardware", {})
+        cpu = hw_info.get("cpu", "Unknown")
+        ram = hw_info.get("ram_gb", 0)
+        info_lines.append(f"💻 CPU: {cpu}, RAM: {ram:.1f} GB")
+        
+        self.detection_text.config(state="normal")
+        self.detection_text.delete(1.0, "end")
+        self.detection_text.insert(1.0, "\n".join(info_lines))
+        self.detection_text.config(state="disabled")
+    
+    def _populate_checklist(self):
+        """Populate the installation checklist"""
+        try:
+            if self._root_destroyed:
+                return
+            
+            # Clear existing items
+            for item in self.checklist_tree.get_children():
+                self.checklist_tree.delete(item)
+            
+            # Get checklist from SmartInstaller - use venv Python if available
+            try:
+                # Determine which Python to use for checking
+                venv_path = Path(__file__).parent / ".venv"
+                check_python = None
+                if venv_path.exists():
+                    if sys.platform == "win32":
+                        venv_python = venv_path / "Scripts" / "python.exe"
+                    else:
+                        venv_python = venv_path / "bin" / "python"
+                    if venv_python.exists():
+                        check_python = str(venv_python)
+                
+                checklist = self.installer.get_installation_checklist(python_executable=check_python)
+            except Exception as e:
+                import traceback
+                self._log(f"Error getting checklist: {str(e)}")
+                self._log(f"Traceback: {traceback.format_exc()}")
+                return
+            
+            for item in checklist:
+                try:
+                    component = item.get("component", "Unknown")
+                    version = item.get("version", "N/A")
+                    status = item.get("status", "unknown")
+                    status_text = item.get("status_text", "? Unknown")
+                    
+                    # Determine tag based on status (check in order of specificity)
+                    tag = "default"
+                    if "✗" in status_text or "Not Installed" in status_text:
+                        tag = "not_installed"
+                    elif "✓" in status_text and "Installed" in status_text:
+                        tag = "installed"
+                    elif "⚠" in status_text or "Wrong Version" in status_text or "Wrong version" in status_text:
+                        tag = "wrong_version"
+                    elif "?" in status_text or "Cannot check" in status_text:
+                        tag = "default"  # Keep default color for unknown status
+                    
+                    # Add to treeview with tag
+                    item_id = self.checklist_tree.insert(
+                        "",
+                        "end",
+                        text=component,
+                        values=(version, status_text),
+                        tags=(tag,)
+                    )
+                except Exception as e:
+                    # Skip this item if there's an error
+                    try:
+                        print(f"Error adding checklist item: {e}")
+                    except:
+                        pass
+        except Exception as e:
+            try:
+                self._log(f"Error populating checklist: {str(e)}")
+            except:
+                print(f"Error populating checklist: {e}")
+    
+    
+    def _safe_after(self, func, *args):
+        """Safely schedule a function to run in the main thread"""
+        try:
+            if not self._root_destroyed:
+                self.root.after(0, lambda: self._safe_call(func, *args))
+        except:
+            pass  # Root might be destroyed
+    
+    def _safe_call(self, func, *args):
+        """Safely call a function with error handling"""
+        try:
+            if self._root_destroyed:
+                return
+            func(*args)
+        except Exception as e:
+            # Log to console if GUI logging fails
+            try:
+                print(f"GUI update error: {e}")
+            except:
+                pass
+    
+    def _on_closing(self):
+        """Handle window closing"""
+        self._root_destroyed = True
+        if self.installing:
+            import messagebox
+            if messagebox.askokcancel("Quit", "Installation is in progress. Are you sure you want to quit?"):
+                self.root.destroy()
+        else:
+            self.root.destroy()
+    
+    def _log(self, message):
+        """Add message to log output"""
+        try:
+            if not self._root_destroyed:
+                self.log_text.insert("end", message + "\n")
+                self.log_text.see("end")
+                self.root.update_idletasks()
+        except:
+            # Fallback to console if GUI fails
+            try:
+                print(f"[LOG] {message}")
+            except:
+                pass
+    
+    def _start_installation(self):
+        """Start installation/repair process"""
+        if self.installing:
+            messagebox.showwarning("Already Installing", "Installation is already in progress.")
+            return
+        
+        result = messagebox.askyesno(
+            "Confirm Installation",
+            "This will install/repair all required components.\n\n"
+            "This may take several minutes. Continue?"
+        )
+        
+        if not result:
+            return
+        
+        self.installing = True
+        self.install_button.config(state="disabled")
+        self.launch_button.config(state="disabled")
+        self.progress_bar.start()
+        self.progress_var.set("Installing...")
+        self.log_text.delete(1.0, "end")
+        self._log("Starting installation/repair process...")
+        
+        # Run installation in background thread
+        self.install_thread = threading.Thread(target=self._run_installation, daemon=True)
+        self.install_thread.start()
+    
+    def _run_installation(self):
+        """Run the actual installation (in background thread)"""
+        # Write crash log file
+        crash_log = Path(__file__).parent / "logs" / "installer_thread.log"
+        crash_log.parent.mkdir(exist_ok=True)
+        
+        def write_log(msg):
+            try:
+                import datetime
+                timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                with open(crash_log, "a", encoding="utf-8") as f:
+                    f.write(f"[{timestamp}] {msg}\n")
+                    f.flush()  # Force write immediately
+            except Exception as e:
+                try:
+                    print(f"[CRASH_LOG_ERROR] {e}: {msg}")
+                except:
+                    pass
+        
+        try:
+            write_log("=" * 60)
+            write_log("Starting installation thread")
+            write_log("=" * 60)
+            
+            # Redirect installer logs to GUI with periodic checklist refresh
+            original_log = self.installer.log
+            last_refresh_time = [0]  # Use list to allow modification in nested function
+            import time
+            
+            def gui_log(message):
+                try:
+                    write_log(f"[LOG] {message}")
+                    self._safe_after(self._log, message)
+                    original_log(message)
+                    
+                    # Refresh checklist periodically (every 10 seconds) or after key installation steps
+                    current_time = time.time()
+                    refresh_triggers = [
+                        "OK: PyTorch",
+                        "OK: transformers",
+                        "OK: tokenizers",
+                        "OK: numpy",
+                        "OK: datasets",
+                        "OK: PySide6",
+                        "OK: unsloth",
+                        "Installing PyTorch",
+                        "Installing PySide6",
+                        "Repair complete",
+                        "Installation completed"
+                    ]
+                    
+                    should_refresh = False
+                    if any(trigger in message for trigger in refresh_triggers):
+                        should_refresh = True
+                    elif current_time - last_refresh_time[0] > 10:  # Every 10 seconds
+                        should_refresh = True
+                    
+                    if should_refresh:
+                        last_refresh_time[0] = current_time
+                        self._safe_after(self._populate_checklist)
+                        
+                except Exception as e:
+                    write_log(f"[LOG ERROR] {e}")
+                    try:
+                        original_log(message)  # At least log to console
+                    except:
+                        print(f"[INSTALL] {message}")
+            
+            self.installer.log = gui_log
+            write_log("Log redirector set up")
+            
+            # Run detection
+            self._safe_after(self._log, "Running system detection...")
+            try:
+                self.installer.run_detection()
+            except Exception as e:
+                self._safe_after(self._log, f"Error in detection: {str(e)}")
+                raise
+            
+            # Check if venv exists, create if needed
+            venv_path = Path(__file__).parent / ".venv"
+            venv_python = None
+            
+            if not venv_path.exists():
+                self._safe_after(self._log, "Creating virtual environment...")
+                import subprocess
+                python_exe = sys.executable
+                try:
+                    result = subprocess.run(
+                        [python_exe, "-m", "venv", str(venv_path)],
+                        capture_output=True,
+                        text=True,
+                        timeout=60
+                    )
+                    if result.returncode != 0:
+                        self._safe_after(self._log, f"Warning: Failed to create venv: {result.stderr}")
+                        self._safe_after(self._log, "Will use system Python instead.")
+                    else:
+                        self._safe_after(self._log, "Virtual environment created.")
+                except Exception as e:
+                    self._safe_after(self._log, f"Error creating venv: {str(e)}")
+                    self._safe_after(self._log, "Will use system Python instead.")
+            
+            # Determine which Python to use (venv if exists, otherwise system)
+            if venv_path.exists():
+                if sys.platform == "win32":
+                    venv_python = venv_path / "Scripts" / "python.exe"
+                else:
+                    venv_python = venv_path / "bin" / "python"
+                if venv_python.exists():
+                    venv_python = str(venv_python)
+                else:
+                    venv_python = None
+            
+            # Run repair_all (installs everything)
+            write_log("About to start repair_all")
+            self._safe_after(self._log, "Starting repair/installation...")
+            
+            success = False
+            try:
+                if venv_python:
+                    write_log(f"Using venv Python: {venv_python}")
+                    self._safe_after(self._log, f"Using venv Python: {venv_python}")
+                else:
+                    write_log(f"Using system Python: {sys.executable}")
+                    self._safe_after(self._log, f"Using system Python: {sys.executable}")
+                
+                write_log("Calling repair_all...")
+                # Wrap repair_all in additional try-catch
+                try:
+                    if venv_python:
+                        success = self.installer.repair_all(python_executable=venv_python)
+                    else:
+                        success = self.installer.repair_all()
+                    write_log(f"repair_all returned: {success}")
+                except Exception as inner_e:
+                    import traceback
+                    inner_trace = traceback.format_exc()
+                    write_log(f"INNER EXCEPTION in repair_all: {inner_e}")
+                    write_log(f"INNER TRACEBACK:\n{inner_trace}")
+                    self._safe_after(self._log, f"CRITICAL ERROR in repair_all: {str(inner_e)}")
+                    self._safe_after(self._log, f"Traceback:\n{inner_trace}")
+                    success = False
+            except Exception as e:
+                import traceback
+                error_trace = traceback.format_exc()
+                write_log(f"OUTER EXCEPTION around repair_all: {e}")
+                write_log(f"OUTER TRACEBACK:\n{error_trace}")
+                self._safe_after(self._log, f"CRITICAL ERROR in repair_all: {str(e)}")
+                self._safe_after(self._log, f"Traceback:\n{error_trace}")
+                success = False
+            
+            # Refresh checklist after installation (regardless of success)
+            self._safe_after(self._populate_checklist)
+            
+            if success:
+                self._safe_after(self._log, "✓ Installation completed successfully!")
+                self._safe_after(self.progress_var.set, "Installation Complete")
+                self._safe_after(self.launch_button.config, {"state": "normal"})
+                def show_success():
+                    try:
+                        messagebox.showinfo("Success", "Installation completed successfully!\n\nYou can now launch the application.")
+                    except:
+                        pass
+                self._safe_after(show_success)
+            else:
+                self._safe_after(self._log, "✗ Installation completed with errors. Check log above.")
+                self._safe_after(self.progress_var.set, "Installation Completed with Errors")
+                def show_warning():
+                    try:
+                        messagebox.showwarning("Installation Issues", "Installation completed but some components may have issues.\n\nCheck the log for details.")
+                    except:
+                        pass
+                self._safe_after(show_warning)
+        
+        except Exception as e:
+            import traceback
+            error_msg = str(e)
+            error_trace = traceback.format_exc()
+            write_log(f"EXCEPTION CAUGHT: {error_msg}")
+            write_log(f"TRACEBACK:\n{error_trace}")
+            try:
+                self._safe_after(self._log, f"✗ Error during installation: {error_msg}")
+                self._safe_after(self._log, f"Traceback:\n{error_trace}")
+                self._safe_after(self.progress_var.set, f"Error: {error_msg}")
+                def show_error():
+                    try:
+                        messagebox.showerror("Installation Error", f"An error occurred during installation:\n\n{error_msg}\n\nCheck the log for details.")
+                    except:
+                        pass
+                self._safe_after(show_error)
+            except Exception as e2:
+                write_log(f"ERROR IN ERROR HANDLER: {e2}")
+                print(f"CRITICAL: Error handler failed: {e2}")
+                print(f"Original error: {error_msg}")
+        
+        finally:
+            write_log("Entering finally block")
+            try:
+                if not self._root_destroyed:
+                    write_log("Root not destroyed, cleaning up...")
+                    self._safe_after(self.progress_bar.stop)
+                    self._safe_after(self.install_button.config, {"state": "normal"})
+                    self.installing = False
+                    # Refresh checklist
+                    self._safe_after(self._populate_checklist)
+                    write_log("Cleanup complete")
+                else:
+                    write_log("Root destroyed, skipping GUI cleanup")
+            except Exception as e:
+                # Even the finally block might fail, log it
+                write_log(f"ERROR IN FINALLY: {e}")
+                try:
+                    import traceback
+                    write_log(traceback.format_exc())
+                    print(f"Cleanup error: {e}")
+                except:
+                    pass
+            write_log("Thread exiting")
+    
+    def _refresh_status(self):
+        """Refresh the status of all components"""
+        self._log("Refreshing status...")
+        self.detector.detect_all()
+        self.installer.detection_results = self.detector.detection_results
+        self._update_detection_info()
+        self._populate_checklist()
+        self._log("Status refreshed.")
+    
+    def _launch_app(self):
+        """Launch the main application"""
+        try:
+            import subprocess
+            script_dir = Path(__file__).parent
+            python_exe = sys.executable
+            
+            # Launch main app
+            subprocess.Popen(
+                [python_exe, "-m", "desktop_app.main"],
+                cwd=script_dir,
+                creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+            )
+            
+            # Close installer GUI
+            self.root.quit()
+        
+        except Exception as e:
+            messagebox.showerror("Launch Error", f"Failed to launch application:\n\n{str(e)}")
+
+
+def main():
+    """Main entry point"""
+    try:
+        root = Tk()
+        app = InstallerGUI(root)
+        root.mainloop()
+    except Exception as e:
+        import traceback
+        error_file = Path(__file__).parent / "logs" / "installer_crash.log"
+        error_file.parent.mkdir(exist_ok=True)
+        with open(error_file, "w", encoding="utf-8") as f:
+            f.write(f"Installer GUI Crash\n")
+            f.write(f"Error: {str(e)}\n")
+            f.write(f"Traceback:\n{traceback.format_exc()}\n")
+        print(f"CRASH: {e}")
+        print(traceback.format_exc())
+        try:
+            messagebox.showerror("Fatal Error", f"The installer crashed.\n\nError: {str(e)}\n\nCheck logs/installer_crash.log for details.")
+        except:
+            pass
+
+
+if __name__ == "__main__":
+    main()
+

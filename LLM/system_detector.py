@@ -9,8 +9,11 @@ import sys
 import platform
 import subprocess
 import json
+import time
+import re
 from pathlib import Path
 from typing import Dict, Optional, List, Tuple
+from datetime import datetime
 
 class SystemDetector:
     """Detects system components and hardware capabilities"""
@@ -29,6 +32,42 @@ class SystemDetector:
                 'startupinfo': startupinfo,
                 'creationflags': subprocess.CREATE_NO_WINDOW
             }
+    
+    def _log_cuda_detection(self, result: Dict, success: bool):
+        """Log CUDA detection attempts to logs/cuda_detection.log"""
+        try:
+            # Ensure logs directory exists
+            log_dir = Path(__file__).parent / "logs"
+            log_dir.mkdir(exist_ok=True)
+            log_file = log_dir / "cuda_detection.log"
+            
+            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            status = "SUCCESS" if success else "FAILED"
+            
+            log_entry = f"[{timestamp}] {status} - "
+            
+            if success:
+                log_entry += f"Found: {result.get('found', False)}, "
+                log_entry += f"Available: {result.get('available', False)}, "
+                log_entry += f"GPUs: {len(result.get('gpus', []))}, "
+                log_entry += f"Version: {result.get('version', 'N/A')}, "
+                log_entry += f"Driver: {result.get('driver_version', 'N/A')}, "
+                log_entry += f"Methods: {', '.join(result.get('detection_methods', []))}"
+            else:
+                log_entry += f"Error: {result.get('error', 'Unknown error')}"
+                if result.get('warnings'):
+                    log_entry += f", Warnings: {len(result['warnings'])}"
+            
+            # Append to log file
+            with open(log_file, 'a', encoding='utf-8') as f:
+                f.write(log_entry + "\n")
+                if result.get('warnings'):
+                    for warning in result['warnings']:
+                        f.write(f"  WARNING: {warning}\n")
+                if result.get('error'):
+                    f.write(f"  ERROR: {result['error']}\n")
+        except Exception:
+            pass  # Don't fail detection if logging fails
     
     def detect_all(self) -> Dict:
         """Run all detection methods and return results"""
@@ -181,68 +220,132 @@ class SystemDetector:
         
         return result
     
-    def detect_cuda(self) -> Dict:
-        """Detect CUDA installation and GPU hardware"""
-        result = {
-            "found": False,
-            "available": False,  # Add this for consistency
-            "version": None,
-            "driver_version": None,
-            "gpus": [],
-            "toolkit_path": None
-        }
+    def _try_nvidia_smi(self, max_retries: int = 3) -> Tuple[Optional[subprocess.CompletedProcess], List[str]]:
+        """Try nvidia-smi with retry logic and exponential backoff"""
+        errors = []
+        timeouts = [30, 20, 15]  # Decreasing timeouts for retries
         
-        # Try nvidia-smi first (works on all platforms)
+        for attempt in range(max_retries):
+            try:
+                delay = 2 ** attempt  # Exponential backoff: 1s, 2s, 4s
+                if attempt > 0:
+                    time.sleep(delay)
+                
+                timeout = timeouts[min(attempt, len(timeouts) - 1)]
+                nvidia_smi = subprocess.run(
+                    ["nvidia-smi", "--query-gpu=name,memory.total,driver_version", "--format=csv,noheader"],
+                    capture_output=True, text=True, timeout=timeout, **self.subprocess_flags
+                )
+                
+                if nvidia_smi.returncode == 0:
+                    return nvidia_smi, errors
+                else:
+                    error_msg = f"Attempt {attempt + 1}: nvidia-smi returned code {nvidia_smi.returncode}"
+                    if nvidia_smi.stderr:
+                        error_msg += f", stderr: {nvidia_smi.stderr[:200]}"
+                    errors.append(error_msg)
+                    
+            except FileNotFoundError:
+                errors.append(f"Attempt {attempt + 1}: nvidia-smi not found in PATH")
+                return None, errors  # No point retrying if not found
+            except subprocess.TimeoutExpired:
+                errors.append(f"Attempt {attempt + 1}: nvidia-smi timed out after {timeout}s")
+            except Exception as e:
+                errors.append(f"Attempt {attempt + 1}: {type(e).__name__}: {str(e)[:200]}")
+        
+        return None, errors
+    
+    def _detect_cuda_via_nvidia_smi(self, result: Dict) -> bool:
+        """Detect CUDA via nvidia-smi (primary method)"""
+        nvidia_smi, errors = self._try_nvidia_smi(max_retries=3)
+        
+        if nvidia_smi is None:
+            if errors:
+                result.setdefault("warnings", []).extend(errors)
+                result["error"] = f"nvidia-smi failed: {errors[-1]}"
+            return False
+        
+        # Parse nvidia-smi output
         try:
-            nvidia_smi = subprocess.run(
-                ["nvidia-smi", "--query-gpu=name,memory.total,driver_version", "--format=csv,noheader"],
-                capture_output=True, text=True, timeout=10, **self.subprocess_flags
-            )
+            lines = nvidia_smi.stdout.strip().split('\n')
+            if not lines or not lines[0].strip():
+                result.setdefault("warnings", []).append("nvidia-smi returned empty output")
+                return False
             
-            if nvidia_smi.returncode == 0:
+            for line in lines:
+                if line.strip():
+                    # Handle CSV parsing - may have quoted fields
+                    parts = []
+                    current_part = ""
+                    in_quotes = False
+                    for char in line:
+                        if char == '"':
+                            in_quotes = not in_quotes
+                        elif char == ',' and not in_quotes:
+                            parts.append(current_part.strip())
+                            current_part = ""
+                        else:
+                            current_part += char
+                    if current_part:
+                        parts.append(current_part.strip())
+                    
+                    if len(parts) >= 3:
+                        gpu_info = {
+                            "name": parts[0].strip('"'),
+                            "memory": parts[1].strip('"'),
+                            "driver_version": parts[2].strip('"')
+                        }
+                        result["gpus"].append(gpu_info)
+                        if not result["driver_version"]:
+                            result["driver_version"] = parts[2].strip('"')
+            
+            if result["gpus"]:
                 result["found"] = True
-                result["available"] = True  # GPU is available
-                lines = nvidia_smi.stdout.strip().split('\n')
-                for line in lines:
-                    if line.strip():
-                        parts = [p.strip() for p in line.split(',')]
-                        if len(parts) >= 3:
-                            gpu_info = {
-                                "name": parts[0],
-                                "memory": parts[1],
-                                "driver_version": parts[2]
-                            }
-                            result["gpus"].append(gpu_info)
-                            if not result["driver_version"]:
-                                result["driver_version"] = parts[2]
+                result["available"] = True
                 
                 # Try to get CUDA version from nvidia-smi
                 try:
                     cuda_version_cmd = subprocess.run(
-                        ["nvidia-smi", "--query-gpu=compute_cap", "--format=csv,noheader"],
-                        capture_output=True, text=True, timeout=5, **self.subprocess_flags
+                        ["nvidia-smi", "--query-gpu=cuda_version", "--format=csv,noheader"],
+                        capture_output=True, text=True, timeout=10, **self.subprocess_flags
                     )
-                    if cuda_version_cmd.returncode == 0:
-                        # Get compute capability, map to CUDA version
-                        compute_cap = cuda_version_cmd.stdout.strip().split('\n')[0].strip()
-                        result["cuda_version"] = f"Compute {compute_cap}"
-                except:
-                    pass
+                    if cuda_version_cmd.returncode == 0 and cuda_version_cmd.stdout.strip():
+                        result["version"] = cuda_version_cmd.stdout.strip().split('\n')[0].strip()
+                except Exception as e:
+                    result.setdefault("warnings", []).append(f"Could not get CUDA version from nvidia-smi: {str(e)[:100]}")
                 
-                # Also try to get CUDA version from PyTorch if available
-                try:
-                    import torch
-                    if torch.cuda.is_available() and torch.version.cuda:
-                        result["cuda_version"] = torch.version.cuda
-                except:
-                    pass
-        except FileNotFoundError:
-            # nvidia-smi not found
-            pass
-        except Exception:
-            pass
+                return True
+            else:
+                result.setdefault("warnings", []).append("nvidia-smi returned no GPU information")
+                return False
+                
+        except Exception as e:
+            result.setdefault("warnings", []).append(f"Error parsing nvidia-smi output: {str(e)[:200]}")
+            return False
+    
+    def _detect_cuda_via_pytorch(self, result: Dict) -> bool:
+        """Detect CUDA via PyTorch (verification method)"""
+        try:
+            import torch
+            if torch.cuda.is_available():
+                if not result.get("found"):
+                    result["found"] = True
+                    result["available"] = True
+                
+                if torch.version.cuda:
+                    if not result.get("version"):
+                        result["version"] = torch.version.cuda
+                    return True
+        except ImportError:
+            pass  # PyTorch not installed
+        except Exception as e:
+            result.setdefault("warnings", []).append(f"PyTorch CUDA check failed: {str(e)[:100]}")
+        return False
+    
+    def _detect_cuda_via_filesystem(self, result: Dict) -> bool:
+        """Detect CUDA toolkit via file system paths"""
+        found_toolkit = False
         
-        # Check CUDA toolkit installation paths
         if self.platform == "windows":
             cuda_paths = [
                 r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA",
@@ -250,47 +353,171 @@ class SystemDetector:
             ]
             for base_path in cuda_paths:
                 if os.path.exists(base_path):
-                    # Look for version directories
                     try:
                         versions = [d for d in os.listdir(base_path) 
-                                   if os.path.isdir(os.path.join(base_path, d)) and d.replace('.', '').isdigit()]
+                                   if os.path.isdir(os.path.join(base_path, d)) and 
+                                   re.match(r'^\d+\.\d+$', d)]
                         if versions:
-                            # Get latest version
                             versions.sort(key=lambda x: [int(i) for i in x.split('.')], reverse=True)
                             result["version"] = versions[0]
                             result["toolkit_path"] = os.path.join(base_path, versions[0])
-                            result["found"] = True
-                            # Don't set available=True unless we have actual GPUs
+                            found_toolkit = True
                             break
-                    except:
-                        continue
+                    except Exception as e:
+                        result.setdefault("warnings", []).append(f"Error scanning CUDA path {base_path}: {str(e)[:100]}")
         
         elif self.platform == "linux":
             cuda_paths = ["/usr/local/cuda", "/usr/lib/cuda"]
             for cuda_path in cuda_paths:
                 if os.path.exists(cuda_path):
                     result["toolkit_path"] = cuda_path
-                    # Try to get version
                     version_file = os.path.join(cuda_path, "version.txt")
                     if os.path.exists(version_file):
                         try:
                             with open(version_file, 'r') as f:
                                 content = f.read()
-                                import re
                                 match = re.search(r"CUDA Version (\d+\.\d+)", content)
                                 if match:
                                     result["version"] = match.group(1)
-                                    result["found"] = True
-                        except:
-                            pass
+                                    found_toolkit = True
+                        except Exception as e:
+                            result.setdefault("warnings", []).append(f"Error reading CUDA version file: {str(e)[:100]}")
         
         elif self.platform == "darwin":  # macOS
             cuda_path = "/usr/local/cuda"
             if os.path.exists(cuda_path):
                 result["toolkit_path"] = cuda_path
-                result["found"] = True
+                found_toolkit = True
+        
+        if found_toolkit and not result.get("found"):
+            result["found"] = True
+            # Don't set available=True unless we have actual GPUs
+        
+        return found_toolkit
+    
+    def _detect_cuda_via_registry(self, result: Dict) -> bool:
+        """Detect NVIDIA drivers via Windows registry"""
+        if self.platform != "windows":
+            return False
+        
+        try:
+            import winreg
+            reg_paths = [
+                (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\NVIDIA Corporation\Global\NVTweak"),
+                (winreg.HKEY_LOCAL_MACHINE, r"SYSTEM\CurrentControlSet\Services\nvlddmkm"),
+            ]
+            
+            for hkey, path in reg_paths:
+                try:
+                    key = winreg.OpenKey(hkey, path)
+                    winreg.CloseKey(key)
+                    if not result.get("found"):
+                        result["found"] = True
+                    return True
+                except FileNotFoundError:
+                    continue
+                except Exception:
+                    continue
+        except ImportError:
+            pass  # winreg not available
+        except Exception as e:
+            result.setdefault("warnings", []).append(f"Registry check failed: {str(e)[:100]}")
+        
+        return False
+    
+    def detect_cuda(self) -> Dict:
+        """Detect CUDA installation and GPU hardware with multiple methods and retry logic"""
+        result = {
+            "found": False,
+            "available": False,
+            "version": None,
+            "driver_version": None,
+            "gpus": [],
+            "toolkit_path": None,
+            "warnings": [],
+            "detection_methods": [],
+            "detection_timestamp": datetime.now().isoformat()
+        }
+        
+        # Method 1: nvidia-smi (primary, most reliable)
+        if self._detect_cuda_via_nvidia_smi(result):
+            result["detection_methods"].append("nvidia-smi")
+        
+        # Method 2: PyTorch CUDA check (verification)
+        if self._detect_cuda_via_pytorch(result):
+            result["detection_methods"].append("pytorch")
+        
+        # Method 3: File system detection (fallback)
+        if self._detect_cuda_via_filesystem(result):
+            result["detection_methods"].append("filesystem")
+        
+        # Method 4: Windows registry check (fallback)
+        if self._detect_cuda_via_registry(result):
+            result["detection_methods"].append("registry")
+        
+        # If we found CUDA toolkit but no GPUs, set available=False
+        if result["found"] and not result["gpus"]:
+            result["available"] = False
+            if "nvidia-smi" not in result["detection_methods"]:
+                result.setdefault("warnings", []).append("CUDA toolkit found but no GPUs detected (nvidia-smi unavailable)")
+        
+        # Clean up empty warnings list
+        if not result["warnings"]:
+            del result["warnings"]
+        
+        # Log detection attempt
+        success = result["found"] and result.get("available", False)
+        self._log_cuda_detection(result, success)
         
         return result
+    
+    def verify_cuda_health(self) -> Dict:
+        """Quick health check for CUDA - returns detailed status with recommendations"""
+        health = {
+            "status": "unknown",
+            "healthy": False,
+            "issues": [],
+            "recommendations": [],
+            "timestamp": datetime.now().isoformat()
+        }
+        
+        # Quick nvidia-smi check
+        nvidia_smi, errors = self._try_nvidia_smi(max_retries=1)  # Single quick attempt
+        if nvidia_smi is None:
+            health["status"] = "nvidia-smi_unavailable"
+            health["issues"].append("nvidia-smi command failed or not found")
+            health["recommendations"].append("Check if NVIDIA drivers are installed")
+            health["recommendations"].append("Verify nvidia-smi is in PATH")
+            if errors:
+                health["issues"].extend(errors)
+            return health
+        
+        # Quick PyTorch CUDA check
+        try:
+            import torch
+            if torch.cuda.is_available():
+                health["healthy"] = True
+                health["status"] = "healthy"
+                health["recommendations"].append("CUDA is working correctly")
+            else:
+                health["status"] = "pytorch_no_cuda"
+                health["issues"].append("PyTorch installed but CUDA not available")
+                health["recommendations"].append("Reinstall PyTorch with CUDA support")
+        except ImportError:
+            health["status"] = "pytorch_not_installed"
+            health["issues"].append("PyTorch not installed")
+            health["recommendations"].append("Install PyTorch with CUDA support")
+        except Exception as e:
+            health["status"] = "pytorch_error"
+            health["issues"].append(f"PyTorch error: {str(e)[:100]}")
+        
+        # If nvidia-smi works but PyTorch doesn't see CUDA
+        if nvidia_smi.returncode == 0 and not health["healthy"]:
+            health["status"] = "driver_mismatch"
+            health["issues"].append("GPU drivers work but PyTorch cannot access CUDA")
+            health["recommendations"].append("Reinstall PyTorch with matching CUDA version")
+        
+        return health
     
     def detect_hardware(self) -> Dict:
         """Detect hardware capabilities"""
