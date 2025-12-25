@@ -814,7 +814,6 @@ class MainWindow(QMainWindow):
 
         # System info cards
         sys_frame = QFrame()
-        sys_frame.setFrameShape(QFrame.StyledPanel)
         sys_layout = QVBoxLayout(sys_frame)
         sys_layout.setSpacing(6)  # Tighter spacing
         sys_layout.setContentsMargins(10, 8, 10, 8)  # Tighter margins
@@ -867,7 +866,6 @@ class MainWindow(QMainWindow):
         right_layout.addWidget(QLabel("<h2>⚙️ Software Requirements & Setup</h2>"))
 
         setup_frame = QFrame()
-        setup_frame.setFrameShape(QFrame.StyledPanel)
         setup_layout = QVBoxLayout(setup_frame)
         setup_layout.setSpacing(8)
         setup_layout.setContentsMargins(10, 10, 10, 10)
