@@ -10,6 +10,7 @@ import subprocess
 import platform
 import re
 import shutil
+import json
 from pathlib import Path
 from typing import Dict, Optional, Tuple
 from system_detector import SystemDetector, detect_all
@@ -333,6 +334,283 @@ class SmartInstaller:
             Tuple of (is_correct: bool, error_message: str)
         """
         return self._gate_torch_integrity(python_executable, expected_version, require_cuda)
+    
+    def _select_best_gpu(self, python_executable: str) -> Tuple[bool, str, Optional[Dict]]:
+        """
+        Select the best GPU from available NVIDIA GPUs.
+        
+        Selection policy:
+        - Primary: MAX total VRAM
+        - Secondary (tie-breaker): MAX compute capability
+        
+        Returns:
+            Tuple of (success: bool, error_message: str, gpu_info: Optional[Dict])
+            gpu_info contains: {'index': int, 'name': str, 'vram_gb': float, 'compute_capability': float}
+        """
+        self.log("Enumerating available GPUs...")
+        
+        # Enumerate GPUs using torch.cuda APIs
+        enum_script = """
+import torch
+import json
+
+if not torch.cuda.is_available():
+    print(json.dumps({"error": "CUDA not available"}))
+    exit(1)
+
+gpus = []
+for i in range(torch.cuda.device_count()):
+    props = torch.cuda.get_device_properties(i)
+    gpus.append({
+        "index": i,
+        "name": props.name,
+        "total_memory": props.total_memory,
+        "major": props.major,
+        "minor": props.minor,
+        "compute_capability": float(f"{props.major}.{props.minor}")
+    })
+
+print(json.dumps({"gpus": gpus}))
+"""
+        
+        try:
+            result = subprocess.run(
+                [python_executable, "-c", enum_script],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                **self.subprocess_flags
+            )
+            
+            if result.returncode != 0:
+                error_msg = f"Failed to enumerate GPUs: {result.stderr.strip()}"
+                self.log(f"ERROR: {error_msg}")
+                return False, error_msg, None
+            
+            data = json.loads(result.stdout.strip())
+            
+            if "error" in data:
+                error_msg = data["error"]
+                self.log(f"ERROR: {error_msg}")
+                return False, error_msg, None
+            
+            gpus = data.get("gpus", [])
+            if not gpus:
+                error_msg = "No GPUs found"
+                self.log(f"ERROR: {error_msg}")
+                return False, error_msg, None
+            
+            # Log all GPUs
+            self.log(f"Found {len(gpus)} GPU(s):")
+            for gpu in gpus:
+                vram_gb = gpu["total_memory"] / (1024 ** 3)
+                self.log(f"  GPU {gpu['index']}: {gpu['name']} ({vram_gb:.1f} GB, CC {gpu['compute_capability']})")
+            
+            # Select best GPU: primary = MAX VRAM, secondary = MAX compute capability
+            best_gpu = max(gpus, key=lambda g: (g["total_memory"], g["compute_capability"]))
+            
+            vram_gb = best_gpu["total_memory"] / (1024 ** 3)
+            selected_info = {
+                "index": best_gpu["index"],
+                "name": best_gpu["name"],
+                "vram_gb": vram_gb,
+                "compute_capability": best_gpu["compute_capability"]
+            }
+            
+            # Set CUDA_VISIBLE_DEVICES environment variable
+            os.environ["CUDA_VISIBLE_DEVICES"] = str(best_gpu["index"])
+            
+            # Log selection result
+            self.log("=" * 60)
+            self.log("=== GPU SELECTION RESULT ===")
+            self.log(f"Selected GPU: {best_gpu['name']} ({vram_gb:.1f} GB, CC {best_gpu['compute_capability']})")
+            self.log(f"Visible devices: [{best_gpu['index']}]")
+            self.log("=" * 60)
+            
+            # Verify selection
+            verify_script = f"""
+import torch
+import os
+assert torch.cuda.is_available(), "CUDA not available"
+device_name = torch.cuda.get_device_name(0)
+expected_name = "{best_gpu['name']}"
+if device_name != expected_name:
+    print(f"ERROR: Device name mismatch. Expected: {{expected_name}}, Got: {{device_name}}")
+    exit(1)
+print(device_name)
+"""
+            
+            verify_result = subprocess.run(
+                [python_executable, "-c", verify_script],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                env=os.environ.copy(),
+                **self.subprocess_flags
+            )
+            
+            if verify_result.returncode != 0:
+                error_msg = f"GPU selection verification failed: {verify_result.stderr.strip()}"
+                self.log(f"ERROR: {error_msg}")
+                return False, error_msg, None
+            
+            self.log(f"✓ GPU selection verified: {verify_result.stdout.strip()}")
+            
+            return True, "", selected_info
+            
+        except json.JSONDecodeError as e:
+            error_msg = f"Failed to parse GPU enumeration output: {str(e)}"
+            self.log(f"ERROR: {error_msg}")
+            return False, error_msg, None
+        except Exception as e:
+            error_msg = f"GPU selection failed: {str(e)}"
+            self.log(f"ERROR: {error_msg}")
+            return False, error_msg, None
+    
+    def _ensure_cuda_torch(self, python_executable: str, cuda_build: str = "cu124") -> Tuple[bool, str]:
+        """
+        Ensure CUDA torch is installed. If CPU torch detected, remove and install CUDA version.
+        
+        Args:
+            python_executable: Target Python executable
+            cuda_build: CUDA build string (e.g., "cu124")
+        
+        Returns:
+            Tuple of (success: bool, error_message: str)
+        """
+        self.log(f"Checking torch installation (expecting CUDA build: {cuda_build})...")
+        
+        # Verify current torch state
+        verify_cmd = [python_executable, "-c", "import torch; print(torch.__version__); print('CUDA:', torch.cuda.is_available())"]
+        try:
+            result = subprocess.run(verify_cmd, capture_output=True, text=True, timeout=10, **self.subprocess_flags)
+            if result.returncode == 0:
+                output = result.stdout.strip()
+                version_line = output.split('\n')[0] if '\n' in output else output
+                cuda_line = output.split('\n')[1] if '\n' in output else ""
+                
+                torch_version = version_line.strip()
+                cuda_available = "True" in cuda_line or "CUDA: True" in output
+                
+                self.log(f"Current torch version: {torch_version}")
+                self.log(f"CUDA available: {cuda_available}")
+                
+                # Check if torch is already correct CUDA version
+                if f"+{cuda_build}" in torch_version and cuda_available:
+                    self.log(f"✓ Torch already installed with CUDA {cuda_build}")
+                    return True, ""
+                
+                # Check if CPU torch is installed
+                if "+cpu" in torch_version or not cuda_available:
+                    self.log(f"ERROR: CPU torch detected (version: {torch_version}, CUDA: {cuda_available})")
+                    self.log("Removing CPU torch and installing CUDA torch...")
+                else:
+                    # Torch exists but wrong CUDA build
+                    self.log(f"Torch has wrong CUDA build (version: {torch_version})")
+                    self.log("Removing incorrect torch and installing correct CUDA torch...")
+            else:
+                # Torch import failed, need to install
+                self.log("Torch not installed or import failed")
+        except Exception as e:
+            # Torch not installed
+            self.log(f"Torch check failed: {str(e)}")
+        
+        # Uninstall torch stack (run twice to ensure cleanup)
+        torch_packages = ["torch", "torchvision", "torchaudio"]
+        for attempt in [1, 2]:
+            self.log(f"Uninstalling torch stack (attempt {attempt}/2)...")
+            for pkg in torch_packages:
+                uninstall_cmd = [python_executable, "-m", "pip", "uninstall", "-y", pkg]
+                cmd_str = " ".join(uninstall_cmd)
+                self.log(f"Running: {cmd_str}")
+                result = subprocess.run(uninstall_cmd, capture_output=True, text=True, timeout=60, **self.subprocess_flags)
+                # Continue even if uninstall fails (package may not be installed)
+        
+        # Install CUDA torch stack from PyTorch index (install separately to ensure exact versions)
+        index_url = f"https://download.pytorch.org/whl/{cuda_build}"
+        torch_version = f"2.5.1+{cuda_build}"
+        torchvision_version = f"0.20.1+{cuda_build}"
+        torchaudio_version = f"2.5.1+{cuda_build}"
+        
+        # Install torch first
+        install_cmd_torch = [
+            python_executable, "-m", "pip", "install",
+            "--index-url", index_url,
+            "--no-cache-dir",
+            "--no-deps",
+            f"torch=={torch_version}"
+        ]
+        cmd_str = " ".join(install_cmd_torch)
+        self.log(f"Running: {cmd_str}")
+        success, last_lines, exit_code = self._run_pip_worker(
+            action="install",
+            package=f"torch=={torch_version}",
+            python_executable=python_executable,
+            index_url=index_url,
+            pip_args=["--no-deps", "--no-cache-dir"]
+        )
+        if not success:
+            error_msg = f"Failed to install torch {torch_version}. Exit code: {exit_code}"
+            self.log(f"ERROR: {error_msg}")
+            return False, error_msg
+        
+        # Install torchvision
+        install_cmd_vision = [
+            python_executable, "-m", "pip", "install",
+            "--index-url", index_url,
+            "--no-cache-dir",
+            "--no-deps",
+            f"torchvision=={torchvision_version}"
+        ]
+        cmd_str = " ".join(install_cmd_vision)
+        self.log(f"Running: {cmd_str}")
+        success, last_lines, exit_code = self._run_pip_worker(
+            action="install",
+            package=f"torchvision=={torchvision_version}",
+            python_executable=python_executable,
+            index_url=index_url,
+            pip_args=["--no-deps", "--no-cache-dir"]
+        )
+        if not success:
+            error_msg = f"Failed to install torchvision {torchvision_version}. Exit code: {exit_code}"
+            self.log(f"ERROR: {error_msg}")
+            return False, error_msg
+        
+        # Install torchaudio
+        install_cmd_audio = [
+            python_executable, "-m", "pip", "install",
+            "--index-url", index_url,
+            "--no-cache-dir",
+            "--no-deps",
+            f"torchaudio=={torchaudio_version}"
+        ]
+        cmd_str = " ".join(install_cmd_audio)
+        self.log(f"Running: {cmd_str}")
+        success, last_lines, exit_code = self._run_pip_worker(
+            action="install",
+            package=f"torchaudio=={torchaudio_version}",
+            python_executable=python_executable,
+            index_url=index_url,
+            pip_args=["--no-deps", "--no-cache-dir"]
+        )
+        if not success:
+            error_msg = f"Failed to install torchaudio {torchaudio_version}. Exit code: {exit_code}"
+            self.log(f"ERROR: {error_msg}")
+            return False, error_msg
+        
+        # Re-verify CUDA torch
+        self.log("Verifying CUDA torch installation...")
+        verify_cmd = [python_executable, "-c", f"import torch; assert torch.__version__ == '{torch_version}', f'Expected {torch_version}, got {{torch.__version__}}'; assert torch.cuda.is_available(), 'CUDA not available'; print('CUDA torch OK')"]
+        result = subprocess.run(verify_cmd, capture_output=True, text=True, timeout=10, **self.subprocess_flags)
+        
+        if result.returncode != 0:
+            error_output = result.stderr or result.stdout
+            error_msg = f"CUDA torch verification failed: {error_output.strip()}"
+            self.log(f"ERROR: {error_msg}")
+            return False, error_msg
+        
+        self.log(f"✓ CUDA torch {torch_version} installed and verified")
+        return True, ""
     
     def _terminate_venv_processes(self, venv_path: Path) -> Tuple[bool, list]:
         """
@@ -813,7 +1091,12 @@ class SmartInstaller:
         # Add pip args directly (they will be forwarded by parse_known_args)
         cmd.extend(pip_args)
         
-        self.log(f"Running pip worker: {' '.join(cmd)}")
+        # Log exact pip command that will be executed
+        pip_cmd_str = f"{python_executable} -m pip {action}"
+        if index_url:
+            pip_cmd_str += f" --index-url {index_url}"
+        pip_cmd_str += " " + " ".join(pip_args) + " " + package
+        self.log(f"Pip command: {pip_cmd_str}")
         
         try:
             # Use Popen to stream output in real-time
@@ -2601,82 +2884,67 @@ if errorlevel 1 (
             self.log(error_msg)
             return False
         
-        # CRITICAL: Check if torch is already correct (never re-download if correct)
-        expected_torch_version = install_plan["torch_spec"].split("==")[1]  # Extract version from spec
+        # CRITICAL: Ensure CUDA torch is installed (repairs CPU torch automatically)
         require_cuda = install_plan.get("nvidia_gpu_present", False)
         
-        torch_already_correct, torch_check_error = self._check_torch_already_correct(
-            python_executable, install_plan["torch_spec"], require_cuda
-        )
-        
-        if torch_already_correct:
-            self.log(f"✓ torch already installed and correct: {expected_torch_version} (SKIPPING download)")
-            torch_needs_install = False
-        else:
-            # Check for CPU torch when CUDA is required (corruption case)
-            if require_cuda:
-                try:
-                    check_cpu_cmd = [python_executable, "-c", "import torch; print(torch.__version__); print('CUDA:', torch.cuda.is_available())"]
-                    cpu_check = subprocess.run(check_cpu_cmd, capture_output=True, text=True, timeout=10, **self.subprocess_flags)
-                    if cpu_check.returncode == 0:
-                        output = cpu_check.stdout
-                        if "CUDA: False" in output or "CUDA:  False" in output:
-                            self.log("ERROR: CPU torch detected but CUDA GPU is available")
-                            self.log("ABORTING: Must uninstall CPU torch and install CUDA torch")
-                            return False
-                except:
-                    pass
+        if require_cuda:
+            # Extract CUDA build from install plan (e.g., "cu124" from "2.5.1+cu124")
+            cuda_build = install_plan.get("cuda_build", "cu124")
             
-            torch_needs_install = True
-        
-        if torch_needs_install:
-            # GATE: Wheel availability before installing torch
-            wheel_ok, wheel_error, available_version = self._gate_wheel_availability(
-                python_executable, install_plan["torch_spec"], install_plan["torch_index_url"]
-            )
-            if not wheel_ok:
-                self.log(f"ERROR: Wheel availability gate failed: {wheel_error}")
-                self.log("RECOMMENDATION: Recreate venv with Python 3.12 or compatible version")
-                return False
-            if available_version and available_version != install_plan["torch_spec"].split("==")[-1]:
-                # Update install plan with available version
-                install_plan["torch_spec"] = f"torch=={available_version}"
-                self.log(f"Using available version: {install_plan['torch_spec']}")
-            
-            self.log(f"Installing {install_plan['torch_spec']}...")
-            venv_path = Path(python_executable).parent.parent
-            self._delete_torch_directory(venv_path)
-            
-            success, last_lines, exit_code = self._run_pip_worker(
-                action="install",
-                package=install_plan["torch_spec"],
-                python_executable=python_executable,
-                index_url=install_plan["torch_index_url"],
-                pip_args=["--no-deps", "--no-cache-dir"]
-            )
-            if not success:
-                # RECOVERY: Binary install failed on Windows
-                if sys.platform == "win32":
-                    self.log("ERROR: Binary wheel installation failed on Windows")
-                    self.log("RECOMMENDATION: Recreate venv and try again")
-                    return False
+            # Use ensure_cuda_torch to handle CPU torch replacement
+            torch_ok, torch_error = self._ensure_cuda_torch(python_executable, cuda_build)
+            if not torch_ok:
+                self.log(f"ERROR: Failed to ensure CUDA torch: {torch_error}")
                 return False
             
-            # GATE: NumPy integrity after torch install
-            numpy_ok, numpy_error = self._gate_numpy_integrity(python_executable)
-            if not numpy_ok:
-                self.log(f"ERROR: NumPy integrity check failed after torch install: {numpy_error}")
-                self.log("RECOMMENDATION: Recreate venv and try again")
-                return False
-            
-            # CRITICAL GATE: Torch integrity after torch install
+            # Verify torch integrity
+            expected_torch_version = install_plan["torch_spec"].split("==")[1]
             torch_ok, torch_error = self._gate_torch_integrity(python_executable, install_plan["torch_spec"], require_cuda)
             if not torch_ok:
-                self.log(f"ERROR: Torch integrity check failed after torch install: {torch_error}")
-                self.log("ABORTING: Installation failed - torch version or CUDA availability incorrect")
+                self.log(f"ERROR: Torch integrity check failed: {torch_error}")
                 return False
             
-            self.log("✓ torch installed and verified")
+            self.log("✓ CUDA torch stack verified")
+            
+            # GPU SELECTION: Select best GPU after CUDA torch is verified
+            gpu_ok, gpu_error, gpu_info = self._select_best_gpu(python_executable)
+            if not gpu_ok:
+                self.log(f"ERROR: GPU selection failed: {gpu_error}")
+                return False
+        else:
+            # CPU-only installation
+            expected_torch_version = install_plan["torch_spec"].split("==")[1]
+            torch_already_correct, torch_check_error = self._check_torch_already_correct(
+                python_executable, install_plan["torch_spec"], require_cuda
+            )
+            
+            if not torch_already_correct:
+                # Install CPU torch
+                self.log(f"Installing CPU torch {expected_torch_version}...")
+                venv_path = Path(python_executable).parent.parent
+                self._delete_torch_directory(venv_path)
+                
+                install_cmd = [python_executable, "-m", "pip", "install", "--index-url", install_plan["torch_index_url"], "--no-cache-dir", "--no-deps", install_plan["torch_spec"]]
+                cmd_str = " ".join(install_cmd)
+                self.log(f"Running: {cmd_str}")
+                
+                success, last_lines, exit_code = self._run_pip_worker(
+                    action="install",
+                    package=install_plan["torch_spec"],
+                    python_executable=python_executable,
+                    index_url=install_plan["torch_index_url"],
+                    pip_args=["--no-deps", "--no-cache-dir"]
+                )
+                if not success:
+                    self.log(f"ERROR: CPU torch installation failed. Exit code: {exit_code}")
+                    return False
+                
+                torch_ok, torch_error = self._gate_torch_integrity(python_executable, install_plan["torch_spec"], require_cuda)
+                if not torch_ok:
+                    self.log(f"ERROR: Torch integrity check failed: {torch_error}")
+                    return False
+                
+                self.log("✓ CPU torch installed and verified")
         
         # Verify torchvision
         torchvision_ok = self._verify_import(python_executable, "torchvision")
@@ -2795,12 +3063,13 @@ if errorlevel 1 (
             self.log(f"ERROR: NumPy integrity check failed after huggingface-hub install: {numpy_error}")
             return False
         
-        # CRITICAL GATE: Torch integrity after huggingface-hub install
-        torch_ok, torch_error = self._gate_torch_integrity(python_executable, install_plan["torch_spec"], require_cuda)
-        if not torch_ok:
-            self.log(f"ERROR: Torch integrity check failed after huggingface-hub install: {torch_error}")
-            self.log("ABORTING: Installation failed - torch corrupted")
-            return False
+        # GUARD: Check torch after huggingface-hub install
+        if require_cuda:
+            torch_ok, torch_error = self._gate_torch_integrity(python_executable, install_plan["torch_spec"], require_cuda)
+            if not torch_ok:
+                self.log(f"ERROR: Torch changed after huggingface-hub install: {torch_error}")
+                self.log("ABORTING: torch drift detected - installation step: huggingface-hub")
+                return False
         self.log("✓ huggingface-hub installed")
         
         # Install tokenizers
@@ -2826,12 +3095,13 @@ if errorlevel 1 (
             self.log(f"ERROR: NumPy integrity check failed after tokenizers install: {numpy_error}")
             return False
         
-        # CRITICAL GATE: Torch integrity
-        torch_ok, torch_error = self._gate_torch_integrity(python_executable, install_plan["torch_spec"], require_cuda)
-        if not torch_ok:
-            self.log(f"ERROR: Torch integrity check failed after tokenizers install: {torch_error}")
-            self.log("ABORTING: Installation failed - torch corrupted")
-            return False
+        # GUARD: Check torch after tokenizers install
+        if require_cuda:
+            torch_ok, torch_error = self._gate_torch_integrity(python_executable, install_plan["torch_spec"], require_cuda)
+            if not torch_ok:
+                self.log(f"ERROR: Torch changed after tokenizers install: {torch_error}")
+                self.log("ABORTING: torch drift detected - installation step: tokenizers")
+                return False
         self.log("✓ tokenizers installed")
         
         # Install transformers
@@ -2857,12 +3127,13 @@ if errorlevel 1 (
             self.log(f"ERROR: NumPy integrity check failed after transformers install: {numpy_error}")
             return False
         
-        # CRITICAL GATE: Torch integrity
-        torch_ok, torch_error = self._gate_torch_integrity(python_executable, install_plan["torch_spec"], require_cuda)
-        if not torch_ok:
-            self.log(f"ERROR: Torch integrity check failed after transformers install: {torch_error}")
-            self.log("ABORTING: Installation failed - torch corrupted")
-            return False
+        # GUARD: Check torch after transformers install
+        if require_cuda:
+            torch_ok, torch_error = self._gate_torch_integrity(python_executable, install_plan["torch_spec"], require_cuda)
+            if not torch_ok:
+                self.log(f"ERROR: Torch changed after transformers install: {torch_error}")
+                self.log("ABORTING: torch drift detected - installation step: transformers")
+                return False
         
         if not self._verify_import(python_executable, "transformers"):
             self.log(f"ERROR: transformers import verification failed")
@@ -2892,12 +3163,13 @@ if errorlevel 1 (
             self.log(f"ERROR: NumPy integrity check failed after datasets install: {numpy_error}")
             return False
         
-        # CRITICAL GATE: Torch integrity
-        torch_ok, torch_error = self._gate_torch_integrity(python_executable, install_plan["torch_spec"], require_cuda)
-        if not torch_ok:
-            self.log(f"ERROR: Torch integrity check failed after datasets install: {torch_error}")
-            self.log("ABORTING: Installation failed - torch corrupted")
-            return False
+        # GUARD: Check torch after datasets install
+        if require_cuda:
+            torch_ok, torch_error = self._gate_torch_integrity(python_executable, install_plan["torch_spec"], require_cuda)
+            if not torch_ok:
+                self.log(f"ERROR: Torch changed after datasets install: {torch_error}")
+                self.log("ABORTING: torch drift detected - installation step: datasets")
+                return False
         
         if not self._verify_import(python_executable, "datasets"):
             self.log(f"ERROR: datasets import verification failed")
@@ -2957,12 +3229,13 @@ if errorlevel 1 (
                     self.log(f"ERROR: NumPy integrity check failed after {pkg_spec} install: {numpy_error}")
                     return False
                 
-                # CRITICAL GATE: Torch integrity after every Layer 4 install
-                torch_ok, torch_error = self._gate_torch_integrity(python_executable, install_plan["torch_spec"], require_cuda)
-                if not torch_ok:
-                    self.log(f"ERROR: Torch integrity check failed after {pkg_spec} install: {torch_error}")
-                    self.log("ABORTING: Installation failed - torch corrupted")
-                    return False
+                # GUARD: Check torch after Layer 4 install
+                if require_cuda:
+                    torch_ok, torch_error = self._gate_torch_integrity(python_executable, install_plan["torch_spec"], require_cuda)
+                    if not torch_ok:
+                        self.log(f"ERROR: Torch changed after {pkg_spec} install: {torch_error}")
+                        self.log(f"ABORTING: torch drift detected - installation step: {pkg_spec}")
+                        return False
                 
                 self.log(f"✓ {pkg_spec} installed")
         
@@ -2971,18 +3244,24 @@ if errorlevel 1 (
         self.log("FINAL VERIFICATION")
         self.log("=" * 60)
         
+        # Get expected torch version for final verification
+        expected_torch_version = install_plan["torch_spec"].split("==")[1]
+        
         if require_cuda:
-            final_verify_script = f"""
-import torch, transformers, datasets, huggingface_hub
+            final_verify_script = f"""import torch, transformers, datasets, huggingface_hub
 assert torch.__version__ == '{expected_torch_version}'
 assert torch.cuda.is_available()
 print('INSTALL OK')
+print('torch version:', torch.__version__)
+print('CUDA available:', torch.cuda.is_available())
+if torch.cuda.is_available():
+    print('Device name:', torch.cuda.get_device_name(0))
 """
         else:
-            final_verify_script = f"""
-import torch, transformers, datasets, huggingface_hub
+            final_verify_script = f"""import torch, transformers, datasets, huggingface_hub
 assert torch.__version__ == '{expected_torch_version}'
 print('INSTALL OK')
+print('torch version:', torch.__version__)
 """
         
         final_cmd = [python_executable, "-c", final_verify_script]
