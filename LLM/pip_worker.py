@@ -41,6 +41,9 @@ def main():
         if constraints_file.exists():
             cmd.extend(["-c", str(constraints_file)])
         
+        # Add required flags for ALL installs (hardware/platform-driven architecture)
+        cmd.extend(["--no-build-isolation", "--only-binary=:all:"])
+        
         # Add pip args (all unknown arguments)
         cmd.extend(pip_args)
         

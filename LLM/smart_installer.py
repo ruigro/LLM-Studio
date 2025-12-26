@@ -54,6 +54,7 @@ class SmartInstaller:
         self.installation_log = []
         self.progress_callback = None  # Callback for progress updates (percent, message)
         self.min_disk_space_gb = 5  # Minimum 5 GB required
+        self.install_plan = {}  # Frozen install plan dict (hardware/platform-driven)
         
         # Windows subprocess flags to prevent CMD window flashing
         self.subprocess_flags = {}
@@ -70,6 +71,199 @@ class SmartInstaller:
         """Log installation message"""
         print(f"[INSTALL] {message}")
         self.installation_log.append(message)
+    
+    def _detect_hardware_platform(self, python_executable: Optional[str] = None) -> Dict:
+        """
+        Detection phase: Detect OS, Python, CPU arch, NVIDIA GPU, CUDA driver.
+        Runs BEFORE any install.
+        
+        Returns:
+            Frozen install_plan dict with all hardware/platform decisions
+        """
+        self.log("=" * 60)
+        self.log("DETECTION PHASE: Hardware and Platform Detection")
+        self.log("=" * 60)
+        
+        plan = {}
+        
+        # 1. Detect OS
+        plan["os"] = platform.system()  # Windows, Linux, Darwin
+        plan["os_version"] = platform.version()
+        self.log(f"OS: {plan['os']} {plan['os_version']}")
+        
+        # 2. Detect CPU architecture
+        plan["cpu_arch"] = platform.machine()  # x86_64, AMD64, etc.
+        self.log(f"CPU Architecture: {plan['cpu_arch']}")
+        
+        # 3. Detect Python version
+        if not python_executable:
+            python_executable = sys.executable
+        
+        try:
+            result = subprocess.run(
+                [python_executable, "-c", "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                **self.subprocess_flags
+            )
+            if result.returncode == 0:
+                python_version = result.stdout.strip()
+                plan["python_version"] = python_version
+                major, minor = map(int, python_version.split('.'))
+                plan["python_major"] = major
+                plan["python_minor"] = minor
+                self.log(f"Python: {python_version}")
+            else:
+                raise ValueError("Could not detect Python version")
+        except Exception as e:
+            self.log(f"ERROR: Python detection failed: {e}")
+            return {}
+        
+        # 4. Detect NVIDIA GPU via nvidia-smi
+        plan["nvidia_gpu_present"] = False
+        plan["cuda_driver_version"] = None
+        plan["cuda_compute_capability"] = None
+        
+        try:
+            result = subprocess.run(
+                ["nvidia-smi", "--query-gpu=name,driver_version,compute_cap", "--format=csv,noheader"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                **self.subprocess_flags
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                lines = result.stdout.strip().split('\n')
+                if lines:
+                    # Parse first GPU
+                    parts = lines[0].split(',')
+                    if len(parts) >= 2:
+                        plan["nvidia_gpu_present"] = True
+                        plan["gpu_name"] = parts[0].strip()
+                        plan["cuda_driver_version"] = parts[1].strip()
+                        if len(parts) >= 3:
+                            plan["cuda_compute_capability"] = parts[2].strip()
+                        self.log(f"NVIDIA GPU detected: {plan['gpu_name']}")
+                        self.log(f"CUDA Driver: {plan['cuda_driver_version']}")
+                        if plan["cuda_compute_capability"]:
+                            self.log(f"Compute Capability: {plan['cuda_compute_capability']}")
+        except (FileNotFoundError, subprocess.TimeoutExpired, Exception) as e:
+            self.log(f"No NVIDIA GPU detected (nvidia-smi not available or failed: {e})")
+        
+        # 5. Determine CUDA build from driver version
+        if plan.get("nvidia_gpu_present") and plan.get("cuda_driver_version"):
+            driver_version = plan["cuda_driver_version"]
+            # Parse major.minor from driver version (e.g., "550.54.15" -> 550)
+            try:
+                driver_major = int(driver_version.split('.')[0])
+                # Map driver version to CUDA build
+                if driver_major >= 550:
+                    plan["cuda_build"] = "cu124"  # CUDA 12.4
+                elif driver_major >= 530:
+                    plan["cuda_build"] = "cu121"  # CUDA 12.1
+                elif driver_major >= 520:
+                    plan["cuda_build"] = "cu118"  # CUDA 11.8
+                else:
+                    plan["cuda_build"] = "cu118"  # Default to 11.8
+                self.log(f"Selected CUDA build: {plan['cuda_build']}")
+            except (ValueError, IndexError):
+                plan["cuda_build"] = "cu118"  # Default
+                self.log(f"Could not parse driver version, defaulting to cu118")
+        else:
+            plan["cuda_build"] = "cpu"
+            self.log("No GPU detected, using CPU-only build")
+        
+        # Make plan immutable (frozen)
+        plan["_frozen"] = True
+        
+        self.log("=" * 60)
+        self.log("Detection phase complete")
+        self.log("=" * 60)
+        
+        return plan
+    
+    def _generate_install_plan(self, python_executable: Optional[str] = None) -> Dict:
+        """
+        Generate immutable install plan from hardware/platform detection.
+        Derives all package version decisions from install_plan.
+        
+        Returns:
+            Complete install_plan with package decisions
+        """
+        if not self.install_plan or not self.install_plan.get("_frozen"):
+            # Run detection phase first
+            self.install_plan = self._detect_hardware_platform(python_executable)
+        
+        if not self.install_plan:
+            return {}
+        
+        plan = self.install_plan.copy()
+        
+        # Derive immutable decisions from hardware/platform
+        
+        # 1. NumPy version based on Python version
+        if plan["python_major"] >= 3 and plan["python_minor"] >= 12:
+            plan["numpy_spec"] = "numpy>=2,<3"
+        else:
+            plan["numpy_spec"] = "numpy<2"
+        self.log(f"NumPy decision: {plan['numpy_spec']} (Python {plan['python_version']})")
+        
+        # 2. PyTorch build based on GPU presence
+        if plan.get("nvidia_gpu_present"):
+            cuda_build = plan["cuda_build"]
+            plan["torch_spec"] = f"torch==2.5.1+{cuda_build}"
+            plan["torchvision_spec"] = f"torchvision==0.20.1+{cuda_build}"
+            plan["torchaudio_spec"] = f"torchaudio==2.5.1+{cuda_build}"
+            plan["torch_index_url"] = f"https://download.pytorch.org/whl/{cuda_build}"
+        else:
+            plan["torch_spec"] = "torch==2.5.1"
+            plan["torchvision_spec"] = "torchvision==0.20.1"
+            plan["torchaudio_spec"] = "torchaudio==2.5.1"
+            plan["torch_index_url"] = "https://download.pytorch.org/whl/cpu"
+        self.log(f"PyTorch decision: {plan['torch_spec']} ({plan['torch_index_url']})")
+        
+        # 3. Always pin these packages
+        plan["sympy_spec"] = "sympy==1.13.1"
+        plan["fsspec_spec"] = "fsspec<=2025.9.0"
+        plan["huggingface_hub_spec"] = "huggingface-hub<1.0"
+        
+        # 4. Other packages
+        plan["transformers_spec"] = "transformers==4.51.3"
+        plan["tokenizers_spec"] = "tokenizers==0.21.4"
+        plan["datasets_spec"] = "datasets>=2.11.0,<4.4.0"
+        
+        return plan
+    
+    def _generate_constraints_file(self, install_plan: Dict) -> Path:
+        """
+        Generate constraints.txt dynamically from install_plan.
+        Do NOT hardcode numpy in source files.
+        
+        Returns:
+            Path to generated constraints.txt file
+        """
+        constraints_file = Path(__file__).parent / "constraints.txt"
+        
+        constraints = [
+            "# Global constraints for LLM Fine-tuning Studio",
+            "# Generated dynamically from hardware/platform detection",
+            "",
+            f"# NumPy constraint based on Python {install_plan.get('python_version', 'unknown')}",
+            install_plan.get("numpy_spec", "numpy<2"),
+            "",
+            "# Always pinned packages",
+            install_plan.get("sympy_spec", "sympy==1.13.1"),
+            install_plan.get("fsspec_spec", "fsspec<=2025.9.0"),
+            install_plan.get("huggingface_hub_spec", "huggingface-hub<1.0"),
+            "",
+        ]
+        
+        with open(constraints_file, 'w', encoding='utf-8') as f:
+            f.write('\n'.join(constraints))
+        
+        self.log(f"Generated constraints.txt: {constraints_file}")
+        return constraints_file
     
     def _terminate_venv_processes(self, venv_path: Path) -> Tuple[bool, list]:
         """
@@ -144,6 +338,63 @@ class SmartInstaller:
             time.sleep(2)  # Wait for processes to terminate
         
         return True, terminated_pids
+    
+    def _check_running_processes_before_binary_install(self, python_executable: str) -> Tuple[bool, str]:
+        """
+        BEFORE uninstall/install of any binary wheel:
+        - Check no python.exe is running from the target venv
+        - Check the GUI app is not running
+        - If any are found, abort with a clear message
+        
+        Returns:
+            Tuple of (safe_to_proceed: bool, error_message: str)
+        """
+        venv_path = Path(python_executable).parent.parent
+        venv_python = venv_path / "Scripts" / "python.exe" if sys.platform == "win32" else venv_path / "bin" / "python"
+        
+        if not venv_python.exists():
+            return True, None  # Venv doesn't exist yet, safe to proceed
+        
+        running_processes = []
+        
+        # Check for python.exe from target venv
+        if sys.platform == "win32":
+            try:
+                result = subprocess.run(
+                    ["tasklist", "/FI", f"IMAGEPATH eq {venv_python}", "/FO", "CSV", "/NH"],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                    **self.subprocess_flags
+                )
+                if result.returncode == 0 and venv_python.name in result.stdout:
+                    running_processes.append(f"Python process from target venv: {venv_python}")
+            except Exception:
+                pass
+        
+        # Check for GUI app (desktop_app/main.py or launcher.exe)
+        try:
+            if sys.platform == "win32":
+                # Check for launcher.exe or main.py processes
+                result = subprocess.run(
+                    ["tasklist", "/FI", "IMAGENAME eq launcher.exe", "/FO", "CSV", "/NH"],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                    **self.subprocess_flags
+                )
+                if result.returncode == 0 and "launcher.exe" in result.stdout:
+                    running_processes.append("GUI launcher (launcher.exe) is running")
+        except Exception:
+            pass
+        
+        if running_processes:
+            error_msg = "Cannot install binary wheels while the following processes are running:\n"
+            error_msg += "\n".join(f"  - {proc}" for proc in running_processes)
+            error_msg += "\n\nPlease close all Python processes and the GUI application, then try again."
+            return False, error_msg
+        
+        return True, None
     
     def _delete_torch_directory(self, venv_path: Path) -> Tuple[bool, str]:
         """
@@ -1546,11 +1797,15 @@ if errorlevel 1 (
         if not target_python_path.exists():
             return False
         
-        # Map package names to import names
+        # Map package names to import names (package name may differ from import name)
         import_map = {
             "transformers": "transformers",
             "huggingface_hub": "huggingface_hub",
+            "huggingface-hub": "huggingface_hub",
             "datasets": "datasets",
+            "torchvision": "torchvision",
+            "torchaudio": "torchaudio",
+            "numpy": "numpy",
         }
         import_name = import_map.get(package_name, package_name)
         
@@ -1929,300 +2184,264 @@ if errorlevel 1 (
     
     def repair_all(self, python_executable: Optional[str] = None) -> bool:
         """
-        Repair a broken environment deterministically.
-        USES CHECKLIST AS SOURCE OF TRUTH - installs components in checklist order.
-        STOPS IMMEDIATELY if any component fails.
+        Repair a broken environment using hardware/platform-driven architecture.
+        - Detection phase runs BEFORE any install
+        - Install plan derived from hardware/platform
+        - Constraints.txt generated dynamically
+        - Strict layer-based installation (no auto-upgrade)
+        - Import-only verification
         """
         self.log("=" * 60)
-        self.log("LLM Fine-tuning Studio - Repair Mode")
-        self.log("Using installation checklist as source of truth")
+        self.log("LLM Fine-tuning Studio - Hardware/Platform-Driven Repair Mode")
         self.log("=" * 60)
         
-        # Check disk space before starting
+        # 1. Check disk space
         has_space, free_gb = self._check_disk_space()
         self.log(f"Available disk space: {free_gb:.2f} GB (minimum required: {self.min_disk_space_gb} GB)")
         if not has_space:
             self.log(f"ERROR: Insufficient disk space! Only {free_gb:.2f} GB available, need at least {self.min_disk_space_gb} GB")
-            self.log("Please free up disk space and try again.")
             return False
 
-        # Detection (also populates python path)
-        if not self.detection_results:
-            self.run_detection()
-
+        # 2. Detection phase: Run BEFORE any install
         if not python_executable:
-            python_executable = (
-                self.detection_results.get("python", {}).get("executable")
-                or sys.executable
-            )
+            python_executable = sys.executable
         
-        # GET CHECKLIST - THIS IS THE SOURCE OF TRUTH
-        self.log("Getting installation checklist (source of truth)...")
-        checklist = self.get_installation_checklist(python_executable=python_executable)
+        install_plan = self._generate_install_plan(python_executable)
+        if not install_plan:
+            self.log("ERROR: Failed to generate install plan from hardware/platform detection")
+            return False
         
-        # Only uninstall packages that need to be reinstalled (not already installed correctly)
-        packages_to_uninstall = []
-        for component in checklist:
-            component_name = component["component"]
-            status = component.get("status", "missing")
-            
-            # Only uninstall if not already installed correctly
-            if status != "installed":
-                if component_name == "PyTorch (CUDA)":
-                    packages_to_uninstall.extend(["torch", "torchvision", "torchaudio", "xformers"])
-                elif component_name == "PyTorch Vision":
-                    if "torchvision" not in packages_to_uninstall:
-                        packages_to_uninstall.append("torchvision")
-                elif component_name == "PyTorch Audio":
-                    if "torchaudio" not in packages_to_uninstall:
-                        packages_to_uninstall.append("torchaudio")
-                elif component_name == "Triton (Windows)":
-                    packages_to_uninstall.extend(["triton", "triton-windows"])
-                elif component_name in ["PySide6", "PySide6-Essentials", "PySide6-Addons", "shiboken6"]:
-                    if "PySide6" not in packages_to_uninstall:
-                        packages_to_uninstall.extend(["PySide6", "PySide6-Essentials", "PySide6-Addons", "shiboken6"])
-                elif component_name in ["transformers", "tokenizers", "numpy", "datasets"]:
-                    packages_to_uninstall.append(component_name)
+        # 3. Generate constraints.txt dynamically from install_plan
+        constraints_file = self._generate_constraints_file(install_plan)
         
-        # Also always remove problematic packages
-        always_remove = ["trl", "torchao", "xformers"]
-        for pkg in always_remove:
-            if pkg not in packages_to_uninstall:
-                packages_to_uninstall.append(pkg)
+        # 4. Check running processes BEFORE binary installs
+        safe, error_msg = self._check_running_processes_before_binary_install(python_executable)
+        if not safe:
+            self.log("=" * 60)
+            self.log("ERROR: Cannot proceed with binary wheel installation")
+            self.log(error_msg)
+            self.log("=" * 60)
+            return False
         
-        # Remove duplicates
-        packages_to_uninstall = list(set(packages_to_uninstall))
-        
-        if packages_to_uninstall:
-            self.log(f"Repair: Uninstalling packages that need reinstallation: {', '.join(packages_to_uninstall)}")
-            for pkg in packages_to_uninstall:
-                try:
-                    success, last_lines, exit_code = self._run_pip_worker(
-                        action="uninstall",
-                        package=pkg,
-                        python_executable=python_executable
-                    )
-                    # Uninstall failures are OK if package wasn't installed
-                    if not success and "not installed" not in last_lines.lower():
-                        self.log(f"Repair: Warning - uninstall of {pkg} had issues: {last_lines[:200]}")
-                except Exception as exc:
-                    self.log(f"Repair: Warning - could not uninstall {pkg}: {str(exc)}")
-        else:
-            self.log("Repair: No packages need to be uninstalled (all are already correct)")
-        
-        # INSTALL CORE STACK IN EXACT ORDER - NO DEVIATION
+        # 5. Install strictly by layers (never allow pip to auto-upgrade a previous layer)
         self.log("=" * 60)
-        self.log("Installing core stack in exact order...")
+        self.log("LAYER-BASED INSTALLATION (strict order, no auto-upgrade)")
         self.log("=" * 60)
         
-        # Step 1: Install numpy<2 with constraints
-        self.log("[1/7] Installing numpy<2 with constraints...")
+        # LAYER 1: numpy, sympy, fsspec
+        self.log("=" * 60)
+        self.log("LAYER 1: numpy, sympy, fsspec")
+        self.log("=" * 60)
+        
+        # Install numpy (from install_plan, dynamically determined)
+        self.log(f"Installing {install_plan['numpy_spec']}...")
         success, last_lines, exit_code = self._run_pip_worker(
             action="install",
-            package="numpy<2",
+            package=install_plan["numpy_spec"],
             python_executable=python_executable,
-            pip_args=["--force-reinstall"]
+            pip_args=[]  # No --force-reinstall by default
         )
         if not success:
             self.log(f"ERROR: numpy installation failed - cannot continue")
-            self.log(f"Exit code: {exit_code}")
-            self.log(f"Error output: {last_lines[-500:]}")
             return False
-        self.log("[1/7] ✓ numpy installed")
         
-        # Step 2: Install PyTorch stack with verification guards
-        self.log("[2/7] Checking PyTorch stack (torch, torchvision, torchaudio)...")
-        cuda_build = self.get_optimal_cuda_build()
-        index_url = f"https://download.pytorch.org/whl/{cuda_build}" if cuda_build != "cpu" else "https://download.pytorch.org/whl/cpu"
+        # Verify numpy by import (if fails, abort immediately - never continue)
+        if not self._verify_import(python_executable, "numpy"):
+            self.log("ERROR: numpy import verification failed - ABORTING")
+            self.log("Never uninstall/reinstall numpy after torch is installed")
+            return False
+        self.log("✓ numpy installed and verified")
         
-        # Verify torch first
+        # Install sympy
+        self.log(f"Installing {install_plan['sympy_spec']}...")
+        success, last_lines, exit_code = self._run_pip_worker(
+            action="install",
+            package=install_plan["sympy_spec"],
+            python_executable=python_executable,
+            pip_args=[]
+        )
+        if not success:
+            self.log(f"ERROR: sympy installation failed - cannot continue")
+            return False
+        self.log("✓ sympy installed")
+        
+        # Install fsspec
+        self.log(f"Installing {install_plan['fsspec_spec']}...")
+        success, last_lines, exit_code = self._run_pip_worker(
+            action="install",
+            package=install_plan["fsspec_spec"],
+            python_executable=python_executable,
+            pip_args=[]
+        )
+        if not success:
+            self.log(f"ERROR: fsspec installation failed - cannot continue")
+            return False
+        self.log("✓ fsspec installed")
+        
+        # LAYER 2: torch stack
+        self.log("=" * 60)
+        self.log("LAYER 2: torch stack")
+        self.log("=" * 60)
+        
+        # Check running processes before binary install
+        safe, error_msg = self._check_running_processes_before_binary_install(python_executable)
+        if not safe:
+            self.log("ERROR: Cannot install binary wheels while processes are running")
+            self.log(error_msg)
+            return False
+        
+        # Verify torch first (skip if already installed and verified)
         torch_ok, torch_ver, torch_cuda, torch_error = self._verify_torch(python_executable)
         torch_needs_install = True
         if torch_ok and torch_cuda:
-            # Check if version matches expected 2.5.1+cu118 (or just 2.5.1)
             if torch_ver and ("2.5.1" in torch_ver or torch_ver.startswith("2.5.1")):
-                self.log(f"[2/7] ✓ torch already installed and verified: {torch_ver} (CUDA available)")
+                self.log(f"✓ torch already installed and verified: {torch_ver} (CUDA available)")
                 torch_needs_install = False
-            else:
-                self.log(f"[2/7] torch version mismatch: have {torch_ver}, need 2.5.1+cu118")
-        else:
-            self.log(f"[2/7] torch verification failed: {torch_error}")
         
-        # Install torch only if verification failed
         if torch_needs_install:
-            self.log("[2/7] Installing torch==2.5.1+cu118 (verification failed, using --force-reinstall)...")
-            # Delete torch directory only if verification failed
+            self.log(f"Installing {install_plan['torch_spec']}...")
             venv_path = Path(python_executable).parent.parent
-            self._delete_torch_directory(venv_path)
+            self._delete_torch_directory(venv_path)  # Only delete if verification failed
             
             success, last_lines, exit_code = self._run_pip_worker(
                 action="install",
-                package="torch==2.5.1+cu118",
+                package=install_plan["torch_spec"],
                 python_executable=python_executable,
-                index_url=index_url,
-                pip_args=["--force-reinstall", "--no-deps", "--no-cache-dir"]
+                index_url=install_plan["torch_index_url"],
+                pip_args=["--no-deps"]  # Only use --no-deps, not --force-reinstall by default
             )
             if not success:
-                self.log(f"ERROR: torch installation failed - cannot continue")
+                self.log(f"ERROR: torch installation failed")
                 return False
-            self.log("[2/7] ✓ torch installed")
-        else:
-            self.log("[2/7] torch installation SKIPPED (already installed and verified)")
+            self.log("✓ torch installed")
         
         # Verify torchvision
-        torchvision_ok = False
-        verify_cmd = [python_executable, "-c", "import torchvision; print(torchvision.__version__)"]
-        try:
-            verify_result = subprocess.run(verify_cmd, capture_output=True, text=True, timeout=30, **self.subprocess_flags)
-            if verify_result.returncode == 0 and verify_result.stdout:
-                torchvision_ver = verify_result.stdout.strip()
-                # Check if version matches expected 0.20.1
-                if "0.20.1" in torchvision_ver or torchvision_ver.startswith("0.20.1"):
-                    self.log(f"[2/7] ✓ torchvision already installed and verified: {torchvision_ver}")
-                    torchvision_ok = True
-                else:
-                    self.log(f"[2/7] torchvision version mismatch: have {torchvision_ver}, need 0.20.1+cu118")
-        except Exception as e:
-            self.log(f"[2/7] torchvision verification failed: {str(e)}")
-        
-        # Install torchvision only if verification failed
+        torchvision_ok = self._verify_import(python_executable, "torchvision")
         if not torchvision_ok:
-            self.log("[2/7] Installing torchvision==0.20.1+cu118 (verification failed, using --force-reinstall)...")
+            self.log(f"Installing {install_plan['torchvision_spec']}...")
             success, last_lines, exit_code = self._run_pip_worker(
                 action="install",
-                package="torchvision==0.20.1+cu118",
+                package=install_plan["torchvision_spec"],
                 python_executable=python_executable,
-                index_url=index_url,
-                pip_args=["--force-reinstall", "--no-deps", "--no-cache-dir"]
+                index_url=install_plan["torch_index_url"],
+                pip_args=["--no-deps"]
             )
             if not success:
-                self.log(f"ERROR: torchvision installation failed - cannot continue")
+                self.log(f"ERROR: torchvision installation failed")
                 return False
-            self.log("[2/7] ✓ torchvision installed")
+            self.log("✓ torchvision installed")
         else:
-            self.log("[2/7] torchvision installation SKIPPED (already installed and verified)")
+            self.log("✓ torchvision already installed")
         
         # Verify torchaudio
-        torchaudio_ok = False
-        verify_cmd = [python_executable, "-c", "import torchaudio; print(torchaudio.__version__)"]
-        try:
-            verify_result = subprocess.run(verify_cmd, capture_output=True, text=True, timeout=30, **self.subprocess_flags)
-            if verify_result.returncode == 0 and verify_result.stdout:
-                torchaudio_ver = verify_result.stdout.strip()
-                # Check if version matches expected 2.5.1
-                if "2.5.1" in torchaudio_ver or torchaudio_ver.startswith("2.5.1"):
-                    self.log(f"[2/7] ✓ torchaudio already installed and verified: {torchaudio_ver}")
-                    torchaudio_ok = True
-                else:
-                    self.log(f"[2/7] torchaudio version mismatch: have {torchaudio_ver}, need 2.5.1+cu118")
-        except Exception as e:
-            self.log(f"[2/7] torchaudio verification failed: {str(e)}")
-        
-        # Install torchaudio only if verification failed
+        torchaudio_ok = self._verify_import(python_executable, "torchaudio")
         if not torchaudio_ok:
-            self.log("[2/7] Installing torchaudio==2.5.1+cu118 (verification failed, using --force-reinstall)...")
+            self.log(f"Installing {install_plan['torchaudio_spec']}...")
             success, last_lines, exit_code = self._run_pip_worker(
                 action="install",
-                package="torchaudio==2.5.1+cu118",
+                package=install_plan["torchaudio_spec"],
                 python_executable=python_executable,
-                index_url=index_url,
-                pip_args=["--force-reinstall", "--no-deps", "--no-cache-dir"]
+                index_url=install_plan["torch_index_url"],
+                pip_args=["--no-deps"]
             )
             if not success:
-                self.log(f"ERROR: torchaudio installation failed - cannot continue")
+                self.log(f"ERROR: torchaudio installation failed")
                 return False
-            self.log("[2/7] ✓ torchaudio installed")
+            self.log("✓ torchaudio installed")
         else:
-            self.log("[2/7] torchaudio installation SKIPPED (already installed and verified)")
+            self.log("✓ torchaudio already installed")
         
-        self.log("[2/7] ✓ PyTorch stack verified/installed")
+        # LAYER 3: huggingface-hub, tokenizers, transformers, datasets
+        self.log("=" * 60)
+        self.log("LAYER 3: huggingface-hub, tokenizers, transformers, datasets")
+        self.log("=" * 60)
         
-        # Step 3: Hard-fix huggingface-hub BEFORE transformers
-        self.log("[3/7] Hard-fixing huggingface-hub (uninstall then reinstall with constraints)...")
-        # Uninstall huggingface-hub and hf-xet
+        # Hard-fix huggingface-hub first
+        self.log("Hard-fixing huggingface-hub...")
         for pkg in ["huggingface-hub", "hf-xet"]:
-            self._run_pip_worker(
-                action="uninstall",
-                package=pkg,
-                python_executable=python_executable
-            )
-        # Install huggingface-hub with constraints
-        success, last_lines, exit_code = self._run_pip_worker(
-            action="install",
-            package="huggingface-hub>=0.30.0,<1.0",
-            python_executable=python_executable,
-            pip_args=["--force-reinstall"]
-        )
-        if not success:
-            self.log(f"ERROR: huggingface-hub installation failed - cannot continue")
-            return False
-        self.log("[3/7] ✓ huggingface-hub fixed")
+            self._run_pip_worker(action="uninstall", package=pkg, python_executable=python_executable)
         
-        # Step 4: Install transformers with constraints
-        self.log("[4/7] Installing transformers==4.51.3 with constraints...")
+        self.log(f"Installing {install_plan['huggingface_hub_spec']}...")
         success, last_lines, exit_code = self._run_pip_worker(
             action="install",
-            package="transformers==4.51.3",
+            package=f"huggingface-hub>=0.30.0,<1.0",
             python_executable=python_executable,
-            pip_args=["--force-reinstall"]
+            pip_args=[]
         )
         if not success:
-            self.log(f"ERROR: transformers installation failed - cannot continue")
+            self.log(f"ERROR: huggingface-hub installation failed")
             return False
-        # Verify by import
+        self.log("✓ huggingface-hub installed")
+        
+        # Install tokenizers
+        self.log(f"Installing {install_plan['tokenizers_spec']}...")
+        success, last_lines, exit_code = self._run_pip_worker(
+            action="install",
+            package=install_plan["tokenizers_spec"],
+            python_executable=python_executable,
+            pip_args=[]
+        )
+        if not success:
+            self.log(f"ERROR: tokenizers installation failed")
+            return False
+        self.log("✓ tokenizers installed")
+        
+        # Install transformers
+        self.log(f"Installing {install_plan['transformers_spec']}...")
+        success, last_lines, exit_code = self._run_pip_worker(
+            action="install",
+            package=install_plan["transformers_spec"],
+            python_executable=python_executable,
+            pip_args=[]
+        )
+        if not success:
+            self.log(f"ERROR: transformers installation failed")
+            return False
         if not self._verify_import(python_executable, "transformers"):
             self.log(f"ERROR: transformers import verification failed")
             return False
-        self.log("[4/7] ✓ transformers installed and verified")
+        self.log("✓ transformers installed and verified")
         
-        # Step 5: Install tokenizers with constraints
-        self.log("[5/7] Installing tokenizers==0.21.4 with constraints...")
+        # Install datasets
+        self.log(f"Installing {install_plan['datasets_spec']}...")
         success, last_lines, exit_code = self._run_pip_worker(
             action="install",
-            package="tokenizers==0.21.4",
+            package=install_plan["datasets_spec"],
             python_executable=python_executable,
-            pip_args=["--force-reinstall"]
+            pip_args=[]
         )
         if not success:
-            self.log(f"ERROR: tokenizers installation failed - cannot continue")
+            self.log(f"ERROR: datasets installation failed")
             return False
-        self.log("[5/7] ✓ tokenizers installed")
-        
-        # Step 6: Install datasets with constraints
-        self.log("[6/7] Installing datasets>=2.11.0,<4.4.0 with constraints...")
-        success, last_lines, exit_code = self._run_pip_worker(
-            action="install",
-            package="datasets>=2.11.0,<4.4.0",
-            python_executable=python_executable,
-            pip_args=["--force-reinstall"]
-        )
-        if not success:
-            self.log(f"ERROR: datasets installation failed - cannot continue")
-            return False
-        # Verify by import
         if not self._verify_import(python_executable, "datasets"):
             self.log(f"ERROR: datasets import verification failed")
             return False
-        self.log("[6/7] ✓ datasets installed and verified")
+        self.log("✓ datasets installed and verified")
         
-        # Step 7: Install trl, xformers, torchao, peft with constraints
-        self.log("[7/7] Installing trl, xformers, torchao, peft with constraints...")
-        for pkg in ["trl>=0.18.2,<0.25.0", "xformers", "torchao", "peft"]:
+        # LAYER 4: trl, xformers, torchao, unsloth-zoo, unsloth
+        self.log("=" * 60)
+        self.log("LAYER 4: trl, xformers, torchao, unsloth-zoo, unsloth")
+        self.log("=" * 60)
+        
+        layer4_packages = ["trl>=0.18.2,<0.25.0", "xformers", "torchao", "peft", "unsloth-zoo", "unsloth"]
+        for pkg in layer4_packages:
+            self.log(f"Installing {pkg}...")
             success, last_lines, exit_code = self._run_pip_worker(
                 action="install",
                 package=pkg,
                 python_executable=python_executable,
-                pip_args=["--force-reinstall"]
+                pip_args=[]
             )
             if not success:
-                self.log(f"WARNING: {pkg} installation had issues: {last_lines[-200:]}")
-                # Continue anyway for optional packages
-        self.log("[7/7] ✓ Additional packages installed")
+                self.log(f"WARNING: {pkg} installation had issues (continuing)")
+            else:
+                self.log(f"✓ {pkg} installed")
         
-        # Final verification: import test for core packages
+        # Final verification: import test for core packages (GUI status rule)
         self.log("=" * 60)
         self.log("Final verification: Import test for core packages...")
-        core_imports = ["transformers", "huggingface_hub", "datasets"]
+        self.log("Component is OK if import succeeds (ignore pip resolver warnings)")
+        core_imports = ["numpy", "transformers", "huggingface_hub", "datasets"]
         all_ok = True
         for pkg in core_imports:
             if self._verify_import(python_executable, pkg):
@@ -2241,531 +2460,6 @@ if errorlevel 1 (
         self.log("=" * 60)
         self.log("REPAIR COMPLETE - All components installed and verified")
         self.log("=" * 60)
-        return True
-        try:
-            sp = subprocess.run(
-                [python_executable, "-c", "import site; print(site.getsitepackages()[0])"],
-                capture_output=True,
-                text=True,
-                timeout=10,
-                **self.subprocess_flags,
-            )
-            if sp.returncode == 0:
-                site_packages = sp.stdout.strip()
-        except Exception:
-            pass
-
-        # Hard uninstall problematic packages
-        self.log("Repair: Uninstalling conflicting packages...")
-        try:
-            subprocess.run(
-                [
-                    python_executable, "-m", "pip", "uninstall", "-y",
-                    "torch", "torchvision", "torchaudio",
-                    "xformers",
-                    "triton", "triton-windows",
-                    "transformers", "tokenizers",  # Also uninstall these to force fresh install
-                    "numpy", "datasets",  # Add numpy and datasets to force correct versions
-                    "PySide6", "PySide6-Essentials", "PySide6-Addons", "shiboken6",  # Also fix PySide6
-                    "trl",  # Remove trl (requires transformers>=4.56.1, conflicts with our 4.51.3)
-                    "torchao",  # Remove torchao (incompatible, unsloth-zoo wants it but it breaks things)
-                ],
-                capture_output=True,
-                text=True,
-                timeout=600,
-                **self.subprocess_flags,
-            )
-        except Exception as e:
-            self.log(f"Repair: Uninstall step warning: {e}")
-
-        # Remove leftovers that can cause "No package metadata found" or weird imports
-        if site_packages and os.path.isdir(site_packages):
-            try:
-                import shutil
-                spath = Path(site_packages)
-                leftovers = [
-                    "torch", "torchvision", "torchaudio", "triton", "xformers",
-                    "transformers", "tokenizers",  # Also clean these
-                    "numpy", "datasets",  # Add numpy and datasets cleanup
-                    "PySide6", "shiboken6",  # Add PySide6 cleanup
-                    "torch-*.dist-info", "torchvision-*.dist-info", "torchaudio-*.dist-info",
-                    "triton-*.dist-info", "triton_windows-*.dist-info", "triton_windows-*.data",
-                    "xformers-*.dist-info",
-                    "transformers-*.dist-info", "tokenizers-*.dist-info",  # Clean these too
-                    "numpy-*.dist-info", "datasets-*.dist-info",  # Add these too
-                    "PySide6-*.dist-info", "PySide6_*.dist-info", "shiboken6-*.dist-info",  # PySide6 cleanup
-                    "~~rch", "~orch",  # common temp dirs seen on Windows
-                ]
-                self.log("Repair: Cleaning leftover site-packages folders...")
-                for pattern in leftovers:
-                    for p in spath.glob(pattern):
-                        try:
-                            if p.is_dir():
-                                shutil.rmtree(p, ignore_errors=True)
-                            else:
-                                p.unlink(missing_ok=True)
-                        except Exception:
-                            pass
-            except Exception as e:
-                self.log(f"Repair: Cleanup warning: {e}")
-
-        # Step 1: Kill any running Python processes that might lock files
-        # TEMPORARILY DISABLED - causing crashes, will re-enable after fixing
-        #     self.log("Continuing with repair anyway...")
-
-        # Step 1.5: Fix numpy FIRST (must be <2.0.0, before PyTorch and other packages)
-        self.log("Repair: Ensuring numpy <2.0.0 (critical for PyTorch compatibility)...")
-        try:
-            result = subprocess.run(
-                [python_executable, "-m", "pip", "install", "--force-reinstall", "numpy<2"],
-                capture_output=True,
-                text=True,
-                timeout=300,
-                **self.subprocess_flags
-            )
-            if result.returncode == 0:
-                self.log("OK: numpy downgraded to <2.0.0")
-            else:
-                self.log(f"WARNING: numpy downgrade failed: {result.stderr}")
-        except Exception as e:
-            self.log(f"WARNING: Error downgrading numpy: {str(e)}")
-
-        # Step 2: Install PyTorch FIRST (before requirements.txt, so accelerate doesn't pull wrong torch version)
-        self.log("Repair: Installing PyTorch + Triton (BEFORE requirements.txt to prevent wrong version)...")
-        pytorch_success = self.install_pytorch(python_executable=python_executable)
-        if not pytorch_success:
-            self.log("ERROR: PyTorch installation failed (may be due to file locks)")
-            self.log("You may need to close all Python processes and run Fix Issues again")
-            # Continue anyway - we'll try to install requirements.txt, but it may fail
-        
-        # Step 3: Uninstall PySide6 packages (will reinstall at end)
-        self.log("Repair: Uninstalling PySide6 packages (will reinstall at correct version at end)...")
-        subprocess.run(
-            [python_executable, "-m", "pip", "uninstall", "-y", "PySide6", "PySide6-Essentials", "PySide6-Addons", "shiboken6"],
-            capture_output=True,
-            timeout=60,
-            **self.subprocess_flags
-        )
-        
-        # Step 3: Install requirements.txt BUT exclude PySide6 and PyTorch (already installed)
-        self.log("Repair: Installing core dependencies from requirements.txt (excluding PySide6 and PyTorch)...")
-        requirements_file = Path(__file__).parent / "requirements.txt"
-        if requirements_file.exists():
-            # Read requirements and filter out PySide6 packages
-            with open(requirements_file, 'r', encoding='utf-8') as f:
-                req_lines = f.readlines()
-            
-            # Create temp requirements file without PySide6 AND PyTorch packages
-            # (PyTorch must be installed separately with correct CUDA version)
-            import tempfile
-            with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False, encoding='utf-8') as tmp:
-                for line in req_lines:
-                    # Sanitize: remove inline comments before processing
-                    sanitized_line = self._sanitize_requirement(line)
-                    if not sanitized_line or sanitized_line.startswith('#'):
-                        continue
-                    
-                    # Skip PySide6, PyTorch packages, and packages that depend on torch
-                    line_lower = sanitized_line.lower()
-                    skip = False
-                    # Skip PySide6 packages
-                    if any(pkg in line_lower for pkg in ['pyside6', 'shiboken6']):
-                        skip = True
-                    # Skip PyTorch packages (installed separately)
-                    if any(pkg in line_lower for pkg in ['torch', 'torchvision', 'torchaudio', 'triton']):
-                        skip = True
-                    # Skip accelerate temporarily (it requires torch, we'll install it after PyTorch)
-                    # Actually, we can't skip accelerate because other packages might need it
-                    # Instead, we'll install PyTorch FIRST, then requirements.txt
-                    if not skip:
-                        # Write sanitized line (without comments) to temp file
-                        tmp.write(sanitized_line + '\n')
-                tmp_req_file = tmp.name
-            
-            # Install from filtered requirements
-            # NOTE: Do NOT use --force-reinstall here because:
-            # 1. PyTorch is already installed and its DLLs may be locked
-            # 2. We'll force-reinstall specific packages (transformers, tokenizers) separately
-            # 3. This prevents file lock errors on torch DLLs
-            cmd = [
-                python_executable, "-m", "pip", "install",
-                "-r", tmp_req_file
-            ]
-            self.log(f"Running: {' '.join(cmd)}")
-            
-            proc = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                bufsize=1,
-                **self.subprocess_flags
-            )
-            
-            # Stream output in real-time and capture for error checking
-            output_lines = []
-            for line in proc.stdout:
-                line = line.strip()
-                if line:
-                    self.log(line)
-                    output_lines.append(line)
-            
-            proc.wait()
-            # Clean up temp file
-            try:
-                Path(tmp_req_file).unlink()
-            except:
-                pass
-            
-            if proc.returncode != 0:
-                # Check for disk space errors in the output
-                output_text = '\n'.join(output_lines)
-                if "No space left on device" in output_text or "Errno 28" in output_text:
-                    has_space, free_gb = self._check_disk_space()
-                    self.log(f"ERROR: Installation failed due to insufficient disk space!")
-                    self.log(f"Available disk space: {free_gb:.2f} GB (minimum required: {self.min_disk_space_gb} GB)")
-                    self.log("Please free up disk space and try again.")
-                    self.log("You can try:")
-                    self.log("  1. Delete temporary files")
-                    self.log("  2. Uninstall unused programs")
-                    self.log("  3. Clear pip cache: pip cache purge")
-                    self.log("  4. Move the installation to a drive with more space")
-                    return False  # Fail immediately on disk space error
-                
-                self.log(f"ERROR: Requirements installation failed with exit code {proc.returncode}")
-                self.log("Full output:")
-                # Output was already logged line by line, but log summary
-                self.log("WARNING: Requirements.txt installation FAILED - continuing to install PySide6 (required for GUI)")
-                self.log("You may need to close all Python processes and run Fix Issues again")
-                # Don't return False here - continue to install PySide6 so GUI can start
-            else:
-                self.log("OK: Requirements.txt installation completed successfully")
-                
-                # Verify key packages are installed
-                self.log("Repair: Verifying key packages from requirements.txt...")
-                all_ok = True
-                
-                # Verify transformers using import test
-                success, installed_ver, error = self._verify_transformers(python_executable)
-                if success:
-                    self.log(f"  OK: transformers {installed_ver} verified")
-                else:
-                    self.log(f"  ERROR: transformers verification failed: {error}")
-                    all_ok = False
-                
-                # Verify datasets using import test
-                success, installed_ver, error = self._verify_datasets(python_executable)
-                if success:
-                    self.log(f"  OK: datasets {installed_ver} verified")
-                else:
-                    self.log(f"  ERROR: datasets verification failed: {error}")
-                    all_ok = False
-                
-                # Verify other packages using metadata (numpy, accelerate, peft)
-                other_packages = {
-                    "numpy": "<2.0.0",  # Critical: must be <2.0.0
-                    "accelerate": ">=0.18.0",
-                    "peft": ">=0.3.0",
-                }
-                for pkg, version_spec in other_packages.items():
-                    success, installed_ver, error = self._verify_package_version(python_executable, pkg, version_spec)
-                    if success:
-                        self.log(f"  OK: {pkg} {installed_ver} verified")
-                    else:
-                        self.log(f"  ERROR: {pkg} verification failed: {error}")
-                        all_ok = False
-                        # If numpy is wrong version, force reinstall it
-                        if pkg == "numpy":
-                            self.log(f"  Attempting to fix numpy version...")
-                            try:
-                                fix_result = subprocess.run(
-                                    [python_executable, "-m", "pip", "install", "--force-reinstall", "numpy<2"],
-                                    capture_output=True,
-                                    text=True,
-                                    timeout=300,
-                                    **self.subprocess_flags
-                                )
-                                if fix_result.returncode == 0:
-                                    self.log(f"  OK: numpy fixed")
-                                else:
-                                    self.log(f"  ERROR: numpy fix failed: {fix_result.stderr}")
-                            except Exception as e:
-                                self.log(f"  ERROR: numpy fix exception: {str(e)}")
-                
-                if not all_ok:
-                    self.log("WARNING: Some key packages failed verification after requirements.txt installation")
-                    self.log("Continuing to install PySide6 (required for GUI to start)")
-                    # Don't return False - continue to install PySide6
-        
-        # Step 3a: Force-fix constraint pins BEFORE transformers install
-        # This ensures constraints are enforced from the start
-        self.log("Repair: Force-fixing constraint pins (enforcing constraints)...")
-        constraints_file = Path(__file__).parent / "constraints.txt"
-        if not constraints_file.exists():
-            self.log(f"ERROR: constraints.txt not found at {constraints_file}")
-            return False
-        
-        # Force-reinstall all constraint packages: numpy<2, sympy==1.13.1, huggingface-hub<1.0
-        # Constraints file will be automatically applied by pip_worker.py
-        constraint_packages = ["numpy<2", "sympy==1.13.1", "huggingface-hub<1.0"]
-        for pkg in constraint_packages:
-            self.log(f"Force-fixing constraint: {pkg}...")
-            success, lines, exit_code = self._run_pip_worker(
-                action="install",
-                package=pkg,
-                python_executable=python_executable,
-                pip_args=["--force-reinstall"]
-            )
-            if not success:
-                self.log(f"ERROR: Failed to enforce {pkg} constraint: {lines[-500:]}")
-                return False
-        
-        self.log("OK: All constraints enforced (numpy<2, sympy==1.13.1, huggingface-hub<1.0)")
-        
-        # Step 3b: Force reinstall transformers and tokenizers with correct versions
-        # (requirements.txt dependencies might have upgraded them)
-        # Constraints file will be automatically applied by pip_worker.py
-        self.log("Repair: Ensuring transformers and tokenizers are at correct versions (with constraints)...")
-        
-        # Install transformers with constraints (pip_worker will add -c constraints.txt automatically)
-        transformers_success, transformers_lines, transformers_exit = self._run_pip_worker(
-            action="install",
-            package="transformers==4.51.3",
-            python_executable=python_executable,
-            pip_args=["--force-reinstall"]
-        )
-        if not transformers_success:
-            # Check for disk space errors
-            if "No space left on device" in transformers_lines or "Errno 28" in transformers_lines:
-                has_space, free_gb = self._check_disk_space()
-                self.log(f"ERROR: Installation failed due to insufficient disk space!")
-                self.log(f"Available disk space: {free_gb:.2f} GB (minimum required: {self.min_disk_space_gb} GB)")
-                self.log("Please free up disk space and try again.")
-                return False  # Fail immediately on disk space error
-            
-            self.log(f"ERROR: transformers installation failed!")
-            self.log(f"Last 500 lines: {transformers_lines[-500:]}")
-            return False  # Fail repair if critical packages can't be installed
-        
-        # Install tokenizers with constraints
-        tokenizers_success, tokenizers_lines, tokenizers_exit = self._run_pip_worker(
-            action="install",
-            package="tokenizers>=0.21,<0.22",
-            python_executable=python_executable,
-            pip_args=["--force-reinstall"]
-        )
-        if not tokenizers_success:
-            self.log(f"ERROR: tokenizers installation failed!")
-            self.log(f"Last 500 lines: {tokenizers_lines[-500:]}")
-            return False
-        
-        # Verify versions immediately after installation using target Python
-        self.log("Repair: Verifying transformers version...")
-        success, installed_ver, error = self._verify_transformers(python_executable)
-        if not success:
-            self.log(f"ERROR: transformers version verification failed: {error}")
-            self.log(f"  Installed version: {installed_ver or 'unknown'}")
-            return False
-        else:
-            self.log(f"OK: transformers {installed_ver} verified")
-        
-        self.log("Repair: Verifying tokenizers version...")
-        success, installed_ver, error = self._verify_package_version(python_executable, "tokenizers", ">=0.21,<0.22")
-        if not success:
-            self.log(f"ERROR: tokenizers version verification failed: {error}")
-            self.log(f"  Installed version: {installed_ver or 'unknown'}")
-            return False
-        else:
-            self.log(f"OK: tokenizers {installed_ver} verified")
-        
-        # Step 4: Verify PyTorch installation (CRITICAL - must be installed for training)
-        self.log("Repair: Verifying PyTorch installation...")
-        pytorch_verified = False
-        pytorch_cuda_available = False
-        
-        # Use _verify_torch which uses target venv Python ONLY
-        torch_ok, torch_ver, torch_cuda, torch_error = self._verify_torch(python_executable)
-        if torch_ok:
-            self.log(f"OK: PyTorch verified (version {torch_ver})")
-            pytorch_verified = True
-            if torch_cuda:
-                pytorch_cuda_available = True
-                self.log("OK: PyTorch CUDA is available")
-            else:
-                # Check if GPU exists but PyTorch is CPU-only
-                try:
-                    smi_result = subprocess.run(
-                        ["nvidia-smi"],
-                        capture_output=True,
-                        timeout=5,
-                        **self.subprocess_flags
-                    )
-                    if smi_result.returncode == 0:
-                        self.log("WARNING: GPU detected but PyTorch is CPU-only - training will be slow")
-                    else:
-                        self.log("INFO: PyTorch is CPU-only (no GPU detected)")
-                except:
-                    pass
-        else:
-            self.log(f"ERROR: PyTorch verification failed: {torch_error}")
-        
-        if not pytorch_verified:
-            self.log("ERROR: PyTorch verification failed - training will not work")
-            # Don't return False here - continue to install PySide6 so GUI can start
-            # But we'll return False at the end if PyTorch is critical
-        
-        # Step 5: Install unsloth (dependencies should already be installed from requirements.txt)
-        # We install with --no-deps to protect torch, but verify dependencies are present
-        self.log("Repair: Installing unsloth (with --no-deps to protect torch)...")
-        unsloth_cmd = [
-            python_executable, "-m", "pip", "install",
-            "--upgrade", "--no-deps",
-            "unsloth",
-        ]
-        self.log(f"Running: {' '.join(unsloth_cmd)}")
-        result = subprocess.run(unsloth_cmd, capture_output=True, text=True, timeout=900, **self.subprocess_flags)
-        if result.returncode != 0:
-            self.log(f"ERROR: unsloth installation failed!")
-            self.log(f"STDOUT: {result.stdout}")
-            self.log(f"STDERR: {result.stderr}")
-            # Don't fail repair for unsloth - it's optional for GUI to start
-            self.log("WARNING: Continuing without unsloth (GUI can still start)")
-        else:
-            # Verify unsloth can be imported
-            self.log("Repair: Verifying unsloth installation...")
-            verify_cmd = [
-                python_executable, "-c",
-                "import unsloth; print('OK')"
-            ]
-            verify_result = subprocess.run(verify_cmd, capture_output=True, text=True, timeout=30, **self.subprocess_flags)
-            if verify_result.returncode == 0:
-                self.log("OK: unsloth verified and can be imported")
-            else:
-                self.log(f"WARNING: unsloth installed but cannot be imported: {verify_result.stderr[:200]}")
-        
-        # Step 6: Remove torchao if present
-        self.log("Repair: Removing torchao (known incompatibility)...")
-        try:
-            subprocess.run(
-                [python_executable, "-m", "pip", "uninstall", "-y", "torchao"],
-                capture_output=True,
-                timeout=60,
-                **self.subprocess_flags
-            )
-        except Exception:
-            pass
-        
-        # Step 7: Install PySide6 LAST (after everything) so nothing can upgrade it
-        self.log("Repair: Installing PySide6 6.8.1 (FINAL STEP - after all other packages)...")
-        pyside_cmd = [
-            python_executable, "-m", "pip", "install",
-            "--force-reinstall",  # Force to override any version from requirements.txt
-            "PySide6==6.8.1",  # Specific stable version for Windows
-            "PySide6-Essentials==6.8.1",  # MUST match PySide6 version
-            "PySide6-Addons==6.8.1",  # MUST match PySide6 version
-            "shiboken6==6.8.1"  # MUST match PySide6 version
-        ]
-        self.log(f"Running: {' '.join(pyside_cmd)}")
-        result = subprocess.run(pyside_cmd, capture_output=True, text=True, timeout=600, **self.subprocess_flags)
-        if result.returncode != 0:
-            self.log(f"ERROR: PySide6 installation failed!")
-            self.log(f"STDOUT: {result.stdout}")
-            self.log(f"STDERR: {result.stderr}")
-        else:
-            self.log("OK: PySide6 6.8.1 (all packages) installed successfully")
-            
-            # Verify all PySide6 components are at correct version
-            self.log("Repair: Verifying PySide6 component versions...")
-            pyside_components = ["PySide6", "PySide6-Essentials", "PySide6-Addons", "shiboken6"]
-            all_ok = True
-            for component in pyside_components:
-                success, installed_ver, error = self._verify_package_version(python_executable, component, "==6.8.1")
-                if success:
-                    self.log(f"  OK: {component} {installed_ver}")
-                else:
-                    self.log(f"  ERROR: {component} version verification failed: {error}")
-                    all_ok = False
-            
-            if not all_ok:
-                self.log("WARNING: Some PySide6 components have incorrect versions")
-
-        # Final verification - check PySide6 first (critical for GUI to start)
-        pyside_ok = False
-        self.log("Repair: Verifying PySide6 (required for GUI)...")
-        try:
-            pyside_check = subprocess.run(
-                [python_executable, "-c", "import PySide6.QtCore; print('OK')"],
-                capture_output=True,
-                text=True,
-                timeout=10,
-                **self.subprocess_flags,
-            )
-            if pyside_check.returncode == 0:
-                self.log("OK: PySide6 is working - GUI can start")
-                pyside_ok = True
-            else:
-                self.log("ERROR: PySide6 verification failed - GUI cannot start")
-                self.log((pyside_check.stderr or "").strip())
-        except Exception as e:
-            self.log(f"Repair warning: PySide6 check failed: {e}")
-        
-        # Full verification (may fail if PyTorch has issues, but that's OK if PySide6 works)
-        self.log("Repair: Verifying full environment...")
-        try:
-            verify_cmd = [
-                python_executable,
-                "-c",
-                "import verify_installation as v; ok, checks = v.verify_all(); print('OK' if ok else 'FAIL'); raise SystemExit(0 if ok else 1)",
-            ]
-            res = subprocess.run(
-                verify_cmd,
-                capture_output=True,
-                text=True,
-                timeout=60,
-                **self.subprocess_flags,
-            )
-            if res.returncode != 0:
-                self.log("Repair verification: Some components failed (check details above)")
-                self.log((res.stdout or "").strip())
-                verification_summary = "Some components failed verification"
-            else:
-                verification_summary = "All components verified successfully"
-        except Exception as e:
-            self.log(f"Repair verification warning: {e}")
-            verification_summary = f"Verification error: {e}"
-        
-        # Create installation summary
-        self.log("=" * 60)
-        self.log("REPAIR SUMMARY")
-        self.log("=" * 60)
-        self.log(f"PySide6: {'OK' if pyside_ok else 'FAILED'}")
-        self.log(f"PyTorch: {'OK' if pytorch_verified else 'FAILED'}")
-        if pytorch_verified and not pytorch_cuda_available:
-            self.log(f"PyTorch CUDA: Not available (CPU-only mode)")
-        self.log(f"Transformers/Tokenizers: Verified")
-        self.log(f"Requirements.txt: Installed")
-        self.log(f"Unsloth: Installed (may have warnings)")
-        try:
-            self.log(f"Full Verification: {verification_summary}")
-        except:
-            pass
-        self.log("=" * 60)
-        
-        # Final status check - both PySide6 AND PyTorch must be working
-        if not pyside_ok:
-            self.log("Repair failed: PySide6 is not working - GUI cannot start.")
-            return False
-        
-        # PySide6 is OK, but check if PyTorch is actually installed
-        if not pytorch_verified:
-            self.log("Repair incomplete: PyTorch is not installed - training will not work")
-            self.log("Please run 'Fix Issues' again to install PyTorch")
-            return False  # Return False so installer GUI stays open and user can retry
-        
-        # All critical components are installed
-        self.log("Repair complete: All critical components are installed and working.")
-        if not pytorch_cuda_available:
-            self.log("INFO: PyTorch is installed but CUDA is not available - training will use CPU")
         return True
 
 
