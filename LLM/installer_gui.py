@@ -19,7 +19,7 @@ from tkinter import (
 # HARD BOOTSTRAP GUARD - MUST BE FIRST
 # ============================================================================
 def _ensure_bootstrap():
-    """
+    r"""
     Hard guard: Ensure installer NEVER runs from target venv (LLM\.venv).
     If running from target venv, auto-relaunch from bootstrap\.venv.
     """
@@ -541,138 +541,50 @@ class InstallerGUI:
         
         try:
             write_log("=" * 60)
-            write_log("Starting installation thread")
+            write_log("Starting installation thread with InstallerV2")
             write_log("=" * 60)
             
-            # Redirect installer logs to GUI with periodic checklist refresh
-            original_log = self.installer.log
-            last_refresh_time = [0]  # Use list to allow modification in nested function
-            import time
+            # Use new immutable installer
+            from installer_v2 import InstallerV2
             
-            def gui_log(message):
-                try:
-                    write_log(f"[LOG] {message}")
-                    self._safe_after(self._log, message)
-                    original_log(message)
-                    
-                    # Refresh checklist periodically (every 10 seconds) or after key installation steps
-                    current_time = time.time()
-                    refresh_triggers = [
-                        "OK: PyTorch",
-                        "OK: transformers",
-                        "OK: tokenizers",
-                        "OK: numpy",
-                        "OK: datasets",
-                        "OK: PySide6",
-                        "OK: unsloth",
-                        "Installing PyTorch",
-                        "Installing PySide6",
-                        "Repair complete",
-                        "Installation completed"
-                    ]
-                    
-                    should_refresh = False
-                    if any(trigger in message for trigger in refresh_triggers):
-                        should_refresh = True
-                    elif current_time - last_refresh_time[0] > 10:  # Every 10 seconds
-                        should_refresh = True
-                    
-                    if should_refresh:
-                        last_refresh_time[0] = current_time
-                        self._safe_after(self._populate_checklist)
-                        
-                except Exception as e:
-                    write_log(f"[LOG ERROR] {e}")
-                    try:
-                        original_log(message)  # At least log to console
-                    except:
-                        print(f"[INSTALL] {message}")
+            installer_v2 = InstallerV2()
             
-            self.installer.log = gui_log
-            write_log("Log redirector set up")
+            # Redirect installer logs to GUI
+            import builtins
+            original_print = builtins.print
             
-            # Run detection
-            self._safe_after(self._log, "Running system detection...")
-            try:
-                self.installer.run_detection()
-            except Exception as e:
-                self._safe_after(self._log, f"Error in detection: {str(e)}")
-                raise
-            
-            # Check if venv exists, create if needed
-            venv_path = Path(__file__).parent / ".venv"
-            venv_python = None
-            
-            if not venv_path.exists():
-                self._safe_after(self._log, "Creating virtual environment...")
-                import subprocess
-                python_exe = sys.executable
-                try:
-                    result = subprocess.run(
-                        [python_exe, "-m", "venv", str(venv_path)],
-                        capture_output=True,
-                        text=True,
-                        timeout=60
-                    )
-                    if result.returncode != 0:
-                        self._safe_after(self._log, f"Warning: Failed to create venv: {result.stderr}")
-                        self._safe_after(self._log, "Will use system Python instead.")
-                    else:
-                        self._safe_after(self._log, "Virtual environment created.")
-                except Exception as e:
-                    self._safe_after(self._log, f"Error creating venv: {str(e)}")
-                    self._safe_after(self._log, "Will use system Python instead.")
-            
-            # Determine which Python to use (venv if exists, otherwise system)
-            if venv_path.exists():
-                if sys.platform == "win32":
-                    venv_python = venv_path / "Scripts" / "python.exe"
-                else:
-                    venv_python = venv_path / "bin" / "python"
-                if venv_python.exists():
-                    venv_python = str(venv_python)
-                else:
-                    venv_python = None
-            
-            # Run repair_all (installs everything)
-            write_log("About to start repair_all")
-            self._safe_after(self._log, "Starting repair/installation...")
-            
-            success = False
-            try:
-                if venv_python:
-                    write_log(f"Using venv Python: {venv_python}")
-                    self._safe_after(self._log, f"Using venv Python: {venv_python}")
-                else:
-                    write_log(f"Using system Python: {sys.executable}")
-                    self._safe_after(self._log, f"Using system Python: {sys.executable}")
+            def gui_print(*args, **kwargs):
+                # Capture print output
+                import io
+                buffer = io.StringIO()
+                kwargs_copy = kwargs.copy()
+                kwargs_copy['file'] = buffer
+                original_print(*args, **kwargs_copy)
+                message = buffer.getvalue().rstrip()
                 
-                write_log("Calling repair_all...")
-                # Wrap repair_all in additional try-catch
-                try:
-                    if venv_python:
-                        success = self.installer.repair_all(python_executable=venv_python)
-                    else:
-                        success = self.installer.repair_all()
-                    write_log(f"repair_all returned: {success}")
-                except Exception as inner_e:
-                    import traceback
-                    inner_trace = traceback.format_exc()
-                    write_log(f"INNER EXCEPTION in repair_all: {inner_e}")
-                    write_log(f"INNER TRACEBACK:\n{inner_trace}")
-                    self._safe_after(self._log, f"CRITICAL ERROR in repair_all: {str(inner_e)}")
-                    self._safe_after(self._log, f"Traceback:\n{inner_trace}")
-                    success = False
-            except Exception as e:
-                import traceback
-                error_trace = traceback.format_exc()
-                write_log(f"OUTER EXCEPTION around repair_all: {e}")
-                write_log(f"OUTER TRACEBACK:\n{error_trace}")
-                self._safe_after(self._log, f"CRITICAL ERROR in repair_all: {str(e)}")
-                self._safe_after(self._log, f"Traceback:\n{error_trace}")
-                success = False
+                if message:
+                    write_log(message)
+                    self._safe_after(self._log, message)
+                
+                # Also print to original stdout
+                original_print(*args, **kwargs)
             
-            # Refresh checklist after installation (regardless of success)
+            # Replace print temporarily
+            builtins.print = gui_print
+            
+            try:
+                write_log("Calling InstallerV2.install()...")
+                self._safe_after(self._log, "Starting immutable installation...")
+                
+                # Run installation
+                success = installer_v2.install()
+                
+                write_log(f"InstallerV2.install() returned: {success}")
+            finally:
+                # Restore original print
+                builtins.print = original_print
+            
+            # Refresh checklist after installation
             self._safe_after(self._populate_checklist)
             
             if success:
@@ -687,10 +599,10 @@ class InstallerGUI:
                 self._safe_after(show_success)
             else:
                 self._safe_after(self._log, "✗ Installation completed with errors. Check log above.")
-                self._safe_after(self.progress_var.set, "Installation Completed with Errors")
+                self._safe_after(self.progress_var.set, "Installation Failed")
                 def show_warning():
                     try:
-                        messagebox.showwarning("Installation Issues", "Installation completed but some components may have issues.\n\nCheck the log for details.")
+                        messagebox.showerror("Installation Failed", "Installation failed. Please check the log for details.")
                     except:
                         pass
                 self._safe_after(show_warning)
@@ -720,25 +632,23 @@ class InstallerGUI:
             write_log("Entering finally block")
             try:
                 if not self._root_destroyed:
-                    write_log("Root not destroyed, cleaning up...")
+                    write_log("Root not destroyed, cleaning up GUI...")
                     self._safe_after(self.progress_bar.stop)
                     self._safe_after(self.install_button.config, {"state": "normal"})
                     self.installing = False
-                    # Refresh checklist
-                    self._safe_after(self._populate_checklist)
-                    write_log("Cleanup complete")
+                    self._safe_after(self._populate_checklist) # Refresh checklist one last time
+                    write_log("GUI cleanup complete")
                 else:
                     write_log("Root destroyed, skipping GUI cleanup")
             except Exception as e:
-                # Even the finally block might fail, log it
                 write_log(f"ERROR IN FINALLY: {e}")
                 try:
                     import traceback
                     write_log(traceback.format_exc())
-                    print(f"Cleanup error: {e}")
+                    print(f"Cleanup error in GUI: {e}")
                 except:
                     pass
-            write_log("Thread exiting")
+            write_log("Installation thread exiting")
     
     def _refresh_status(self):
         """Refresh the status of all components"""

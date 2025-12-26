@@ -17,7 +17,7 @@ from PySide6.QtGui import QFont, QPixmap, QTextCursor
 
 # Import our detection and installation modules
 from system_detector import SystemDetector
-from smart_installer import SmartInstaller
+from installer_v2 import InstallerV2
 
 
 class SetupThread(QThread):
@@ -30,7 +30,7 @@ class SetupThread(QThread):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.detector = SystemDetector()
-        self.installer = SmartInstaller()
+        self.installer = InstallerV2()
         self.should_stop = False
     
     def run(self):
@@ -47,17 +47,11 @@ class SetupThread(QThread):
             # Phase 2: Install Dependencies
             self.progress.emit("📦 Installing dependencies...")
             
-            # Set up logging callback
+            # Set up logging callback for InstallerV2
             def log_callback(message):
                 self.progress.emit(message)
             
-            # Set up progress callback for download tracking
-            def progress_update(percent, message):
-                self.install_progress.emit("PyTorch", percent)
-                self.progress.emit(message)
-            
-            self.installer.log = lambda msg: log_callback(f"[INSTALL] {msg}")
-            self.installer.progress_callback = progress_update
+            self.installer.log = log_callback
             
             # Run the installer
             success = self._install_all_dependencies(detection_results)
@@ -80,25 +74,31 @@ class SetupThread(QThread):
     def _install_all_dependencies(self, detection_results: dict) -> bool:
         """Install all required dependencies"""
         try:
-            # Pass detection results to installer
-            self.installer.detection_results = detection_results
+            # Redirect print to progress
+            import builtins
+            original_print = builtins.print
             
-            # Install PyTorch with correct CUDA version
-            self.install_progress.emit("PyTorch", 0)
-            if not self.installer.install_pytorch():
-                return False
-            self.install_progress.emit("PyTorch", 100)
+            def progress_print(*args, **kwargs):
+                import io
+                buffer = io.StringIO()
+                kwargs_copy = kwargs.copy()
+                kwargs_copy['file'] = buffer
+                original_print(*args, **kwargs_copy)
+                message = buffer.getvalue().rstrip()
+                if message:
+                    self.progress.emit(message)
+                original_print(*args, **kwargs)
             
-            if self.should_stop:
-                return False
+            builtins.print = progress_print
             
-            # Install dependencies (includes Triton, Unsloth, etc.)
-            self.install_progress.emit("Dependencies", 0)
-            if not self.installer.install_dependencies():
-                return False
-            self.install_progress.emit("Dependencies", 100)
-            
-            return True
+            try:
+                # Run immutable installer
+                self.install_progress.emit("Installing", 50)
+                success = self.installer.install()
+                self.install_progress.emit("Installing", 100)
+                return success
+            finally:
+                builtins.print = original_print
             
         except Exception as e:
             self.progress.emit(f"❌ Installation error: {str(e)}")

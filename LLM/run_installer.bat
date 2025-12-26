@@ -9,12 +9,15 @@ set "SCRIPT_DIR=%~dp0"
 cd /d "%SCRIPT_DIR%"
 
 REM Locate project root (parent of LLM if we're in LLM, otherwise current dir)
-if exist "LLM" (
-    set "PROJECT_ROOT=%CD%"
-    set "LLM_DIR=%CD%\LLM"
+cd /d "%SCRIPT_DIR%"
+if exist "..\bootstrap" if exist "installer_gui.py" (
+    REM We're in LLM folder, parent is project root
+    set "PROJECT_ROOT=%SCRIPT_DIR%..\"
+    set "LLM_DIR=%SCRIPT_DIR%"
 ) else (
-    set "PROJECT_ROOT=%CD%"
-    set "LLM_DIR=%CD%"
+    REM We're in project root
+    set "PROJECT_ROOT=%SCRIPT_DIR%"
+    set "LLM_DIR=%SCRIPT_DIR%LLM\"
 )
 
 set "BOOTSTRAP_VENV=%PROJECT_ROOT%\bootstrap\.venv"

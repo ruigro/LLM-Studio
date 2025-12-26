@@ -729,6 +729,7 @@ print(device_name)
     def _ensure_cuda_torch(self, python_executable: str, cuda_build: str = "cu124") -> Tuple[bool, str]:
         """
         Ensure CUDA torch is installed. If CPU torch detected, remove and install CUDA version.
+        Includes retry logic for robustness.
         
         Args:
             python_executable: Target Python executable
@@ -774,6 +775,21 @@ print(device_name)
             # Torch not installed
             self.log(f"Torch check failed: {str(e)}")
         
+        # Clean up torch directories first to prevent file locking issues
+        venv_path = Path(python_executable).parent.parent
+        self.log("Cleaning up existing torch installations...")
+        for pkg in ["torch", "torchvision", "torchaudio"]:
+            if sys.platform == 'win32':
+                pkg_dir = venv_path / "Lib" / "site-packages" / pkg
+            else:
+                pkg_dir = venv_path / "lib" / f"python{sys.version_info.major}.{sys.version_info.minor}" / "site-packages" / pkg
+            
+            if pkg_dir.exists():
+                self.log(f"Removing {pkg} directory: {pkg_dir}")
+                success, error_msg = self._force_delete_locked_files(pkg_dir, max_retries=3)
+                if not success:
+                    self.log(f"WARNING: Could not fully remove {pkg}: {error_msg}")
+        
         # Uninstall torch stack (run twice to ensure cleanup)
         torch_packages = ["torch", "torchvision", "torchaudio"]
         for attempt in [1, 2]:
@@ -791,71 +807,85 @@ print(device_name)
         torchvision_version = f"0.20.1+{cuda_build}"
         torchaudio_version = f"2.5.1+{cuda_build}"
         
-        # Install torch first
-        install_cmd_torch = [
-            python_executable, "-m", "pip", "install",
-            "--index-url", index_url,
-            "--no-cache-dir",
-            "--no-deps",
-            f"torch=={torch_version}"
-        ]
-        cmd_str = " ".join(install_cmd_torch)
-        self.log(f"Running: {cmd_str}")
-        success, last_lines, exit_code = self._run_pip_worker(
-            action="install",
-            package=f"torch=={torch_version}",
-            python_executable=python_executable,
-            index_url=index_url,
-            pip_args=["--no-deps", "--no-cache-dir"]
-        )
-        if not success:
-            error_msg = f"Failed to install torch {torch_version}. Exit code: {exit_code}"
-            self.log(f"ERROR: {error_msg}")
-            return False, error_msg
+        # Install torch first (with retry)
+        max_retries = 3
+        for retry in range(1, max_retries + 1):
+            self.log(f"Installing torch {torch_version} (attempt {retry}/{max_retries})...")
+            success, last_lines, exit_code = self._run_pip_worker(
+                action="install",
+                package=f"torch=={torch_version}",
+                python_executable=python_executable,
+                index_url=index_url,
+                pip_args=["--no-deps", "--no-cache-dir", "--force-reinstall"]
+            )
+            if success:
+                self.log(f"✓ torch {torch_version} installed")
+                break
+            else:
+                self.log(f"Attempt {retry}/{max_retries} failed (exit code: {exit_code})")
+                if retry < max_retries:
+                    import time
+                    wait_time = retry * 2
+                    self.log(f"Waiting {wait_time}s before retry...")
+                    time.sleep(wait_time)
+                    # Clean up any partial installation
+                    self._cleanup_corrupted_packages(python_executable, packages=['torch'])
+                else:
+                    error_msg = f"Failed to install torch {torch_version} after {max_retries} attempts. Exit code: {exit_code}"
+                    self.log(f"ERROR: {error_msg}")
+                    return False, error_msg
         
-        # Install torchvision
-        install_cmd_vision = [
-            python_executable, "-m", "pip", "install",
-            "--index-url", index_url,
-            "--no-cache-dir",
-            "--no-deps",
-            f"torchvision=={torchvision_version}"
-        ]
-        cmd_str = " ".join(install_cmd_vision)
-        self.log(f"Running: {cmd_str}")
-        success, last_lines, exit_code = self._run_pip_worker(
-            action="install",
-            package=f"torchvision=={torchvision_version}",
-            python_executable=python_executable,
-            index_url=index_url,
-            pip_args=["--no-deps", "--no-cache-dir"]
-        )
-        if not success:
-            error_msg = f"Failed to install torchvision {torchvision_version}. Exit code: {exit_code}"
-            self.log(f"ERROR: {error_msg}")
-            return False, error_msg
+        # Install torchvision (with retry)
+        for retry in range(1, max_retries + 1):
+            self.log(f"Installing torchvision {torchvision_version} (attempt {retry}/{max_retries})...")
+            success, last_lines, exit_code = self._run_pip_worker(
+                action="install",
+                package=f"torchvision=={torchvision_version}",
+                python_executable=python_executable,
+                index_url=index_url,
+                pip_args=["--no-deps", "--no-cache-dir", "--force-reinstall"]
+            )
+            if success:
+                self.log(f"✓ torchvision {torchvision_version} installed")
+                break
+            else:
+                self.log(f"Attempt {retry}/{max_retries} failed (exit code: {exit_code})")
+                if retry < max_retries:
+                    import time
+                    wait_time = retry * 2
+                    self.log(f"Waiting {wait_time}s before retry...")
+                    time.sleep(wait_time)
+                    self._cleanup_corrupted_packages(python_executable, packages=['torchvision'])
+                else:
+                    error_msg = f"Failed to install torchvision {torchvision_version} after {max_retries} attempts. Exit code: {exit_code}"
+                    self.log(f"ERROR: {error_msg}")
+                    return False, error_msg
         
-        # Install torchaudio
-        install_cmd_audio = [
-            python_executable, "-m", "pip", "install",
-            "--index-url", index_url,
-            "--no-cache-dir",
-            "--no-deps",
-            f"torchaudio=={torchaudio_version}"
-        ]
-        cmd_str = " ".join(install_cmd_audio)
-        self.log(f"Running: {cmd_str}")
-        success, last_lines, exit_code = self._run_pip_worker(
-            action="install",
-            package=f"torchaudio=={torchaudio_version}",
-            python_executable=python_executable,
-            index_url=index_url,
-            pip_args=["--no-deps", "--no-cache-dir"]
-        )
-        if not success:
-            error_msg = f"Failed to install torchaudio {torchaudio_version}. Exit code: {exit_code}"
-            self.log(f"ERROR: {error_msg}")
-            return False, error_msg
+        # Install torchaudio (with retry)
+        for retry in range(1, max_retries + 1):
+            self.log(f"Installing torchaudio {torchaudio_version} (attempt {retry}/{max_retries})...")
+            success, last_lines, exit_code = self._run_pip_worker(
+                action="install",
+                package=f"torchaudio=={torchaudio_version}",
+                python_executable=python_executable,
+                index_url=index_url,
+                pip_args=["--no-deps", "--no-cache-dir", "--force-reinstall"]
+            )
+            if success:
+                self.log(f"✓ torchaudio {torchaudio_version} installed")
+                break
+            else:
+                self.log(f"Attempt {retry}/{max_retries} failed (exit code: {exit_code})")
+                if retry < max_retries:
+                    import time
+                    wait_time = retry * 2
+                    self.log(f"Waiting {wait_time}s before retry...")
+                    time.sleep(wait_time)
+                    self._cleanup_corrupted_packages(python_executable, packages=['torchaudio'])
+                else:
+                    error_msg = f"Failed to install torchaudio {torchaudio_version} after {max_retries} attempts. Exit code: {exit_code}"
+                    self.log(f"ERROR: {error_msg}")
+                    return False, error_msg
         
         # Re-verify CUDA torch
         self.log("Verifying CUDA torch installation...")
@@ -1219,6 +1249,117 @@ print(device_name)
         
         return True, None
     
+    def _cleanup_corrupted_packages(self, python_executable: str, packages: list = None) -> bool:
+        """
+        Clean up corrupted package directories that may have locked files.
+        
+        Args:
+            python_executable: Target Python executable
+            packages: List of package names to clean (default: ['numpy', 'torch', 'torchvision', 'torchaudio'])
+        
+        Returns:
+            bool: True if cleanup successful or not needed, False if critical error
+        """
+        if packages is None:
+            packages = ['numpy', 'torch', 'torchvision', 'torchaudio']
+        
+        venv_path = Path(python_executable).parent.parent
+        if sys.platform == 'win32':
+            site_packages = venv_path / "Lib" / "site-packages"
+        else:
+            # Find site-packages directory for non-Windows
+            result = subprocess.run(
+                [python_executable, "-c", "import site; print(site.getsitepackages()[0])"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                **self.subprocess_flags
+            )
+            if result.returncode == 0:
+                site_packages = Path(result.stdout.strip())
+            else:
+                # Fallback
+                site_packages = venv_path / "lib" / "python3.12" / "site-packages"
+        
+        if not site_packages.exists():
+            self.log(f"Site-packages not found at {site_packages}, skipping cleanup")
+            return True
+        
+        self.log("Checking for corrupted packages...")
+        cleaned_any = False
+        
+        for pkg in packages:
+            pkg_dir = site_packages / pkg
+            if pkg_dir.exists():
+                self.log(f"Found {pkg} directory, attempting cleanup...")
+                success, error_msg = self._force_delete_locked_files(pkg_dir, max_retries=3)
+                if success:
+                    self.log(f"✓ Cleaned up {pkg}")
+                    cleaned_any = True
+                else:
+                    self.log(f"WARNING: Could not fully clean {pkg}: {error_msg}")
+                    # Don't fail entirely, just warn
+        
+        if cleaned_any:
+            self.log("✓ Package cleanup completed")
+        else:
+            self.log("No corrupted packages found")
+        
+        return True
+    
+    def _force_delete_locked_files(self, directory: Path, max_retries: int = 3) -> Tuple[bool, str]:
+        """
+        Forcefully delete locked files with retry mechanism.
+        
+        Args:
+            directory: Directory to delete
+            max_retries: Maximum number of retry attempts
+        
+        Returns:
+            Tuple of (success: bool, error_message: str)
+        """
+        import time
+        
+        if not directory.exists():
+            return True, ""
+        
+        self.log(f"Attempting to delete directory: {directory}")
+        
+        for attempt in range(1, max_retries + 1):
+            try:
+                # Try direct deletion first
+                if sys.platform == 'win32':
+                    # On Windows, use subprocess with /F flag to force delete
+                    result = subprocess.run(
+                        ['cmd', '/c', 'rmdir', '/S', '/Q', str(directory)],
+                        capture_output=True,
+                        text=True,
+                        timeout=30
+                    )
+                    if result.returncode == 0 or not directory.exists():
+                        self.log(f"✓ Directory deleted (attempt {attempt}/{max_retries})")
+                        return True, ""
+                else:
+                    shutil.rmtree(directory, ignore_errors=True)
+                    if not directory.exists():
+                        self.log(f"✓ Directory deleted (attempt {attempt}/{max_retries})")
+                        return True, ""
+            except Exception as e:
+                self.log(f"Delete attempt {attempt}/{max_retries} failed: {str(e)}")
+            
+            # If not last attempt, wait and retry
+            if attempt < max_retries:
+                wait_time = attempt * 2  # Exponential backoff
+                self.log(f"Waiting {wait_time}s before retry...")
+                time.sleep(wait_time)
+        
+        # Final check after all retries
+        if not directory.exists():
+            return True, ""
+        
+        error_msg = f"Failed to delete {directory} after {max_retries} attempts. Files may be locked by running processes."
+        return False, error_msg
+    
     def _delete_torch_directory(self, venv_path: Path) -> Tuple[bool, str]:
         """
         Delete the torch directory from venv.
@@ -1234,15 +1375,15 @@ print(device_name)
         self.log(f"Deleting existing torch directory: {torch_dir}")
         
         try:
-            # Try to delete the directory
-            shutil.rmtree(torch_dir)
+            # Use force delete with retry
+            success, error_msg = self._force_delete_locked_files(torch_dir, max_retries=3)
+            
+            if not success:
+                self.log(f"ERROR: {error_msg}")
+                return False, error_msg
+            
             self.log("✓ Torch directory deleted successfully")
             return True, None
-        except PermissionError as e:
-            error_msg = f"PyTorch files are locked by a running process. Cannot delete: {torch_dir}"
-            self.log(f"ERROR: {error_msg}")
-            self.log(f"Details: {str(e)}")
-            return False, error_msg
         except Exception as e:
             error_msg = f"Failed to delete torch directory: {str(e)}"
             self.log(f"ERROR: {error_msg}")
@@ -2523,7 +2664,7 @@ if errorlevel 1 (
     
     def _verify_torch(self, target_python: str) -> Tuple[bool, Optional[str], Optional[bool], Optional[str]]:
         """
-        Verify torch installation using target venv Python ONLY.
+        Verify torch installation using target venv Python ONLY (minimal logging for performance).
         
         Args:
             target_python: Exact path to target venv Python (e.g., D:\\...\\LLM\\.venv\\Scripts\\python.exe)
@@ -2536,9 +2677,7 @@ if errorlevel 1 (
         if not target_python_path.exists():
             return False, None, None, f"Target Python not found: {target_python}"
         
-        self.log(f"Verifying torch using target Python: {target_python_path}")
-        
-        # Run verification command
+        # Run verification command (no logging to avoid spam during periodic GUI updates)
         verify_cmd = [
             str(target_python_path), "-c",
             "import torch, sys; print(sys.executable); print(torch.__version__); print(torch.cuda.is_available())"
@@ -2553,18 +2692,17 @@ if errorlevel 1 (
                 **self.subprocess_flags
             )
             
-            # Log the executable that was actually used
+            # Parse output (only log errors, not routine checks)
             if verify_result.returncode == 0 and verify_result.stdout:
                 lines = verify_result.stdout.strip().split('\n')
                 if len(lines) >= 1:
                     actual_exe = lines[0].strip()
-                    self.log(f"Verification used Python: {actual_exe}")
                     
                     # Assert it equals the target venv Python
                     actual_exe_path = Path(actual_exe).resolve()
                     if str(actual_exe_path).lower() != str(target_python_path).lower():
                         error_msg = f"Verification used wrong Python! Expected: {target_python_path}, Got: {actual_exe_path}"
-                        self.log(f"ERROR: {error_msg}")
+                        # Only log errors
                         return False, None, None, error_msg
                     
                     # Parse output
@@ -2575,7 +2713,7 @@ if errorlevel 1 (
                             cuda_str = lines[2].strip().lower()
                             cuda_available = cuda_str == "true"
                         
-                        self.log(f"✓ torch verified: version {torch_version}, CUDA: {cuda_available}")
+                        # Success - no logging to avoid spam
                         return True, torch_version, cuda_available, None
                     else:
                         return False, None, None, "Verification output incomplete"
@@ -2587,12 +2725,12 @@ if errorlevel 1 (
                 error_msg = f"torch import failed (exit code {verify_result.returncode})"
                 if error_output:
                     error_msg += f": {error_output[:500]}"
-                self.log(f"ERROR: {error_msg}")
+                # Only log errors
                 return False, None, None, error_msg
                 
         except Exception as e:
             error_msg = f"Exception during torch verification: {str(e)}"
-            self.log(f"ERROR: {error_msg}")
+            # Only log errors
             return False, None, None, error_msg
     
     def _verify_transformers(self, target_python: str) -> Tuple[bool, Optional[str], Optional[str]]:
@@ -3172,6 +3310,15 @@ if errorlevel 1 (
         # STATE: CONSTRAINTS GENERATION (initial, will be updated after Layer 2)
         constraints_file = self._generate_constraints_file(install_plan, torch_selected=False)
         
+        # TASK 0: Pre-installation cleanup of corrupted/locked packages
+        self.log("=" * 60)
+        self.log("TASK 0: Pre-installation cleanup")
+        self.log("=" * 60)
+        
+        # Clean up any corrupted packages before starting
+        if not self._cleanup_corrupted_packages(python_executable):
+            self.log("WARNING: Pre-installation cleanup had issues, but continuing...")
+        
         # TASK A: Eliminate torchao completely
         self.log("=" * 60)
         self.log("TASK A: Eliminating torchao completely")
@@ -3206,17 +3353,37 @@ if errorlevel 1 (
         numpy_ok, numpy_error = self._gate_numpy_integrity(python_executable)
         if not numpy_ok:
             self.log(f"WARNING: NumPy integrity check failed before install: {numpy_error}")
-            # Try to recreate venv
-            recreate_ok, recreate_error, new_python = self._recreate_venv(venv_path, python_executable)
-            if not recreate_ok:
-                self.log(f"ERROR: Failed to recreate venv: {recreate_error}")
-                return False
-            python_executable = new_python
-            venv_path = Path(python_executable).parent.parent
-            # Re-check NumPy after recreation
+            self.log("Attempting to clean up corrupted NumPy installation...")
+            
+            # Try cleanup first before recreating entire venv
+            if self._cleanup_corrupted_packages(python_executable, packages=['numpy']):
+                # Re-check after cleanup
+                numpy_ok, numpy_error = self._gate_numpy_integrity(python_executable)
+                if numpy_ok:
+                    self.log("✓ NumPy cleaned up successfully")
+                else:
+                    # Cleanup didn't help, recreate venv
+                    self.log("Cleanup didn't resolve issue, recreating venv...")
+                    recreate_ok, recreate_error, new_python = self._recreate_venv(venv_path, python_executable)
+                    if not recreate_ok:
+                        self.log(f"ERROR: Failed to recreate venv: {recreate_error}")
+                        return False
+                    python_executable = new_python
+                    venv_path = Path(python_executable).parent.parent
+            else:
+                # Cleanup failed, recreate venv
+                self.log("Cleanup failed, recreating venv...")
+                recreate_ok, recreate_error, new_python = self._recreate_venv(venv_path, python_executable)
+                if not recreate_ok:
+                    self.log(f"ERROR: Failed to recreate venv: {recreate_error}")
+                    return False
+                python_executable = new_python
+                venv_path = Path(python_executable).parent.parent
+            
+            # Final NumPy check after cleanup/recreation
             numpy_ok, numpy_error = self._gate_numpy_integrity(python_executable)
             if not numpy_ok:
-                self.log(f"ERROR: NumPy still broken after venv recreation: {numpy_error}")
+                self.log(f"ERROR: NumPy still broken after cleanup/recreation: {numpy_error}")
                 return False
         
         # STATE: LAYER 1 INSTALLATION (numpy, sympy, fsspec)

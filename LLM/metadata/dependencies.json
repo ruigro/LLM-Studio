@@ -1,0 +1,333 @@
+{
+  "format_version": "1.0",
+  "python_min": "3.10",
+  "python_max": "3.12",
+  
+  "cuda_configs": {
+    "cu124": {
+      "cuda_driver_min": "12.4",
+      "torch_index": "https://download.pytorch.org/whl/cu124",
+      "packages": {
+        "torch": "2.5.1+cu124",
+        "torchvision": "0.20.1+cu124",
+        "torchaudio": "2.5.1+cu124"
+      }
+    },
+    "cu121": {
+      "cuda_driver_min": "12.1",
+      "torch_index": "https://download.pytorch.org/whl/cu121",
+      "packages": {
+        "torch": "2.5.1+cu121",
+        "torchvision": "0.20.1+cu121",
+        "torchaudio": "2.5.1+cu121"
+      }
+    },
+    "cu118": {
+      "cuda_driver_min": "11.8",
+      "torch_index": "https://download.pytorch.org/whl/cu118",
+      "packages": {
+        "torch": "2.5.1+cu118",
+        "torchvision": "0.20.1+cu118",
+        "torchaudio": "2.5.1+cu118"
+      }
+    }
+  },
+  
+  "core_dependencies": [
+    {
+      "name": "numpy",
+      "version": ">=1.26.0,<2.0",
+      "order": 1,
+      "critical": true,
+      "comment": "Must be <2.0 for torch compatibility on Windows"
+    },
+    {
+      "name": "sympy",
+      "version": ">=1.12",
+      "order": 2,
+      "critical": false
+    },
+    {
+      "name": "networkx",
+      "version": ">=3.0",
+      "order": 3,
+      "critical": false
+    },
+    {
+      "name": "jinja2",
+      "version": ">=3.1.2",
+      "order": 4,
+      "critical": false
+    },
+    {
+      "name": "fsspec",
+      "version": ">=2023.1.0",
+      "order": 5,
+      "critical": false
+    },
+    {
+      "name": "filelock",
+      "version": ">=3.13.0",
+      "order": 6,
+      "critical": false
+    },
+    {
+      "name": "mpmath",
+      "version": ">=1.3.0",
+      "order": 7,
+      "critical": false
+    },
+    {
+      "name": "torch",
+      "version": "FROM_CUDA_CONFIG",
+      "order": 10,
+      "critical": true,
+      "install_args": ["--no-deps"],
+      "comment": "Installed from CUDA-specific index with no deps"
+    },
+    {
+      "name": "torchvision",
+      "version": "FROM_CUDA_CONFIG",
+      "order": 11,
+      "critical": true,
+      "install_args": ["--no-deps"]
+    },
+    {
+      "name": "torchaudio",
+      "version": "FROM_CUDA_CONFIG",
+      "order": 12,
+      "critical": true,
+      "install_args": ["--no-deps"]
+    },
+    {
+      "name": "triton-windows",
+      "version": ">=3.0.0",
+      "order": 13,
+      "critical": false,
+      "platform": "win32"
+    },
+    {
+      "name": "regex",
+      "version": ">=2022.1.18",
+      "order": 20,
+      "critical": false
+    },
+    {
+      "name": "pyyaml",
+      "version": ">=5.1",
+      "order": 21,
+      "critical": false
+    },
+    {
+      "name": "requests",
+      "version": ">=2.28.0",
+      "order": 22,
+      "critical": false
+    },
+    {
+      "name": "packaging",
+      "version": ">=20.9",
+      "order": 23,
+      "critical": false
+    },
+    {
+      "name": "tqdm",
+      "version": ">=4.27",
+      "order": 24,
+      "critical": false
+    },
+    {
+      "name": "safetensors",
+      "version": ">=0.4.0",
+      "order": 25,
+      "critical": true
+    },
+    {
+      "name": "tokenizers",
+      "version": ">=0.20.0,<0.23",
+      "order": 26,
+      "critical": true,
+      "comment": "Must be compatible with transformers version"
+    },
+    {
+      "name": "huggingface-hub",
+      "version": ">=0.25.0",
+      "order": 27,
+      "critical": true
+    },
+    {
+      "name": "transformers",
+      "version": "==4.51.3",
+      "order": 30,
+      "critical": true,
+      "install_args": ["--no-deps"],
+      "comment": "Installed with no-deps after all dependencies are in place"
+    },
+    {
+      "name": "peft",
+      "version": ">=0.13.0",
+      "order": 31,
+      "critical": true
+    },
+    {
+      "name": "datasets",
+      "version": ">=3.0.0,<4.4.0",
+      "order": 32,
+      "critical": true,
+      "comment": "Upper bound to avoid conflicts with unsloth"
+    },
+    {
+      "name": "accelerate",
+      "version": ">=1.0.0",
+      "order": 33,
+      "critical": true
+    },
+    {
+      "name": "bitsandbytes",
+      "version": ">=0.44.0",
+      "order": 34,
+      "critical": true,
+      "comment": "Required for 4-bit/8-bit training"
+    },
+    {
+      "name": "sentencepiece",
+      "version": ">=0.1.98",
+      "order": 35,
+      "critical": false
+    },
+    {
+      "name": "evaluate",
+      "version": ">=0.4.0",
+      "order": 36,
+      "critical": false
+    },
+    {
+      "name": "einops",
+      "version": ">=0.6.0",
+      "order": 37,
+      "critical": false
+    },
+    {
+      "name": "timm",
+      "version": ">=0.9.0",
+      "order": 38,
+      "critical": false,
+      "comment": "Required for vision models"
+    },
+    {
+      "name": "open-clip-torch",
+      "version": ">=2.20.0",
+      "order": 39,
+      "critical": false,
+      "comment": "Required for CLIP vision models"
+    },
+    {
+      "name": "PySide6",
+      "version": ">=6.6.0",
+      "order": 50,
+      "critical": true,
+      "comment": "Qt desktop GUI framework"
+    },
+    {
+      "name": "PySide6-Essentials",
+      "version": ">=6.6.0",
+      "order": 51,
+      "critical": true
+    },
+    {
+      "name": "PySide6-Addons",
+      "version": ">=6.6.0",
+      "order": 52,
+      "critical": true
+    },
+    {
+      "name": "pandas",
+      "version": ">=2.0.0",
+      "order": 53,
+      "critical": false
+    },
+    {
+      "name": "psutil",
+      "version": ">=5.9.0",
+      "order": 54,
+      "critical": false
+    },
+    {
+      "name": "streamlit",
+      "version": ">=1.28.0",
+      "order": 55,
+      "critical": false,
+      "comment": "Optional web UI"
+    }
+  ],
+  
+  "optional_packages": [
+    {
+      "name": "unsloth",
+      "version": ">=2024.11",
+      "blacklist_deps": ["torchao", "pytorch-ao", "torchao-nightly"],
+      "skip_reason": "unsloth requires torchao which conflicts with our environment",
+      "comment": "DO NOT INSTALL - causes transformers import failures"
+    },
+    {
+      "name": "xformers",
+      "version": ">=0.0.27",
+      "comment": "Memory-efficient attention - optional optimization"
+    }
+  ],
+  
+  "global_blacklist": [
+    "torchao",
+    "pytorch-ao",
+    "torchao-nightly",
+    "torch-ao"
+  ],
+  
+  "verification_tests": [
+    {
+      "name": "torch_cuda",
+      "code": "import torch; assert torch.cuda.is_available(), 'CUDA not available'; print(f'torch {torch.__version__} with CUDA {torch.version.cuda}')",
+      "critical": true
+    },
+    {
+      "name": "transformers_import",
+      "code": "from transformers import PreTrainedModel, AutoModel, AutoTokenizer; print('transformers imports OK')",
+      "critical": true
+    },
+    {
+      "name": "peft_import",
+      "code": "import peft; from peft import get_peft_model, LoraConfig; print('peft OK')",
+      "critical": true
+    },
+    {
+      "name": "datasets_import",
+      "code": "import datasets; print('datasets OK')",
+      "critical": true
+    },
+    {
+      "name": "bitsandbytes_import",
+      "code": "import bitsandbytes; print('bitsandbytes OK')",
+      "critical": false
+    },
+    {
+      "name": "no_blacklisted",
+      "code": "import sys, importlib.util; blacklist=['torchao', 'pytorch_ao']; found=[pkg for pkg in blacklist if importlib.util.find_spec(pkg) is not None]; assert not found, f'Blacklisted packages found: {found}'; print('No blacklisted packages')",
+      "critical": true
+    }
+  ],
+  
+  "post_install_cleanup": [
+    {
+      "action": "clear_pycache",
+      "path": "site-packages",
+      "recursive": true,
+      "reason": "Prevent lazy_loader corruption"
+    },
+    {
+      "action": "verify_no_blacklist",
+      "packages": ["torchao", "pytorch-ao", "torchao-nightly"],
+      "fail_on_found": true
+    }
+  ]
+}
+
