@@ -279,6 +279,9 @@ class MainWindow(QMainWindow):
         
         # Detect real system info
         self.system_info = SystemDetector().detect_all()
+        
+        # Store SmartInstaller instance for reuse
+        self.installer = SmartInstaller()
 
         # Create a beautiful unified header
         header_widget = QFrame()
@@ -564,6 +567,24 @@ class MainWindow(QMainWindow):
         row.addWidget(detail_label)
         
         return row
+    
+    def _get_target_venv_python(self) -> str:
+        """Get the target venv Python executable path"""
+        import sys
+        from pathlib import Path
+        
+        # Try to find LLM/.venv Python
+        llm_venv = self.root / ".venv"
+        if sys.platform == "win32":
+            venv_python = llm_venv / "Scripts" / "python.exe"
+        else:
+            venv_python = llm_venv / "bin" / "python"
+        
+        if venv_python.exists():
+            return str(venv_python)
+        
+        # Fallback to current Python
+        return sys.executable
     
     def _create_status_widget(self, label: str, is_ok: bool, detail: str) -> QWidget:
         """Create a status indicator widget"""
@@ -1464,97 +1485,61 @@ class MainWindow(QMainWindow):
         # Dependencies status with install button
         deps_row = QHBoxLayout()
         
-        # Check if key packages are installed (check package existence, not import)
+        # Check if key packages are installed using SmartInstaller (checks target venv Python)
         deps_ok = True
         missing_packages = []
-        error_message = None
         
-        # Use importlib.metadata instead of deprecated pkg_resources
         try:
-            from importlib.metadata import version, PackageNotFoundError
-        except ImportError:
-            # Fallback for Python < 3.8
-            from importlib_metadata import version, PackageNotFoundError
-        
-        required_packages = ['unsloth', 'transformers', 'accelerate', 'peft', 'datasets', 'Pillow', 'numpy', 'bitsandbytes', 'tokenizers']
-        
-        # Version requirements for critical packages - mirrors requirements.txt
-        version_requirements = {
-            'numpy': {'operator': '<', 'version': '2.0.0', 'reason': 'Torch/NumPy 2.x incompatibility'},
-            'transformers': {'operator': '==', 'version': '4.51.3', 'reason': 'Unsloth compatibility'},
-            'tokenizers': {'operator': '>=', 'min_version': '0.21', 'operator2': '<', 'max_version': '0.22', 'reason': 'Transformers 4.51.3 requirement'},
-            'datasets': {'operator': '<', 'version': '4.4.0', 'reason': 'Unsloth compatibility'},
-            'accelerate': {'operator': '>=', 'version': '0.18.0', 'reason': 'Training requirement'},
-            'peft': {'operator': '>=', 'version': '0.3.0', 'reason': 'LoRA training'},
-            'bitsandbytes': {'operator': '>=', 'version': '0.39.0', 'reason': '4-bit quantization'},
-        }
-        
-        for pkg in required_packages:
-            try:
-                installed_version = version(pkg)
+            # Get target venv Python path
+            target_python = self._get_target_venv_python()
+            
+            # Use SmartInstaller to check packages (uses target venv Python)
+            installer = SmartInstaller()
+            checklist = installer.get_installation_checklist(python_executable=target_python)
+            
+            # Map component names to package names for checking
+            component_to_pkg = {
+                'PyTorch (CUDA)': 'torch',
+                'transformers': 'transformers',
+                'tokenizers': 'tokenizers',
+                'datasets': 'datasets',
+                'accelerate': 'accelerate',
+                'peft': 'peft',
+                'numpy': 'numpy',
+                'bitsandbytes': 'bitsandbytes',
+                'unsloth': 'unsloth',
+            }
+            
+            # Check critical packages - map component names to what's in checklist
+            # The checklist uses package names (e.g., 'transformers') not component names (e.g., 'PyTorch (CUDA)')
+            critical_packages = ['transformers', 'tokenizers', 'datasets', 'accelerate', 'peft', 'numpy']
+            critical_components = ['PyTorch (CUDA)']  # Special component name
+            
+            for item in checklist:
+                component = item.get('component', '')
+                status = item.get('status', 'missing')
+                status_text = item.get('status_text', '')
                 
-                # Check version compatibility for packages with requirements
-                if pkg in version_requirements:
-                    req = version_requirements[pkg]
-                    try:
-                        from packaging import version as pkg_version
-                        installed = pkg_version.parse(installed_version)
-                        
-                        # Handle different operator types
-                        if req['operator'] == '==':
-                            target = pkg_version.parse(req['version'])
-                            if installed != target:
-                                deps_ok = False
-                                missing_packages.append(f"{pkg} (need =={req['version']}, have {installed_version})")
-                        
-                        elif req['operator'] == '<':
-                            target = pkg_version.parse(req['version'])
-                            if installed >= target:
-                                deps_ok = False
-                                missing_packages.append(f"{pkg} (need <{req['version']}, have {installed_version})")
-                        
-                        elif req['operator'] == '>=':
-                            min_ver = pkg_version.parse(req['version'])
-                            if installed < min_ver:
-                                deps_ok = False
-                                missing_packages.append(f"{pkg} (need >={req['version']}, have {installed_version})")
-                            
-                            # Check max version if specified (for range checks like tokenizers)
-                            if 'operator2' in req and req['operator2'] == '<':
-                                max_ver = pkg_version.parse(req['max_version'])
-                                if installed >= max_ver:
-                                    deps_ok = False
-                                    missing_packages.append(f"{pkg} (need <{req['max_version']}, have {installed_version})")
-                    
-                    except Exception as e:
-                        # If version parsing fails, log but don't block
-                        print(f"Version check error for {pkg}: {e}")
-                
-            except PackageNotFoundError:
-                deps_ok = False
-                missing_packages.append(pkg)
+                # Check if this component is in our critical list
+                if component in critical_packages or component in critical_components:
+                    if status != 'installed':
+                        deps_ok = False
+                        # Clean up status text
+                        clean_text = status_text.replace('✓ ', '').replace('⚠ ', '').replace('✗ ', '')
+                        if clean_text and clean_text not in missing_packages:
+                            missing_packages.append(clean_text)
+        except Exception as e:
+            # If checking fails, assume dependencies are missing
+            print(f"Error checking dependencies: {e}")
+            deps_ok = False
+            missing_packages.append("Error checking dependencies")
         
-        # Runtime import test for transformers to detect broken installations
-        # (e.g., missing transformers.modeling_layers submodule)
-        if deps_ok and 'transformers' in required_packages:
-            try:
-                import transformers.modeling_layers
-                # If import succeeds, transformers is properly installed
-            except ImportError as e:
-                deps_ok = False
-                missing_packages.append(f"transformers (corrupted: {str(e)[:50]})")
-            except Exception:
-                # Other errors (e.g., CUDA issues) are not dependency problems
-                pass
-        
-        # IMPORTANT:
-        # Do NOT import unsloth (or other heavy deps) inside the GUI process.
-        # A broken native extension (e.g. xformers) can crash pythonw.exe with a Windows loader dialog
-        # before the user can click "Fix Issues". We only check package metadata here.
         if deps_ok:
             deps_msg = "✅ Packages installed (runtime validated by Fix Issues)"
         else:
-            deps_msg = f"Missing: {', '.join(missing_packages)}"
+            deps_msg = f"Missing: {', '.join(missing_packages[:5])}"  # Show first 5
+            if len(missing_packages) > 5:
+                deps_msg += f" (+{len(missing_packages) - 5} more)"
         
         deps_status_widget = self._create_status_widget(
             "📦 Dependencies",
@@ -3350,7 +3335,52 @@ class MainWindow(QMainWindow):
         info.setStyleSheet("background: transparent; color: #888; font-size: 11pt; margin-bottom: 20px;")
         layout.addWidget(info)
         
-        # Get installed versions
+        # Get target venv Python path
+        target_python = self._get_target_venv_python()
+        
+        # Use SmartInstaller to get accurate package status (checks target venv Python)
+        installer = SmartInstaller()
+        checklist = installer.get_installation_checklist(python_executable=target_python)
+        
+        # Create a map of component -> status for quick lookup
+        component_status_map = {}
+        for item in checklist:
+            component = item.get('component', '')
+            component_status_map[component] = {
+                'status': item.get('status', 'unknown'),
+                'installed_version': item.get('installed_version') or item.get('version', 'N/A'),
+                'status_text': item.get('status_text', '')
+            }
+        
+        # Helper to get installed version from checklist
+        def get_installed_version_from_checklist(pkg_name):
+            """Get installed version from checklist by matching component names"""
+            # Map package names to component names
+            pkg_to_component = {
+                'torch': 'PyTorch (CUDA)',
+                'torchvision': 'PyTorch Vision',
+                'torchaudio': 'PyTorch Audio',
+                'triton-windows': 'Triton (Windows)',
+                'triton': 'Triton (Windows)',
+            }
+            
+            component = pkg_to_component.get(pkg_name, pkg_name)
+            if component in component_status_map:
+                installed_ver = component_status_map[component].get('installed_version')
+                # Check if it's a valid version (not None, not 'N/A', not 'any')
+                if installed_ver and installed_ver not in ['N/A', 'any', '']:
+                    return installed_ver
+            
+            # Try direct lookup by package name
+            if pkg_name in component_status_map:
+                installed_ver = component_status_map[pkg_name].get('installed_version')
+                if installed_ver and installed_ver not in ['N/A', 'any', '']:
+                    return installed_ver
+            
+            # If not found, return None (will trigger subprocess check in caller)
+            return None
+        
+        # Get installed versions using target Python
         try:
             from importlib.metadata import version, PackageNotFoundError
         except ImportError:
@@ -3488,16 +3518,29 @@ class MainWindow(QMainWindow):
                 
                 required_version = required_packages[pkg_name]
                 
-                # Get installed version
-                installed_version = None
-                is_installed = False
-                try:
-                    # Handle special case: triton-windows package name but triton module
-                    check_name = "triton" if pkg_name == "triton-windows" else pkg_name
-                    installed_version = version(check_name)
-                    is_installed = True
-                except PackageNotFoundError:
-                    is_installed = False
+                # Get installed version using target venv Python
+                installed_version = get_installed_version_from_checklist(pkg_name)
+                is_installed = installed_version is not None and installed_version != "N/A" and installed_version != "any"
+                
+                # If not found in checklist, try subprocess check
+                if not is_installed or not installed_version:
+                    try:
+                        import subprocess
+                        # Handle special case: triton-windows package name but triton module
+                        check_name = "triton" if pkg_name == "triton-windows" else pkg_name
+                        # Use import-based verification for all packages (no metadata)
+                        module_name = check_name.replace("-", "_")
+                        result = subprocess.run(
+                            [target_python, "-c", f"import {module_name}; print({module_name}.__version__)"],
+                            capture_output=True,
+                            text=True,
+                            timeout=5
+                        )
+                        if result.returncode == 0:
+                            installed_version = result.stdout.strip()
+                            is_installed = True
+                    except:
+                        pass
                 
                 # Determine status and color
                 status = "unknown"

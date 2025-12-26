@@ -76,12 +76,6 @@ $env:PYTHONIOENCODING='utf-8'  # PowerShell
 set PYTHONIOENCODING=utf-8      # CMD
 ```
 
-### AttributeError: module 'torch' has no attribute 'int1'
-**Solution:** Uninstall incompatible torchao:
-```bash
-pip uninstall -y torchao
-```
-
 ## Version Compatibility
 The following versions are tested and working:
 - Python: 3.12

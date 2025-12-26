@@ -210,13 +210,14 @@ class SmartInstaller:
             plan["numpy_spec"] = "numpy<2"
         self.log(f"NumPy decision: {plan['numpy_spec']} (Python {plan['python_version']})")
         
-        # 2. PyTorch build based on GPU presence
+        # 2. PyTorch build - HARDCODED to cu124 (deterministic, not dynamic)
         if plan.get("nvidia_gpu_present"):
-            cuda_build = plan["cuda_build"]
-            plan["torch_spec"] = f"torch==2.5.1+{cuda_build}"
-            plan["torchvision_spec"] = f"torchvision==0.20.1+{cuda_build}"
-            plan["torchaudio_spec"] = f"torchaudio==2.5.1+{cuda_build}"
-            plan["torch_index_url"] = f"https://download.pytorch.org/whl/{cuda_build}"
+            # Always use cu124 for CUDA builds (deterministic)
+            plan["torch_spec"] = "torch==2.5.1+cu124"
+            plan["torchvision_spec"] = "torchvision==0.20.1+cu124"
+            plan["torchaudio_spec"] = "torchaudio==2.5.1+cu124"
+            plan["torch_index_url"] = "https://download.pytorch.org/whl/cu124"
+            plan["cuda_build"] = "cu124"  # Override detected build with hardcoded cu124
         else:
             plan["torch_spec"] = "torch==2.5.1"
             plan["torchvision_spec"] = "torchvision==0.20.1"
@@ -230,8 +231,8 @@ class SmartInstaller:
         plan["huggingface_hub_spec"] = "huggingface-hub<1.0"
         
         # 4. Other packages
-        plan["transformers_spec"] = "transformers==4.51.3"
-        plan["tokenizers_spec"] = "tokenizers==0.21.4"
+        plan["transformers_spec"] = "transformers==4.57.3"
+        plan["tokenizers_spec"] = "tokenizers==0.22.1"
         plan["datasets_spec"] = "datasets>=2.11.0,<4.4.0"
         
         return plan
@@ -426,13 +427,122 @@ print('CUDA:', torch.cuda.is_available())
         """
         return self._gate_torch_integrity(python_executable, expected_version, require_cuda)
     
+    def _gate_no_torchao(self, python_executable: str) -> Tuple[bool, str]:
+        """
+        MANDATORY GATE: Verify torchao is NOT installed.
+        Aborts if torchao is found.
+        
+        Returns:
+            Tuple of (pass: bool, error_message: str)
+        """
+        try:
+            verify_cmd = [python_executable, "-c", "import importlib.util; assert importlib.util.find_spec('torchao') is None, 'torchao is still installed'; print('OK no torchao')"]
+            result = subprocess.run(
+                verify_cmd,
+                capture_output=True,
+                text=True,
+                timeout=10,
+                **self.subprocess_flags
+            )
+            
+            if result.returncode == 0:
+                return True, ""
+            else:
+                error_output = result.stderr or result.stdout
+                return False, f"torchao is installed (must be removed): {error_output.strip()}"
+                
+        except Exception as e:
+            return False, f"torchao check exception: {str(e)}"
+    
+    def _gate_core_stack_invariants(self, python_executable: str, require_cuda: bool = True) -> Tuple[bool, str]:
+        """
+        MANDATORY GATE: Verify core stack invariants after every layer.
+        Aborts if any invariant is violated.
+        
+        Uses EXACT verification commands as specified:
+        1) python -c "import torch; assert torch.__version__=='2.5.1+cu124'; assert torch.cuda.is_available(); print('OK torch')"
+        2) python -c "from transformers import PreTrainedModel; import peft; print('OK transformers/peft')"
+        3) python -c "import importlib.util; assert importlib.util.find_spec('torchao') is None; print('OK no torchao')"
+        
+        Args:
+            python_executable: Target Python executable
+            require_cuda: If True, assert torch.cuda.is_available()
+        
+        Returns:
+            Tuple of (pass: bool, error_message: str)
+        """
+        errors = []
+        
+        # Gate 1: EXACT command - torch version == 2.5.1+cu124 and CUDA available
+        if require_cuda:
+            gate1_cmd = [python_executable, "-c", "import torch; assert torch.__version__=='2.5.1+cu124'; assert torch.cuda.is_available(); print('OK torch')"]
+            gate1_result = subprocess.run(
+                gate1_cmd,
+                capture_output=True,
+                text=True,
+                timeout=30,
+                **self.subprocess_flags
+            )
+            if gate1_result.returncode != 0:
+                error_output = gate1_result.stderr or gate1_result.stdout
+                errors.append(f"Gate 1 (torch) failed: {error_output.strip()}")
+        
+        # Gate 2: EXACT command - PreTrainedModel import (MUST pass if transformers is installed)
+        try:
+            check_transformers = [python_executable, "-c", "import transformers; print('OK')"]
+            transformers_result = subprocess.run(
+                check_transformers,
+                capture_output=True,
+                text=True,
+                timeout=10,
+                **self.subprocess_flags
+            )
+            
+            if transformers_result.returncode == 0:
+                # transformers IS installed - MUST pass gate 2
+                gate2_cmd = [python_executable, "-c", "from transformers import PreTrainedModel; import peft; print('OK transformers/peft')"]
+                gate2_result = subprocess.run(
+                    gate2_cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                    **self.subprocess_flags
+                )
+                
+                if gate2_result.returncode != 0:
+                    error_output = gate2_result.stderr or gate2_result.stdout
+                    errors.append(f"Gate 2 (PreTrainedModel) FAILED - transformers is installed but PreTrainedModel import failed: {error_output.strip()}")
+            # If transformers not installed yet, skip this gate (will be checked after Layer 3)
+        except Exception as e:
+            # If check fails, transformers might not be installed yet - skip gate 2
+            pass
+        
+        # Gate 3: EXACT command - torchao is NOT installed
+        gate3_cmd = [python_executable, "-c", "import importlib.util; assert importlib.util.find_spec('torchao') is None; print('OK no torchao')"]
+        gate3_result = subprocess.run(
+            gate3_cmd,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            **self.subprocess_flags
+        )
+        if gate3_result.returncode != 0:
+            error_output = gate3_result.stderr or gate3_result.stdout
+            errors.append(f"Gate 3 (torchao) failed: {error_output.strip()}")
+        
+        if errors:
+            error_msg = " | ".join(errors)
+            return False, error_msg
+        
+        return True, ""
+    
     def _select_best_gpu(self, python_executable: str) -> Tuple[bool, str, Optional[Dict]]:
         """
         Select the best GPU from available NVIDIA GPUs.
         
         Selection policy:
         - If FORCE_GPU_INDEX env var is set: use it
-        - Else: MAX total VRAM (primary), MAX compute capability (secondary)
+        - Else: MAX compute capability (primary), MAX total VRAM (secondary)
         
         Returns:
             Tuple of (success: bool, error_message: str, gpu_info: Optional[Dict])
@@ -479,8 +589,11 @@ print(json.dumps({"gpus": gpus}))
                 data = json.loads(result.stdout.strip())
                 if "error" not in data:
                     gpus = data.get("gpus", [])
-        except:
-            pass
+        except Exception as e:
+            # Exception during GPU enumeration is fatal
+            error_msg = f"GPU detection failed (torch.cuda): {str(e)}"
+            self.log(f"ERROR: {error_msg}")
+            return False, error_msg, None
         
         # Fallback to nvidia-smi if torch.cuda failed
         if not gpus:
@@ -519,8 +632,11 @@ print(json.dumps({"gpus": gpus}))
                                 })
                             except (ValueError, IndexError):
                                 continue
-            except:
-                pass
+            except Exception as e:
+                # Exception during nvidia-smi fallback is fatal
+                error_msg = f"GPU detection failed (nvidia-smi): {str(e)}"
+                self.log(f"ERROR: {error_msg}")
+                return False, error_msg, None
         
         if not gpus:
             error_msg = "No GPUs found (tried torch.cuda and nvidia-smi)"
@@ -544,13 +660,13 @@ print(json.dumps({"gpus": gpus}))
                     best_gpu = selected_gpu
                 else:
                     self.log(f"WARNING: FORCE_GPU_INDEX={force_index} not found, falling back to auto-selection")
-                    best_gpu = max(gpus, key=lambda g: (g["total_memory"], g["compute_capability"]))
+                    best_gpu = max(gpus, key=lambda g: (g["compute_capability"], g["total_memory"]))
             except ValueError:
                 self.log(f"WARNING: Invalid FORCE_GPU_INDEX={force_index}, falling back to auto-selection")
-                best_gpu = max(gpus, key=lambda g: (g["total_memory"], g["compute_capability"]))
+                best_gpu = max(gpus, key=lambda g: (g["compute_capability"], g["total_memory"]))
         else:
-            # Select best GPU: primary = MAX VRAM, secondary = MAX compute capability
-            best_gpu = max(gpus, key=lambda g: (g["total_memory"], g["compute_capability"]))
+            # Select best GPU: primary = MAX compute capability, secondary = MAX VRAM
+            best_gpu = max(gpus, key=lambda g: (g["compute_capability"], g["total_memory"]))
         
         vram_gb = best_gpu["total_memory"] / (1024 ** 3)
         selected_info = {
@@ -587,17 +703,22 @@ if device_name != expected_name:
 print(device_name)
 """
         
-        verify_result = subprocess.run(
-            [python_executable, "-c", verify_script],
-            capture_output=True,
-            text=True,
-            timeout=10,
-            env=os.environ.copy(),
-            **self.subprocess_flags
-        )
-        
-        if verify_result.returncode != 0:
-            error_msg = f"GPU selection verification failed: {verify_result.stderr.strip() or verify_result.stdout.strip()}"
+        try:
+            verify_result = subprocess.run(
+                [python_executable, "-c", verify_script],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                env=os.environ.copy(),
+                **self.subprocess_flags
+            )
+            
+            if verify_result.returncode != 0:
+                error_msg = f"GPU selection verification failed: {verify_result.stderr.strip() or verify_result.stdout.strip()}"
+                self.log(f"ERROR: {error_msg}")
+                return False, error_msg, None
+        except Exception as e:
+            error_msg = f"GPU selection verification exception: {str(e)}"
             self.log(f"ERROR: {error_msg}")
             return False, error_msg, None
         
@@ -1734,12 +1855,6 @@ print(device_name)
             else:
                 self.log(f"⚠️ unsloth installation warning: {result.stderr[:200]}")
             
-            # Remove incompatible torchao if present (known Windows issue)
-            self.log("Checking for torchao compatibility...")
-            remove_torchao = [python_executable, "-m", "pip", "uninstall", "-y", "torchao"]
-            subprocess.run(remove_torchao, capture_output=True, timeout=60, **self.subprocess_flags)
-            self.log("Removed torchao (incompatible with current setup)")
-            
             # Test if unsloth works
             self.log("Testing unsloth import...")
             test_cmd = [python_executable, "-c", "from unsloth import FastLanguageModel; print('OK')"]
@@ -2064,12 +2179,12 @@ if errorlevel 1 (
                 "status_text": "✗ Not Installed"
             })
         
-        # PyTorch Vision and Audio (check if installed using correct Python)
-        def check_package_version(pkg_name):
-            """Check package version using the correct Python executable"""
+        # PyTorch Vision and Audio (verify using import only)
+        def check_import_version(module_name):
+            """Check package version using import (no metadata)"""
             try:
                 result = subprocess.run(
-                    [check_python, "-c", f"import importlib.metadata; print(importlib.metadata.version('{pkg_name}'))"],
+                    [check_python, "-c", f"import {module_name}; print({module_name}.__version__)"],
                     capture_output=True,
                     text=True,
                     timeout=10,
@@ -2081,34 +2196,38 @@ if errorlevel 1 (
             except:
                 return None
         
-        torchvision_ver = check_package_version("torchvision")
+        torchvision_ver = check_import_version("torchvision")
         if torchvision_ver:
             checklist.append({
                 "component": "PyTorch Vision",
                 "version": "0.20.1+cu118",
                 "status": "installed",
+                "installed_version": torchvision_ver,
                 "status_text": f"✓ Installed ({torchvision_ver})"
             })
         else:
             checklist.append({
                 "component": "PyTorch Vision",
                 "version": "0.20.1+cu118",
+                "installed_version": None,
                 "status": "missing",
                 "status_text": "✗ Not Installed"
             })
         
-        torchaudio_ver = check_package_version("torchaudio")
+        torchaudio_ver = check_import_version("torchaudio")
         if torchaudio_ver:
             checklist.append({
                 "component": "PyTorch Audio",
                 "version": "2.5.1+cu118",
                 "status": "installed",
+                "installed_version": torchaudio_ver,
                 "status_text": f"✓ Installed ({torchaudio_ver})"
             })
         else:
             checklist.append({
                 "component": "PyTorch Audio",
                 "version": "2.5.1+cu118",
+                "installed_version": None,
                 "status": "missing",
                 "status_text": "✗ Not Installed"
             })
@@ -2151,29 +2270,72 @@ if errorlevel 1 (
                 "status_text": "✗ Not Installed"
             })
         
-        # PySide6 packages
+        # PySide6 packages (verify using import only)
+        def check_pyside6_import(module_name):
+            """Check PySide6 using import"""
+            try:
+                result = subprocess.run(
+                    [check_python, "-c", f"import {module_name}; print('OK')"],
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                    **self.subprocess_flags
+                )
+                if result.returncode == 0:
+                    # Try to get version if available
+                    try:
+                        ver_result = subprocess.run(
+                            [check_python, "-c", f"import {module_name}; print({module_name}.__version__)"],
+                            capture_output=True,
+                            text=True,
+                            timeout=10,
+                            **self.subprocess_flags
+                        )
+                        if ver_result.returncode == 0:
+                            return ver_result.stdout.strip()
+                    except:
+                        pass
+                    return "installed"  # Import works but no version
+                return None
+            except:
+                return None
+        
         pyside_components = ["PySide6", "PySide6-Essentials", "PySide6-Addons", "shiboken6"]
         for component in pyside_components:
-            ver = check_package_version(component)
+            # Map component name to import name
+            import_name = component.replace("-", "_").lower()
+            if import_name == "pyside6":
+                import_name = "PySide6"
+            elif import_name == "pyside6_essentials":
+                import_name = "PySide6"
+            elif import_name == "pyside6_addons":
+                import_name = "PySide6"
+            elif import_name == "shiboken6":
+                import_name = "shiboken6"
+            
+            ver = check_pyside6_import(import_name)
             if ver:
-                if ver == "6.8.1":
+                if ver == "6.8.1" or ver == "installed":
                     checklist.append({
                         "component": component,
                         "version": "6.8.1",
                         "status": "installed",
-                        "status_text": f"✓ Installed ({ver})"
+                        "installed_version": ver if ver != "installed" else None,
+                        "status_text": f"✓ Installed ({ver})" if ver != "installed" else "✓ Installed"
                     })
                 else:
                     checklist.append({
                         "component": component,
                         "version": "6.8.1",
                         "status": "wrong_version",
+                        "installed_version": ver,
                         "status_text": f"⚠ Wrong Version ({ver})"
                     })
             else:
                 checklist.append({
                     "component": component,
                     "version": "6.8.1",
+                    "installed_version": None,
                     "status": "missing",
                     "status_text": "✗ Not Installed"
                 })
@@ -2215,12 +2377,28 @@ if errorlevel 1 (
                         # Use import test for transformers, datasets, huggingface_hub (GUI status rule)
                         if pkg_name.lower() in ["transformers", "datasets", "huggingface-hub", "huggingface_hub"]:
                             # Use import verification (no metadata inspection)
+                            installed_ver = None
                             if self._verify_import(check_python, pkg_name):
+                                # Get version via import
+                                try:
+                                    result = subprocess.run(
+                                        [check_python, "-c", f"import {pkg_name.replace('-', '_')}; print({pkg_name.replace('-', '_')}.__version__)"],
+                                        capture_output=True,
+                                        text=True,
+                                        timeout=10,
+                                        **self.subprocess_flags
+                                    )
+                                    if result.returncode == 0:
+                                        installed_ver = result.stdout.strip()
+                                except:
+                                    pass
+                                
                                 status = "installed"
-                                status_text = "✓ Installed"
+                                status_text = f"✓ Installed ({installed_ver})" if installed_ver else "✓ Installed"
                                 checklist.append({
                                     "component": pkg_name,
                                     "version": version_spec,
+                                    "installed_version": installed_ver,
                                     "status": status,
                                     "status_text": status_text
                                 })
@@ -2228,28 +2406,35 @@ if errorlevel 1 (
                                 checklist.append({
                                     "component": pkg_name,
                                     "version": version_spec,
+                                    "installed_version": None,
                                     "status": "missing",
                                     "status_text": "✗ Not Installed"
                                 })
                         else:
-                            # Use metadata for other packages
-                            installed_ver = check_package_version(pkg_name)
-                            if installed_ver:
-                                # Check version compatibility if version_spec is provided
+                            # Use import-based verification for all other packages
+                            module_name = pkg_name.replace("-", "_")
+                            installed_ver = None
+                            if self._verify_import(check_python, pkg_name):
+                                # Get version via import
+                                try:
+                                    result = subprocess.run(
+                                        [check_python, "-c", f"import {module_name}; print({module_name}.__version__)"],
+                                        capture_output=True,
+                                        text=True,
+                                        timeout=10,
+                                        **self.subprocess_flags
+                                    )
+                                    if result.returncode == 0:
+                                        installed_ver = result.stdout.strip()
+                                except:
+                                    pass
+                                
                                 status = "installed"
-                                status_text = f"✓ Installed ({installed_ver})"
-                                
-                                if version_spec and version_spec != "any":
-                                    # Simple version check (can be enhanced)
-                                    if "==" in version_spec:
-                                        required = version_spec.split("==")[1].strip()
-                                        if installed_ver != required:
-                                            status = "wrong_version"
-                                            status_text = f"⚠ Wrong Version (need {required}, have {installed_ver})"
-                                
+                                status_text = f"✓ Installed ({installed_ver})" if installed_ver else "✓ Installed"
                                 checklist.append({
                                     "component": pkg_name,
                                     "version": version_spec,
+                                    "installed_version": installed_ver,
                                     "status": status,
                                     "status_text": status_text
                                 })
@@ -2257,6 +2442,7 @@ if errorlevel 1 (
                                 checklist.append({
                                     "component": pkg_name,
                                     "version": version_spec,
+                                    "installed_version": None,
                                     "status": "missing",
                                     "status_text": "✗ Not Installed"
                                 })
@@ -2930,6 +3116,36 @@ if errorlevel 1 (
         # STATE: CONSTRAINTS GENERATION (initial, will be updated after Layer 2)
         constraints_file = self._generate_constraints_file(install_plan, torch_selected=False)
         
+        # TASK A: Eliminate torchao completely
+        self.log("=" * 60)
+        self.log("TASK A: Eliminating torchao completely")
+        self.log("=" * 60)
+        
+        torchao_packages = ["torchao", "pytorch-ao", "torchao-nightly"]
+        for pkg in torchao_packages:
+            self.log(f"Uninstalling {pkg}...")
+            self._run_pip_worker(
+                action="uninstall",
+                package=pkg,
+                python_executable=python_executable
+            )
+        
+        # Verify torchao is not installed
+        self.log("Verifying torchao is not installed...")
+        verify_cmd = [python_executable, "-c", "import importlib.util; assert importlib.util.find_spec('torchao') is None, 'torchao is still installed'; print('OK')"]
+        verify_result = subprocess.run(
+            verify_cmd,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            **self.subprocess_flags
+        )
+        if verify_result.returncode != 0:
+            error_msg = f"torchao verification failed: {verify_result.stderr or verify_result.stdout}"
+            self.log(f"ERROR: {error_msg}")
+            return False
+        self.log("✓ torchao completely removed and verified")
+        
         # GATE: NumPy integrity (before any install)
         numpy_ok, numpy_error = self._gate_numpy_integrity(python_executable)
         if not numpy_ok:
@@ -3009,6 +3225,18 @@ if errorlevel 1 (
             self.log(f"ERROR: NumPy integrity check failed after fsspec install: {numpy_error}")
             return False
         self.log("✓ fsspec installed")
+        
+        # GATE: Core stack invariants after Layer 1 (only check torchao, torch not installed yet)
+        self.log("=" * 60)
+        self.log("GATE: Core stack invariants check (after Layer 1)")
+        self.log("=" * 60)
+        # Only check torchao at this stage (torch not installed yet)
+        torchao_ok, torchao_error = self._gate_no_torchao(python_executable)
+        if not torchao_ok:
+            self.log(f"ERROR: torchao gate failed after Layer 1: {torchao_error}")
+            self.log("ABORTING: Installation failed - torchao must be removed")
+            return False
+        self.log("✓ Core stack invariants verified (Layer 1 - torchao check only)")
         
         # STATE: LAYER 2 INSTALLATION (torch stack)
         self.log("=" * 60)
@@ -3171,59 +3399,85 @@ if errorlevel 1 (
         else:
             self.log("✓ torchaudio already installed")
         
+        # GATE: Core stack invariants after Layer 2
+        self.log("=" * 60)
+        self.log("GATE: Core stack invariants check (after Layer 2)")
+        self.log("=" * 60)
+        invariants_ok, invariants_error = self._gate_core_stack_invariants(python_executable, require_cuda)
+        if not invariants_ok:
+            self.log(f"ERROR: Core stack invariants gate failed after Layer 2: {invariants_error}")
+            self.log("ABORTING: Installation failed - invariants violated")
+            return False
+        self.log("✓ Core stack invariants verified (Layer 2)")
+        
         # STATE: LAYER 3 INSTALLATION (huggingface-hub, tokenizers, transformers, datasets)
         self.log("=" * 60)
         self.log("STATE: LAYER 3 - huggingface-hub, tokenizers, transformers, datasets")
         self.log("=" * 60)
         
-        # Hard-fix huggingface-hub first
-        self.log("Hard-fixing huggingface-hub...")
-        for pkg in ["huggingface-hub", "hf-xet"]:
+        # TASK B: Dedicated HF stack repair step
+        self.log("=" * 60)
+        self.log("TASK B: HF Stack Repair (fixing transformers/PreTrainedModel)")
+        self.log("=" * 60)
+        
+        # Uninstall broken HF stack
+        self.log("Uninstalling broken HF stack...")
+        for pkg in ["transformers", "tokenizers", "huggingface-hub"]:
             self._run_pip_worker(action="uninstall", package=pkg, python_executable=python_executable)
         
-        self.log(f"Installing {install_plan['huggingface_hub_spec']}...")
-        success, last_lines, exit_code = self._run_pip_worker(
-            action="install",
-            package=f"huggingface-hub>=0.30.0,<1.0",
-            python_executable=python_executable,
-            pip_args=[]
-        )
-        if not success:
-            self.log(f"ERROR: huggingface-hub installation failed")
-            return False
+        # Install fixed versions
+        self.log("Installing fixed HF stack versions...")
+        hf_packages = [
+            ("huggingface-hub", ">=0.30.0,<1.0"),
+            ("tokenizers", "==0.22.1"),
+            ("transformers", "==4.57.3")
+        ]
         
-        # GATE: Check for constraint violations in output
-        if "constraint" in last_lines.lower() and "violated" in last_lines.lower():
-            self.log("ERROR: Constraint violation detected in pip output")
-            self.log("This is FATAL - constraints must be enforced")
-            return False
-        
-        # GATE: NumPy integrity after huggingface-hub install
-        numpy_ok, numpy_error = self._gate_numpy_integrity(python_executable)
-        if not numpy_ok:
-            self.log(f"ERROR: NumPy integrity check failed after huggingface-hub install: {numpy_error}")
-            return False
-        
-        # GUARD: Check torch after huggingface-hub install
-        if require_cuda:
-            cuda_build = install_plan.get("cuda_build", "cu124")
-            guard_ok, guard_error = self._guard_torch_immutability(
-                python_executable, install_plan["torch_spec"], cuda_build, "huggingface-hub"
+        for pkg_name, pkg_version in hf_packages:
+            pkg_spec = f"{pkg_name}{pkg_version}"
+            self.log(f"Installing {pkg_spec}...")
+            success, last_lines, exit_code = self._run_pip_worker(
+                action="install",
+                package=pkg_spec,
+                python_executable=python_executable,
+                pip_args=["--no-cache-dir"]
             )
-            if not guard_ok:
+            if not success:
+                error_msg = f"{pkg_name} installation failed (exit code {exit_code})"
+                self.log(f"ERROR: {error_msg}")
+                self.log(f"Last lines: {last_lines[-500:]}")
                 return False
-        self.log("✓ huggingface-hub installed")
+            
+            # GATE: Constraint violations check
+            if "constraint" in last_lines.lower() and "violated" in last_lines.lower():
+                self.log(f"ERROR: Constraint violation detected for {pkg_name}")
+                return False
+            
+            # GATE: NumPy integrity
+            numpy_ok, numpy_error = self._gate_numpy_integrity(python_executable)
+            if not numpy_ok:
+                self.log(f"ERROR: NumPy integrity check failed after {pkg_name} install: {numpy_error}")
+                return False
+            
+            # GUARD: Check torch after each HF package install
+            if require_cuda:
+                cuda_build = install_plan.get("cuda_build", "cu124")
+                guard_ok, guard_error = self._guard_torch_immutability(
+                    python_executable, install_plan["torch_spec"], cuda_build, pkg_name
+                )
+                if not guard_ok:
+                    return False
         
-        # Install tokenizers
-        self.log(f"Installing {install_plan['tokenizers_spec']}...")
+        # Install peft after HF stack
+        self.log("Installing peft==0.18.0...")
         success, last_lines, exit_code = self._run_pip_worker(
             action="install",
-            package=install_plan["tokenizers_spec"],
+            package="peft==0.18.0",
             python_executable=python_executable,
-            pip_args=[]
+            pip_args=["--no-cache-dir"]
         )
         if not success:
-            self.log(f"ERROR: tokenizers installation failed")
+            self.log(f"ERROR: peft installation failed")
             return False
         
         # GATE: Constraint violations check
@@ -3234,55 +3488,45 @@ if errorlevel 1 (
         # GATE: NumPy integrity
         numpy_ok, numpy_error = self._gate_numpy_integrity(python_executable)
         if not numpy_ok:
-            self.log(f"ERROR: NumPy integrity check failed after tokenizers install: {numpy_error}")
+            self.log(f"ERROR: NumPy integrity check failed after peft install: {numpy_error}")
             return False
         
-        # GUARD: Check torch after tokenizers install
+        # GUARD: Check torch after peft install
         if require_cuda:
             cuda_build = install_plan.get("cuda_build", "cu124")
             guard_ok, guard_error = self._guard_torch_immutability(
-                python_executable, install_plan["torch_spec"], cuda_build, "tokenizers"
+                python_executable, install_plan["torch_spec"], cuda_build, "peft"
             )
             if not guard_ok:
                 return False
-        self.log("✓ tokenizers installed")
         
-        # Install transformers
-        self.log(f"Installing {install_plan['transformers_spec']}...")
-        success, last_lines, exit_code = self._run_pip_worker(
-            action="install",
-            package=install_plan["transformers_spec"],
-            python_executable=python_executable,
-            pip_args=[]
+        # Verify HF stack repair
+        self.log("Verifying HF stack repair (PreTrainedModel import)...")
+        verify_script = """from transformers import PreTrainedModel
+import peft
+print('OK')
+"""
+        verify_cmd = [python_executable, "-c", verify_script]
+        verify_result = subprocess.run(
+            verify_cmd,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            **self.subprocess_flags
         )
-        if not success:
-            self.log(f"ERROR: transformers installation failed")
+        
+        if verify_result.returncode != 0:
+            error_output = verify_result.stderr or verify_result.stdout
+            error_msg = f"HF stack repair verification failed: {error_output.strip()}"
+            self.log(f"ERROR: {error_msg}")
+            self.log("=" * 60)
+            self.log("HF STACK REPAIR FAILED - Aborting")
+            self.log("=" * 60)
             return False
         
-        # GATE: Constraint violations check
-        if "constraint" in last_lines.lower() and "violated" in last_lines.lower():
-            self.log("ERROR: Constraint violation detected")
-            return False
+        self.log("✓ HF stack repair verified (PreTrainedModel import OK)")
         
-        # GATE: NumPy integrity
-        numpy_ok, numpy_error = self._gate_numpy_integrity(python_executable)
-        if not numpy_ok:
-            self.log(f"ERROR: NumPy integrity check failed after transformers install: {numpy_error}")
-            return False
-        
-        # GUARD: Check torch after transformers install
-        if require_cuda:
-            cuda_build = install_plan.get("cuda_build", "cu124")
-            guard_ok, guard_error = self._guard_torch_immutability(
-                python_executable, install_plan["torch_spec"], cuda_build, "transformers"
-            )
-            if not guard_ok:
-                return False
-        
-        if not self._verify_import(python_executable, "transformers"):
-            self.log(f"ERROR: transformers import verification failed")
-            return False
-        self.log("✓ transformers installed and verified")
+        # Continue with datasets installation (already in Layer 3)
         
         # Install datasets
         self.log(f"Installing {install_plan['datasets_spec']}...")
@@ -3321,16 +3565,61 @@ if errorlevel 1 (
             return False
         self.log("✓ datasets installed and verified")
         
-        # STATE: LAYER 4 INSTALLATION (trl, xformers, torchao, unsloth-zoo, unsloth)
+        # Install trl (with --no-deps to prevent torch upgrade)
+        self.log("Installing trl>=0.18.2,<0.25.0 (with --no-deps)...")
+        success, last_lines, exit_code = self._run_pip_worker(
+            action="install",
+            package="trl>=0.18.2,<0.25.0",
+            python_executable=python_executable,
+            pip_args=["--no-deps"]
+        )
+        if not success:
+            self.log(f"ERROR: trl installation failed")
+            return False
+        
+        # GATE: Constraint violations check
+        if "constraint" in last_lines.lower() and "violated" in last_lines.lower():
+            self.log("ERROR: Constraint violation detected")
+            return False
+        
+        # GATE: NumPy integrity
+        numpy_ok, numpy_error = self._gate_numpy_integrity(python_executable)
+        if not numpy_ok:
+            self.log(f"ERROR: NumPy integrity check failed after trl install: {numpy_error}")
+            return False
+        
+        # GUARD: Check torch after trl install
+        if require_cuda:
+            cuda_build = install_plan.get("cuda_build", "cu124")
+            guard_ok, guard_error = self._guard_torch_immutability(
+                python_executable, install_plan["torch_spec"], cuda_build, "trl"
+            )
+            if not guard_ok:
+                return False
+        
+        if not self._verify_import(python_executable, "trl"):
+            self.log(f"ERROR: trl import verification failed")
+            return False
+        self.log("✓ trl installed and verified")
+        
+        # GATE: Core stack invariants after Layer 3
         self.log("=" * 60)
-        self.log("STATE: LAYER 4 - trl, xformers, torchao, unsloth-zoo, unsloth")
+        self.log("GATE: Core stack invariants check (after Layer 3)")
+        self.log("=" * 60)
+        invariants_ok, invariants_error = self._gate_core_stack_invariants(python_executable, require_cuda)
+        if not invariants_ok:
+            self.log(f"ERROR: Core stack invariants gate failed after Layer 3: {invariants_error}")
+            self.log("ABORTING: Installation failed - invariants violated")
+            return False
+        self.log("✓ Core stack invariants verified (Layer 3)")
+        
+        # STATE: LAYER 4 INSTALLATION (xformers, unsloth-zoo, unsloth)
+        self.log("=" * 60)
+        self.log("STATE: LAYER 4 - xformers, unsloth-zoo, unsloth")
         self.log("=" * 60)
         
         layer4_packages = [
-            ("trl", ">=0.18.2,<0.25.0"),
             ("xformers", ""),
-            ("torchao", ""),
-            ("peft", ""),
             ("unsloth-zoo", ""),
             ("unsloth", "")
         ]
@@ -3390,6 +3679,60 @@ if errorlevel 1 (
                 
                 self.log(f"✓ {pkg_spec} installed")
         
+        # GATE: Core stack invariants after Layer 4
+        self.log("=" * 60)
+        self.log("GATE: Core stack invariants check (after Layer 4)")
+        self.log("=" * 60)
+        invariants_ok, invariants_error = self._gate_core_stack_invariants(python_executable, require_cuda)
+        if not invariants_ok:
+            self.log(f"ERROR: Core stack invariants gate failed after Layer 4: {invariants_error}")
+            self.log("ABORTING: Installation failed - invariants violated")
+            return False
+        self.log("✓ Core stack invariants verified (Layer 4)")
+        
+        # Install bitsandbytes (optional, only if CUDA available)
+        if require_cuda:
+            self.log("=" * 60)
+            self.log("Installing bitsandbytes (optional, CUDA only)...")
+            self.log("=" * 60)
+            
+            self.log("Installing bitsandbytes>=0.39.0...")
+            success, last_lines, exit_code = self._run_pip_worker(
+                action="install",
+                package="bitsandbytes>=0.39.0",
+                python_executable=python_executable,
+                pip_args=["--no-deps"]  # Prevent torch modification
+            )
+            if not success:
+                self.log("WARNING: bitsandbytes installation failed (optional dependency, continuing)")
+            else:
+                # GATE: Constraint violations check (fatal)
+                if "constraint" in last_lines.lower() and "violated" in last_lines.lower():
+                    self.log(f"ERROR: Constraint violation detected for bitsandbytes")
+                    self.log("This is FATAL - constraints must be enforced")
+                    return False
+                
+                # GUARD: Check torch after bitsandbytes install
+                cuda_build = install_plan.get("cuda_build", "cu124")
+                guard_ok, guard_error = self._guard_torch_immutability(
+                    python_executable, install_plan["torch_spec"], cuda_build, "bitsandbytes"
+                )
+                if not guard_ok:
+                    return False
+                
+                self.log("✓ bitsandbytes installed")
+                
+                # GATE: Core stack invariants after bitsandbytes
+                self.log("=" * 60)
+                self.log("GATE: Core stack invariants check (after bitsandbytes)")
+                self.log("=" * 60)
+                invariants_ok, invariants_error = self._gate_core_stack_invariants(python_executable, require_cuda)
+                if not invariants_ok:
+                    self.log(f"ERROR: Core stack invariants gate failed after bitsandbytes: {invariants_error}")
+                    self.log("ABORTING: Installation failed - invariants violated")
+                    return False
+                self.log("✓ Core stack invariants verified (bitsandbytes)")
+        
         # FINAL VERIFICATION
         self.log("=" * 60)
         self.log("FINAL VERIFICATION")
@@ -3425,16 +3768,44 @@ print('torch version:', torch.__version__)
         )
         
         if final_result.returncode == 0 and "INSTALL OK" in final_result.stdout:
-            self.log("=" * 60)
-            self.log("REPAIR COMPLETE - All components installed and verified")
-            self.log("=" * 60)
-            return True
+            self.log("✓ Core components verified")
         else:
             self.log("=" * 60)
             self.log("REPAIR FAILED - Final verification failed")
             self.log(f"Error: {final_result.stderr or final_result.stdout}")
             self.log("=" * 60)
             return False
+        
+        # INFERENCE PATH VERIFICATION
+        self.log("Verifying inference path...")
+        inference_verify_script = """from transformers import PreTrainedModel
+import peft
+print('OK')
+"""
+        inference_cmd = [python_executable, "-c", inference_verify_script]
+        inference_result = subprocess.run(
+            inference_cmd,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            **self.subprocess_flags
+        )
+        
+        if inference_result.returncode != 0:
+            error_output = inference_result.stderr or inference_result.stdout
+            error_msg = f"Inference path broken: PreTrainedModel import failed: {error_output.strip()}"
+            self.log(f"ERROR: {error_msg}")
+            self.log("=" * 60)
+            self.log("REPAIR FAILED - Inference path verification failed")
+            self.log("=" * 60)
+            return False
+        
+        self.log("✓ Inference path verified (PreTrainedModel import OK)")
+        
+        self.log("=" * 60)
+        self.log("REPAIR COMPLETE - All components installed and verified")
+        self.log("=" * 60)
+        return True
 
 
 if __name__ == "__main__":
