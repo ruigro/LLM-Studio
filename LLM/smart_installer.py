@@ -326,6 +326,97 @@ class SmartInstaller:
         except Exception as e:
             return False, f"Torch integrity check exception: {str(e)}"
     
+    def _guard_torch_immutability(self, python_executable: str, expected_version: str, cuda_build: str, step_name: str) -> Tuple[bool, str]:
+        """
+        GUARD: Check torch before/after install. If torch drifts, reinstall and abort.
+        
+        Args:
+            python_executable: Target Python executable
+            expected_version: Expected torch version
+            cuda_build: CUDA build string (e.g., "cu124")
+            step_name: Name of the installation step (for error messages)
+        
+        Returns:
+            Tuple of (success: bool, error_message: str)
+        """
+        # Record torch state before install
+        check_script = """
+import torch
+print(torch.__version__)
+print('CUDA:', torch.cuda.is_available())
+"""
+        try:
+            result = subprocess.run(
+                [python_executable, "-c", check_script],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                **self.subprocess_flags
+            )
+            
+            if result.returncode == 0:
+                lines = result.stdout.strip().split('\n')
+                before_version = lines[0].strip() if len(lines) > 0 else ""
+                before_cuda = "True" in (lines[1] if len(lines) > 1 else "")
+            else:
+                # Torch not installed yet, that's OK
+                before_version = None
+                before_cuda = None
+        except:
+            before_version = None
+            before_cuda = None
+        
+        # After install, check torch again
+        expected_version_clean = expected_version.split("==")[1] if "==" in expected_version else expected_version
+        
+        verify_result = self._gate_torch_integrity(python_executable, expected_version, require_cuda=True)
+        
+        if not verify_result[0]:
+            # Torch drifted - reinstall
+            self.log(f"ERROR: Torch drift detected after {step_name}")
+            self.log(f"Before: version={before_version}, CUDA={before_cuda}")
+            self.log(f"Expected: version={expected_version_clean}, CUDA=True")
+            self.log("Reinstalling torch stack...")
+            
+            # Reinstall torch stack
+            index_url = f"https://download.pytorch.org/whl/{cuda_build}"
+            torch_version = f"2.5.1+{cuda_build}"
+            torchvision_version = f"0.20.1+{cuda_build}"
+            torchaudio_version = f"2.5.1+{cuda_build}"
+            
+            # Uninstall
+            for pkg in ["torch", "torchvision", "torchaudio"]:
+                subprocess.run([python_executable, "-m", "pip", "uninstall", "-y", pkg], 
+                             capture_output=True, timeout=60, **self.subprocess_flags)
+            
+            # Reinstall
+            for pkg_spec in [f"torch=={torch_version}", f"torchvision=={torchvision_version}", f"torchaudio=={torchaudio_version}"]:
+                success, _, _ = self._run_pip_worker(
+                    action="install",
+                    package=pkg_spec,
+                    python_executable=python_executable,
+                    index_url=index_url,
+                    pip_args=["--no-deps", "--no-cache-dir"]
+                )
+                if not success:
+                    error_msg = f"Failed to reinstall {pkg_spec} after drift detection"
+                    self.log(f"ERROR: {error_msg}")
+                    return False, error_msg
+            
+            # Verify again
+            verify_again = self._gate_torch_integrity(python_executable, expected_version, require_cuda=True)
+            if not verify_again[0]:
+                error_msg = f"Torch reinstall failed after drift: {verify_again[1]}"
+                self.log(f"ERROR: {error_msg}")
+                return False, error_msg
+            
+            # Still abort even after successful reinstall (to prevent silent corruption)
+            error_msg = f"ABORT: Torch drifted during {step_name} installation. Reinstalled but aborting to prevent corruption."
+            self.log(f"ERROR: {error_msg}")
+            return False, error_msg
+        
+        return True, ""
+    
     def _check_torch_already_correct(self, python_executable: str, expected_version: str, require_cuda: bool = True) -> Tuple[bool, str]:
         """
         Check if torch is already installed and correct. Skip download if true.
@@ -340,8 +431,8 @@ class SmartInstaller:
         Select the best GPU from available NVIDIA GPUs.
         
         Selection policy:
-        - Primary: MAX total VRAM
-        - Secondary (tie-breaker): MAX compute capability
+        - If FORCE_GPU_INDEX env var is set: use it
+        - Else: MAX total VRAM (primary), MAX compute capability (secondary)
         
         Returns:
             Tuple of (success: bool, error_message: str, gpu_info: Optional[Dict])
@@ -349,7 +440,9 @@ class SmartInstaller:
         """
         self.log("Enumerating available GPUs...")
         
-        # Enumerate GPUs using torch.cuda APIs
+        gpus = []
+        
+        # Try torch.cuda first
         enum_script = """
 import torch
 import json
@@ -382,56 +475,110 @@ print(json.dumps({"gpus": gpus}))
                 **self.subprocess_flags
             )
             
-            if result.returncode != 0:
-                error_msg = f"Failed to enumerate GPUs: {result.stderr.strip()}"
-                self.log(f"ERROR: {error_msg}")
-                return False, error_msg, None
-            
-            data = json.loads(result.stdout.strip())
-            
-            if "error" in data:
-                error_msg = data["error"]
-                self.log(f"ERROR: {error_msg}")
-                return False, error_msg, None
-            
-            gpus = data.get("gpus", [])
-            if not gpus:
-                error_msg = "No GPUs found"
-                self.log(f"ERROR: {error_msg}")
-                return False, error_msg, None
-            
-            # Log all GPUs
-            self.log(f"Found {len(gpus)} GPU(s):")
-            for gpu in gpus:
-                vram_gb = gpu["total_memory"] / (1024 ** 3)
-                self.log(f"  GPU {gpu['index']}: {gpu['name']} ({vram_gb:.1f} GB, CC {gpu['compute_capability']})")
-            
+            if result.returncode == 0:
+                data = json.loads(result.stdout.strip())
+                if "error" not in data:
+                    gpus = data.get("gpus", [])
+        except:
+            pass
+        
+        # Fallback to nvidia-smi if torch.cuda failed
+        if not gpus:
+            self.log("torch.cuda enumeration failed, trying nvidia-smi...")
+            try:
+                smi_result = subprocess.run(
+                    ["nvidia-smi", "--query-gpu=index,name,memory.total,compute_cap", "--format=csv,noheader,nounits"],
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                    **self.subprocess_flags
+                )
+                
+                if smi_result.returncode == 0:
+                    for line in smi_result.stdout.strip().split('\n'):
+                        parts = [p.strip() for p in line.split(',')]
+                        if len(parts) >= 4:
+                            try:
+                                idx = int(parts[0])
+                                name = parts[1]
+                                # Parse memory (format: "24576 MB" or "24576")
+                                mem_str = parts[2].replace('MB', '').strip()
+                                total_memory = int(mem_str) * (1024 ** 2)  # Convert MB to bytes
+                                # Parse compute capability (format: "8.9" or "8.9 ")
+                                cc_str = parts[3].strip()
+                                cc_major, cc_minor = map(int, cc_str.split('.'))
+                                compute_cap = float(f"{cc_major}.{cc_minor}")
+                                
+                                gpus.append({
+                                    "index": idx,
+                                    "name": name,
+                                    "total_memory": total_memory,
+                                    "major": cc_major,
+                                    "minor": cc_minor,
+                                    "compute_capability": compute_cap
+                                })
+                            except (ValueError, IndexError):
+                                continue
+            except:
+                pass
+        
+        if not gpus:
+            error_msg = "No GPUs found (tried torch.cuda and nvidia-smi)"
+            self.log(f"ERROR: {error_msg}")
+            return False, error_msg, None
+        
+        # Log all GPUs
+        self.log(f"Found {len(gpus)} GPU(s):")
+        for gpu in gpus:
+            vram_gb = gpu["total_memory"] / (1024 ** 3)
+            self.log(f"  GPU {gpu['index']}: {gpu['name']} ({vram_gb:.1f} GB, CC {gpu['compute_capability']})")
+        
+        # Selection policy: check FORCE_GPU_INDEX first
+        force_index = os.environ.get("FORCE_GPU_INDEX")
+        if force_index is not None:
+            try:
+                force_idx = int(force_index)
+                selected_gpu = next((g for g in gpus if g["index"] == force_idx), None)
+                if selected_gpu:
+                    self.log(f"FORCE_GPU_INDEX={force_index} specified, using GPU {force_idx}")
+                    best_gpu = selected_gpu
+                else:
+                    self.log(f"WARNING: FORCE_GPU_INDEX={force_index} not found, falling back to auto-selection")
+                    best_gpu = max(gpus, key=lambda g: (g["total_memory"], g["compute_capability"]))
+            except ValueError:
+                self.log(f"WARNING: Invalid FORCE_GPU_INDEX={force_index}, falling back to auto-selection")
+                best_gpu = max(gpus, key=lambda g: (g["total_memory"], g["compute_capability"]))
+        else:
             # Select best GPU: primary = MAX VRAM, secondary = MAX compute capability
             best_gpu = max(gpus, key=lambda g: (g["total_memory"], g["compute_capability"]))
-            
-            vram_gb = best_gpu["total_memory"] / (1024 ** 3)
-            selected_info = {
-                "index": best_gpu["index"],
-                "name": best_gpu["name"],
-                "vram_gb": vram_gb,
-                "compute_capability": best_gpu["compute_capability"]
-            }
-            
-            # Set CUDA_VISIBLE_DEVICES environment variable
-            os.environ["CUDA_VISIBLE_DEVICES"] = str(best_gpu["index"])
-            
-            # Log selection result
-            self.log("=" * 60)
-            self.log("=== GPU SELECTION RESULT ===")
-            self.log(f"Selected GPU: {best_gpu['name']} ({vram_gb:.1f} GB, CC {best_gpu['compute_capability']})")
-            self.log(f"Visible devices: [{best_gpu['index']}]")
-            self.log("=" * 60)
-            
-            # Verify selection
-            verify_script = f"""
-import torch
-import os
+        
+        vram_gb = best_gpu["total_memory"] / (1024 ** 3)
+        selected_info = {
+            "index": best_gpu["index"],
+            "name": best_gpu["name"],
+            "vram_gb": vram_gb,
+            "compute_capability": best_gpu["compute_capability"]
+        }
+        
+        # Set CUDA_VISIBLE_DEVICES environment variable to physical index
+        os.environ["CUDA_VISIBLE_DEVICES"] = str(best_gpu["index"])
+        
+        # Create visibility map
+        visibility_map = {0: best_gpu["index"]}  # Logical 0 -> Physical index
+        
+        # Log selection result
+        self.log("=" * 60)
+        self.log("=== GPU SELECTION RESULT ===")
+        self.log(f"Selected GPU: {best_gpu['name']} ({vram_gb:.1f} GB, CC {best_gpu['compute_capability']})")
+        self.log(f"Physical index: {best_gpu['index']}")
+        self.log(f"Visible devices: [{best_gpu['index']}]")
+        self.log(f"Visibility map: {visibility_map}")
+        self.log("=" * 60)
+        
+        # Verify selection
+        verify_script = f"""import torch
 assert torch.cuda.is_available(), "CUDA not available"
+assert torch.cuda.device_count() == 1, f"Expected 1 device, got {{torch.cuda.device_count()}}"
 device_name = torch.cuda.get_device_name(0)
 expected_name = "{best_gpu['name']}"
 if device_name != expected_name:
@@ -439,33 +586,24 @@ if device_name != expected_name:
     exit(1)
 print(device_name)
 """
-            
-            verify_result = subprocess.run(
-                [python_executable, "-c", verify_script],
-                capture_output=True,
-                text=True,
-                timeout=10,
-                env=os.environ.copy(),
-                **self.subprocess_flags
-            )
-            
-            if verify_result.returncode != 0:
-                error_msg = f"GPU selection verification failed: {verify_result.stderr.strip()}"
-                self.log(f"ERROR: {error_msg}")
-                return False, error_msg, None
-            
-            self.log(f"✓ GPU selection verified: {verify_result.stdout.strip()}")
-            
-            return True, "", selected_info
-            
-        except json.JSONDecodeError as e:
-            error_msg = f"Failed to parse GPU enumeration output: {str(e)}"
+        
+        verify_result = subprocess.run(
+            [python_executable, "-c", verify_script],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env=os.environ.copy(),
+            **self.subprocess_flags
+        )
+        
+        if verify_result.returncode != 0:
+            error_msg = f"GPU selection verification failed: {verify_result.stderr.strip() or verify_result.stdout.strip()}"
             self.log(f"ERROR: {error_msg}")
             return False, error_msg, None
-        except Exception as e:
-            error_msg = f"GPU selection failed: {str(e)}"
-            self.log(f"ERROR: {error_msg}")
-            return False, error_msg, None
+        
+        self.log(f"✓ GPU selection verified: {verify_result.stdout.strip()}")
+        
+        return True, "", selected_info
     
     def _ensure_cuda_torch(self, python_executable: str, cuda_build: str = "cu124") -> Tuple[bool, str]:
         """
@@ -2789,8 +2927,8 @@ if errorlevel 1 (
             venv_path = Path(python_executable).parent.parent
             self.log(f"Using Python 3.12 venv: {python_executable}")
         
-        # STATE: CONSTRAINTS GENERATION
-        constraints_file = self._generate_constraints_file(install_plan)
+        # STATE: CONSTRAINTS GENERATION (initial, will be updated after Layer 2)
+        constraints_file = self._generate_constraints_file(install_plan, torch_selected=False)
         
         # GATE: NumPy integrity (before any install)
         numpy_ok, numpy_error = self._gate_numpy_integrity(python_executable)
@@ -2905,6 +3043,9 @@ if errorlevel 1 (
                 return False
             
             self.log("✓ CUDA torch stack verified")
+            
+            # CRITICAL: Regenerate constraints.txt with torch pins AFTER Layer 2
+            constraints_file = self._generate_constraints_file(install_plan, torch_selected=True)
             
             # GPU SELECTION: Select best GPU after CUDA torch is verified
             gpu_ok, gpu_error, gpu_info = self._select_best_gpu(python_executable)
@@ -3065,10 +3206,11 @@ if errorlevel 1 (
         
         # GUARD: Check torch after huggingface-hub install
         if require_cuda:
-            torch_ok, torch_error = self._gate_torch_integrity(python_executable, install_plan["torch_spec"], require_cuda)
-            if not torch_ok:
-                self.log(f"ERROR: Torch changed after huggingface-hub install: {torch_error}")
-                self.log("ABORTING: torch drift detected - installation step: huggingface-hub")
+            cuda_build = install_plan.get("cuda_build", "cu124")
+            guard_ok, guard_error = self._guard_torch_immutability(
+                python_executable, install_plan["torch_spec"], cuda_build, "huggingface-hub"
+            )
+            if not guard_ok:
                 return False
         self.log("✓ huggingface-hub installed")
         
@@ -3097,10 +3239,11 @@ if errorlevel 1 (
         
         # GUARD: Check torch after tokenizers install
         if require_cuda:
-            torch_ok, torch_error = self._gate_torch_integrity(python_executable, install_plan["torch_spec"], require_cuda)
-            if not torch_ok:
-                self.log(f"ERROR: Torch changed after tokenizers install: {torch_error}")
-                self.log("ABORTING: torch drift detected - installation step: tokenizers")
+            cuda_build = install_plan.get("cuda_build", "cu124")
+            guard_ok, guard_error = self._guard_torch_immutability(
+                python_executable, install_plan["torch_spec"], cuda_build, "tokenizers"
+            )
+            if not guard_ok:
                 return False
         self.log("✓ tokenizers installed")
         
@@ -3129,10 +3272,11 @@ if errorlevel 1 (
         
         # GUARD: Check torch after transformers install
         if require_cuda:
-            torch_ok, torch_error = self._gate_torch_integrity(python_executable, install_plan["torch_spec"], require_cuda)
-            if not torch_ok:
-                self.log(f"ERROR: Torch changed after transformers install: {torch_error}")
-                self.log("ABORTING: torch drift detected - installation step: transformers")
+            cuda_build = install_plan.get("cuda_build", "cu124")
+            guard_ok, guard_error = self._guard_torch_immutability(
+                python_executable, install_plan["torch_spec"], cuda_build, "transformers"
+            )
+            if not guard_ok:
                 return False
         
         if not self._verify_import(python_executable, "transformers"):
@@ -3165,10 +3309,11 @@ if errorlevel 1 (
         
         # GUARD: Check torch after datasets install
         if require_cuda:
-            torch_ok, torch_error = self._gate_torch_integrity(python_executable, install_plan["torch_spec"], require_cuda)
-            if not torch_ok:
-                self.log(f"ERROR: Torch changed after datasets install: {torch_error}")
-                self.log("ABORTING: torch drift detected - installation step: datasets")
+            cuda_build = install_plan.get("cuda_build", "cu124")
+            guard_ok, guard_error = self._guard_torch_immutability(
+                python_executable, install_plan["torch_spec"], cuda_build, "datasets"
+            )
+            if not guard_ok:
                 return False
         
         if not self._verify_import(python_executable, "datasets"):
@@ -3190,15 +3335,20 @@ if errorlevel 1 (
             ("unsloth", "")
         ]
         
+        # Packages that can drag torch - install with --no-deps first
+        torch_drag_packages = ["unsloth", "unsloth-zoo"]
+        
         for pkg_name, pkg_version in layer4_packages:
             pkg_spec = f"{pkg_name}{pkg_version}" if pkg_version else pkg_name
             self.log(f"Installing {pkg_spec}...")
             
-            # CRITICAL: xformers must use --no-deps to prevent torch upgrade
+            # CRITICAL: For packages that can drag torch, install with --no-deps first
             pip_args = []
-            if pkg_name == "xformers":
+            use_no_deps = False
+            if pkg_name in torch_drag_packages or pkg_name == "xformers":
+                use_no_deps = True
                 pip_args = ["--no-deps"]
-                self.log("Using --no-deps for xformers to prevent torch upgrade")
+                self.log(f"Using --no-deps for {pkg_name} to prevent torch upgrade")
             
             success, last_lines, exit_code = self._run_pip_worker(
                 action="install",
@@ -3231,10 +3381,11 @@ if errorlevel 1 (
                 
                 # GUARD: Check torch after Layer 4 install
                 if require_cuda:
-                    torch_ok, torch_error = self._gate_torch_integrity(python_executable, install_plan["torch_spec"], require_cuda)
-                    if not torch_ok:
-                        self.log(f"ERROR: Torch changed after {pkg_spec} install: {torch_error}")
-                        self.log(f"ABORTING: torch drift detected - installation step: {pkg_spec}")
+                    cuda_build = install_plan.get("cuda_build", "cu124")
+                    guard_ok, guard_error = self._guard_torch_immutability(
+                        python_executable, install_plan["torch_spec"], cuda_build, pkg_spec
+                    )
+                    if not guard_ok:
                         return False
                 
                 self.log(f"✓ {pkg_spec} installed")
