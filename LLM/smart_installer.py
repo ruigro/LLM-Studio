@@ -235,35 +235,104 @@ class SmartInstaller:
         
         return plan
     
-    def _generate_constraints_file(self, install_plan: Dict) -> Path:
+    def _generate_constraints_file(self, install_plan: Dict, torch_selected: bool = False) -> Path:
         """
         Generate constraints.txt dynamically from install_plan.
-        Do NOT hardcode numpy in source files.
-        
-        Returns:
-            Path to generated constraints.txt file
+        After hardware detection selects torch version, pins are written immediately.
         """
         constraints_file = Path(__file__).parent / "constraints.txt"
         
-        constraints = [
-            "# Global constraints for LLM Fine-tuning Studio",
-            "# Generated dynamically from hardware/platform detection",
-            "",
-            f"# NumPy constraint based on Python {install_plan.get('python_version', 'unknown')}",
-            install_plan.get("numpy_spec", "numpy<2"),
-            "",
-            "# Always pinned packages",
-            install_plan.get("sympy_spec", "sympy==1.13.1"),
-            install_plan.get("fsspec_spec", "fsspec<=2025.9.0"),
-            install_plan.get("huggingface_hub_spec", "huggingface-hub<1.0"),
-            "",
-        ]
+        constraints = []
+        
+        # CRITICAL: If torch is selected, write exact pins immediately
+        if torch_selected:
+            torch_spec = install_plan.get("torch_spec", "")
+            torchvision_spec = install_plan.get("torchvision_spec", "")
+            torchaudio_spec = install_plan.get("torchaudio_spec", "")
+            
+            constraints.extend([
+                "# CRITICAL: PyTorch stack pins (NEVER reinstall or upgrade)",
+                torch_spec,
+                torchvision_spec,
+                torchaudio_spec,
+                "",
+                "# Required pins",
+                "sympy==1.13.1",
+                "huggingface-hub>=0.30.0,<1.0",
+                "",
+                f"# NumPy constraint based on Python {install_plan.get('python_version', 'unknown')}",
+                install_plan.get("numpy_spec", "numpy<2"),
+                "",
+            ])
+        else:
+            # Initial constraints before torch selection
+            constraints.extend([
+                "# Initial constraints (before torch selection)",
+                install_plan.get("numpy_spec", "numpy<2"),
+                "sympy==1.13.1",
+                "huggingface-hub>=0.30.0,<1.0",
+                "",
+            ])
         
         with open(constraints_file, 'w', encoding='utf-8') as f:
             f.write('\n'.join(constraints))
         
         self.log(f"Generated constraints.txt: {constraints_file}")
         return constraints_file
+    
+    def _gate_torch_integrity(self, python_executable: str, expected_version: str, require_cuda: bool = True) -> Tuple[bool, str]:
+        """
+        MANDATORY GATE: Verify torch version and CUDA availability after every install step.
+        If torch is changed, abort immediately.
+        
+        Args:
+            python_executable: Target Python executable
+            expected_version: Expected torch version (e.g., "2.5.1+cu124" or "torch==2.5.1+cu124")
+            require_cuda: If True, assert torch.cuda.is_available()
+        
+        Returns:
+            Tuple of (pass: bool, error_message: str)
+        """
+        try:
+            # Extract exact version from spec (e.g., "torch==2.5.1+cu124" -> "2.5.1+cu124")
+            if "==" in expected_version:
+                selected_version = expected_version.split("==", 1)[1]
+            else:
+                selected_version = expected_version
+            
+            # Build verification script
+            if require_cuda:
+                verify_script = f"import torch; assert torch.__version__ == '{selected_version}', f'Expected {selected_version}, got {{torch.__version__}}'; assert torch.cuda.is_available(), 'CUDA not available'; print('OK')"
+            else:
+                verify_script = f"import torch; assert torch.__version__ == '{selected_version}', f'Expected {selected_version}, got {{torch.__version__}}'; print('OK')"
+            
+            verify_cmd = [python_executable, "-c", verify_script]
+            
+            result = subprocess.run(
+                verify_cmd,
+                capture_output=True,
+                text=True,
+                timeout=30,
+                **self.subprocess_flags
+            )
+            
+            if result.returncode == 0:
+                return True, ""
+            else:
+                error_output = result.stderr or result.stdout
+                return False, f"Torch integrity check failed: {error_output.strip()}"
+                
+        except Exception as e:
+            return False, f"Torch integrity check exception: {str(e)}"
+    
+    def _check_torch_already_correct(self, python_executable: str, expected_version: str, require_cuda: bool = True) -> Tuple[bool, str]:
+        """
+        Check if torch is already installed and correct. Skip download if true.
+        
+        Returns:
+            Tuple of (is_correct: bool, error_message: str)
+        """
+        return self._gate_torch_integrity(python_executable, expected_version, require_cuda)
     
     def _terminate_venv_processes(self, venv_path: Path) -> Tuple[bool, list]:
         """
@@ -338,6 +407,223 @@ class SmartInstaller:
             time.sleep(2)  # Wait for processes to terminate
         
         return True, terminated_pids
+    
+    def _gate_python_version(self, python_executable: str) -> Tuple[bool, str, Optional[str]]:
+        """
+        GATE 1: Python version gate
+        - If Python >= 3.13 and stack not validated:
+            → Abort OR auto-create a Python 3.12 venv
+        - Never attempt to install a torch wheel that does not exist for the current Python ABI.
+        
+        Returns:
+            Tuple of (pass: bool, error_message: str, new_python_executable: Optional[str])
+        """
+        try:
+            result = subprocess.run(
+                [python_executable, "-c", "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                **self.subprocess_flags
+            )
+            if result.returncode != 0:
+                return False, f"Could not detect Python version from {python_executable}", None
+            
+            python_version = result.stdout.strip()
+            major, minor = map(int, python_version.split('.'))
+            
+            if major >= 3 and minor >= 13:
+                self.log(f"WARNING: Python {python_version} >= 3.13 detected")
+                self.log("Python 3.13+ may not have compatible PyTorch wheels")
+                
+                # Check if we can create a Python 3.12 venv
+                venv_path = Path(python_executable).parent.parent
+                new_venv_path = venv_path.parent / "venv_py312"
+                
+                # Try to find Python 3.12
+                try:
+                    # Try common locations
+                    py312_candidates = [
+                        "py -3.12",
+                        "python3.12",
+                        "python312",
+                        r"C:\Python312\python.exe",
+                        r"C:\Program Files\Python312\python.exe",
+                    ]
+                    
+                    py312_exe = None
+                    for candidate in py312_candidates:
+                        try:
+                            test_result = subprocess.run(
+                                [candidate, "--version"],
+                                capture_output=True,
+                                text=True,
+                                timeout=5,
+                                **self.subprocess_flags
+                            )
+                            if test_result.returncode == 0 and "3.12" in test_result.stdout:
+                                py312_exe = candidate
+                                break
+                        except:
+                            continue
+                    
+                    if py312_exe:
+                        self.log(f"Found Python 3.12 at: {py312_exe}")
+                        self.log(f"Creating Python 3.12 venv at: {new_venv_path}")
+                        # Create venv
+                        create_result = subprocess.run(
+                            [py312_exe, "-m", "venv", str(new_venv_path)],
+                            capture_output=True,
+                            text=True,
+                            timeout=60,
+                            **self.subprocess_flags
+                        )
+                        if create_result.returncode == 0:
+                            new_python = new_venv_path / "Scripts" / "python.exe" if sys.platform == "win32" else new_venv_path / "bin" / "python"
+                            if new_python.exists():
+                                self.log(f"Python 3.12 venv created successfully")
+                                return True, "", str(new_python)
+                    
+                    # If we can't create 3.12 venv, abort
+                    return False, f"Python {python_version} >= 3.13 detected, but Python 3.12 not found. Cannot proceed.", None
+                    
+                except Exception as e:
+                    return False, f"Failed to create Python 3.12 venv: {str(e)}", None
+            
+            return True, "", None
+            
+        except Exception as e:
+            return False, f"Python version gate failed: {str(e)}", None
+    
+    def _gate_wheel_availability(self, python_executable: str, package_spec: str, index_url: str = "") -> Tuple[bool, str, Optional[str]]:
+        """
+        GATE 2: Wheel availability gate
+        - Before installing torch, query available versions for the index.
+        - If the pinned version is unavailable, do NOT install.
+        - Select a compatible version or abort with a clear message.
+        
+        Returns:
+            Tuple of (pass: bool, error_message: str, available_version: Optional[str])
+        """
+        # Extract package name and version from spec (e.g., "torch==2.5.1+cu118" -> "torch", "2.5.1+cu118")
+        if "==" in package_spec:
+            pkg_name, pkg_version = package_spec.split("==", 1)
+        elif ">=" in package_spec or "<=" in package_spec or ">" in package_spec or "<" in package_spec:
+            # For version ranges, we can't check availability easily, skip gate
+            return True, "", None
+        else:
+            pkg_name = package_spec
+            pkg_version = None
+        
+        # Only check for torch, torchvision, torchaudio (binary wheels)
+        if pkg_name not in ["torch", "torchvision", "torchaudio"]:
+            return True, "", None
+        
+        self.log(f"Checking wheel availability for {package_spec}...")
+        
+        try:
+            # Query available versions using pip install --dry-run (simpler approach)
+            cmd = [python_executable, "-m", "pip", "install", "--dry-run", package_spec]
+            if index_url:
+                cmd.extend(["--index-url", index_url])
+            
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=30,
+                **self.subprocess_flags
+            )
+            
+            if result.returncode != 0:
+                # If dry-run fails, check if it's a "no matching distribution" error
+                error_output = (result.stderr or result.stdout).lower()
+                if "no matching distribution" in error_output or "could not find" in error_output:
+                    return False, f"Wheel for {package_spec} is not available for this Python ABI", None
+                # Other errors might be temporary, allow to proceed
+                self.log(f"WARNING: Could not verify wheel availability (will try install anyway)")
+                return True, "", None  # Allow to proceed, will fail at install if truly unavailable
+            
+            # Dry-run succeeded, wheel is available
+            self.log(f"✓ Wheel available: {package_spec}")
+            return True, "", pkg_version if pkg_version else None
+                    
+        except Exception as e:
+            # CRITICAL: Treat exceptions as fatal, not warnings
+            error_msg = f"Wheel availability check threw exception: {str(e)}"
+            self.log(f"ERROR: {error_msg}")
+            return False, error_msg, None
+    
+    def _gate_numpy_integrity(self, python_executable: str) -> Tuple[bool, str]:
+        """
+        GATE 3: NumPy integrity gate
+        - Before and after any install step:
+            python -c "import numpy"
+        - If this fails:
+            → Delete the venv and recreate it.
+            → Never continue with a broken NumPy.
+        
+        Returns:
+            Tuple of (pass: bool, error_message: str)
+        """
+        try:
+            result = subprocess.run(
+                [python_executable, "-c", "import numpy"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                **self.subprocess_flags
+            )
+            
+            if result.returncode == 0:
+                return True, ""
+            else:
+                error_msg = result.stderr.strip() or result.stdout.strip() or "Unknown error"
+                return False, f"NumPy integrity check failed: {error_msg}"
+                
+        except Exception as e:
+            return False, f"NumPy integrity check exception: {str(e)}"
+    
+    def _recreate_venv(self, venv_path: Path, python_executable: str) -> Tuple[bool, str, Optional[str]]:
+        """
+        Recreate a venv (used when NumPy integrity fails).
+        
+        Returns:
+            Tuple of (success: bool, error_message: str, new_python_executable: Optional[str])
+        """
+        self.log("=" * 60)
+        self.log("RECREATING VENV: NumPy integrity failed")
+        self.log("=" * 60)
+        
+        try:
+            # Delete existing venv
+            if venv_path.exists():
+                self.log(f"Deleting broken venv: {venv_path}")
+                shutil.rmtree(venv_path, ignore_errors=True)
+            
+            # Recreate venv
+            self.log(f"Creating new venv: {venv_path}")
+            result = subprocess.run(
+                [python_executable, "-m", "venv", str(venv_path)],
+                capture_output=True,
+                text=True,
+                timeout=60,
+                **self.subprocess_flags
+            )
+            
+            if result.returncode != 0:
+                return False, f"Failed to recreate venv: {result.stderr}", None
+            
+            # Get new Python executable
+            new_python = venv_path / "Scripts" / "python.exe" if sys.platform == "win32" else venv_path / "bin" / "python"
+            if not new_python.exists():
+                return False, f"New venv created but Python executable not found at {new_python}", None
+            
+            self.log(f"✓ Venv recreated successfully: {new_python}")
+            return True, "", str(new_python)
+            
+        except Exception as e:
+            return False, f"Exception recreating venv: {str(e)}", None
     
     def _check_running_processes_before_binary_install(self, python_executable: str) -> Tuple[bool, str]:
         """
@@ -2184,71 +2470,84 @@ if errorlevel 1 (
     
     def repair_all(self, python_executable: Optional[str] = None) -> bool:
         """
-        Repair a broken environment using hardware/platform-driven architecture.
-        - Detection phase runs BEFORE any install
-        - Install plan derived from hardware/platform
-        - Constraints.txt generated dynamically
-        - Strict layer-based installation (no auto-upgrade)
-        - Import-only verification
+        Deterministic state machine for environment repair.
+        Implements strict gates and layer enforcement.
         """
         self.log("=" * 60)
-        self.log("LLM Fine-tuning Studio - Hardware/Platform-Driven Repair Mode")
+        self.log("LLM Fine-tuning Studio - Deterministic State Machine Repair")
         self.log("=" * 60)
         
-        # 1. Check disk space
-        has_space, free_gb = self._check_disk_space()
-        self.log(f"Available disk space: {free_gb:.2f} GB (minimum required: {self.min_disk_space_gb} GB)")
-        if not has_space:
-            self.log(f"ERROR: Insufficient disk space! Only {free_gb:.2f} GB available, need at least {self.min_disk_space_gb} GB")
-            return False
-
-        # 2. Detection phase: Run BEFORE any install
+        # STATE: INITIALIZATION
         if not python_executable:
             python_executable = sys.executable
         
+        venv_path = Path(python_executable).parent.parent
+        
+        # GATE: Disk space check
+        has_space, free_gb = self._check_disk_space()
+        self.log(f"Available disk space: {free_gb:.2f} GB (minimum required: {self.min_disk_space_gb} GB)")
+        if not has_space:
+            self.log(f"ERROR: Insufficient disk space! Only {free_gb:.2f} GB available")
+            return False
+        
+        # STATE: DETECTION
         install_plan = self._generate_install_plan(python_executable)
         if not install_plan:
-            self.log("ERROR: Failed to generate install plan from hardware/platform detection")
+            self.log("ERROR: Failed to generate install plan")
             return False
         
-        # 3. Generate constraints.txt dynamically from install_plan
+        # GATE: Python version gate
+        py_gate_ok, py_error, new_python = self._gate_python_version(python_executable)
+        if not py_gate_ok:
+            self.log(f"ERROR: Python version gate failed: {py_error}")
+            return False
+        if new_python:
+            python_executable = new_python
+            venv_path = Path(python_executable).parent.parent
+            self.log(f"Using Python 3.12 venv: {python_executable}")
+        
+        # STATE: CONSTRAINTS GENERATION
         constraints_file = self._generate_constraints_file(install_plan)
         
-        # 4. Check running processes BEFORE binary installs
-        safe, error_msg = self._check_running_processes_before_binary_install(python_executable)
-        if not safe:
-            self.log("=" * 60)
-            self.log("ERROR: Cannot proceed with binary wheel installation")
-            self.log(error_msg)
-            self.log("=" * 60)
-            return False
+        # GATE: NumPy integrity (before any install)
+        numpy_ok, numpy_error = self._gate_numpy_integrity(python_executable)
+        if not numpy_ok:
+            self.log(f"WARNING: NumPy integrity check failed before install: {numpy_error}")
+            # Try to recreate venv
+            recreate_ok, recreate_error, new_python = self._recreate_venv(venv_path, python_executable)
+            if not recreate_ok:
+                self.log(f"ERROR: Failed to recreate venv: {recreate_error}")
+                return False
+            python_executable = new_python
+            venv_path = Path(python_executable).parent.parent
+            # Re-check NumPy after recreation
+            numpy_ok, numpy_error = self._gate_numpy_integrity(python_executable)
+            if not numpy_ok:
+                self.log(f"ERROR: NumPy still broken after venv recreation: {numpy_error}")
+                return False
         
-        # 5. Install strictly by layers (never allow pip to auto-upgrade a previous layer)
+        # STATE: LAYER 1 INSTALLATION (numpy, sympy, fsspec)
         self.log("=" * 60)
-        self.log("LAYER-BASED INSTALLATION (strict order, no auto-upgrade)")
-        self.log("=" * 60)
-        
-        # LAYER 1: numpy, sympy, fsspec
-        self.log("=" * 60)
-        self.log("LAYER 1: numpy, sympy, fsspec")
+        self.log("STATE: LAYER 1 - numpy, sympy, fsspec")
         self.log("=" * 60)
         
-        # Install numpy (from install_plan, dynamically determined)
+        # Install numpy
         self.log(f"Installing {install_plan['numpy_spec']}...")
         success, last_lines, exit_code = self._run_pip_worker(
             action="install",
             package=install_plan["numpy_spec"],
             python_executable=python_executable,
-            pip_args=[]  # No --force-reinstall by default
+            pip_args=[]
         )
         if not success:
-            self.log(f"ERROR: numpy installation failed - cannot continue")
+            self.log(f"ERROR: numpy installation failed")
             return False
         
-        # Verify numpy by import (if fails, abort immediately - never continue)
-        if not self._verify_import(python_executable, "numpy"):
-            self.log("ERROR: numpy import verification failed - ABORTING")
-            self.log("Never uninstall/reinstall numpy after torch is installed")
+        # GATE: NumPy integrity after install
+        numpy_ok, numpy_error = self._gate_numpy_integrity(python_executable)
+        if not numpy_ok:
+            self.log(f"ERROR: NumPy integrity check failed after install: {numpy_error}")
+            self.log("RECOMMENDATION: Recreate venv and try again")
             return False
         self.log("✓ numpy installed and verified")
         
@@ -2261,7 +2560,13 @@ if errorlevel 1 (
             pip_args=[]
         )
         if not success:
-            self.log(f"ERROR: sympy installation failed - cannot continue")
+            self.log(f"ERROR: sympy installation failed")
+            return False
+        
+        # GATE: NumPy integrity after sympy install
+        numpy_ok, numpy_error = self._gate_numpy_integrity(python_executable)
+        if not numpy_ok:
+            self.log(f"ERROR: NumPy integrity check failed after sympy install: {numpy_error}")
             return False
         self.log("✓ sympy installed")
         
@@ -2274,50 +2579,116 @@ if errorlevel 1 (
             pip_args=[]
         )
         if not success:
-            self.log(f"ERROR: fsspec installation failed - cannot continue")
+            self.log(f"ERROR: fsspec installation failed")
+            return False
+        
+        # GATE: NumPy integrity after fsspec install
+        numpy_ok, numpy_error = self._gate_numpy_integrity(python_executable)
+        if not numpy_ok:
+            self.log(f"ERROR: NumPy integrity check failed after fsspec install: {numpy_error}")
             return False
         self.log("✓ fsspec installed")
         
-        # LAYER 2: torch stack
+        # STATE: LAYER 2 INSTALLATION (torch stack)
         self.log("=" * 60)
-        self.log("LAYER 2: torch stack")
+        self.log("STATE: LAYER 2 - torch stack")
         self.log("=" * 60)
         
-        # Check running processes before binary install
+        # GATE: Process lock before binary installs
         safe, error_msg = self._check_running_processes_before_binary_install(python_executable)
         if not safe:
-            self.log("ERROR: Cannot install binary wheels while processes are running")
+            self.log("ERROR: Process lock gate failed")
             self.log(error_msg)
             return False
         
-        # Verify torch first (skip if already installed and verified)
-        torch_ok, torch_ver, torch_cuda, torch_error = self._verify_torch(python_executable)
-        torch_needs_install = True
-        if torch_ok and torch_cuda:
-            if torch_ver and ("2.5.1" in torch_ver or torch_ver.startswith("2.5.1")):
-                self.log(f"✓ torch already installed and verified: {torch_ver} (CUDA available)")
-                torch_needs_install = False
+        # CRITICAL: Check if torch is already correct (never re-download if correct)
+        expected_torch_version = install_plan["torch_spec"].split("==")[1]  # Extract version from spec
+        require_cuda = install_plan.get("nvidia_gpu_present", False)
+        
+        torch_already_correct, torch_check_error = self._check_torch_already_correct(
+            python_executable, install_plan["torch_spec"], require_cuda
+        )
+        
+        if torch_already_correct:
+            self.log(f"✓ torch already installed and correct: {expected_torch_version} (SKIPPING download)")
+            torch_needs_install = False
+        else:
+            # Check for CPU torch when CUDA is required (corruption case)
+            if require_cuda:
+                try:
+                    check_cpu_cmd = [python_executable, "-c", "import torch; print(torch.__version__); print('CUDA:', torch.cuda.is_available())"]
+                    cpu_check = subprocess.run(check_cpu_cmd, capture_output=True, text=True, timeout=10, **self.subprocess_flags)
+                    if cpu_check.returncode == 0:
+                        output = cpu_check.stdout
+                        if "CUDA: False" in output or "CUDA:  False" in output:
+                            self.log("ERROR: CPU torch detected but CUDA GPU is available")
+                            self.log("ABORTING: Must uninstall CPU torch and install CUDA torch")
+                            return False
+                except:
+                    pass
+            
+            torch_needs_install = True
         
         if torch_needs_install:
+            # GATE: Wheel availability before installing torch
+            wheel_ok, wheel_error, available_version = self._gate_wheel_availability(
+                python_executable, install_plan["torch_spec"], install_plan["torch_index_url"]
+            )
+            if not wheel_ok:
+                self.log(f"ERROR: Wheel availability gate failed: {wheel_error}")
+                self.log("RECOMMENDATION: Recreate venv with Python 3.12 or compatible version")
+                return False
+            if available_version and available_version != install_plan["torch_spec"].split("==")[-1]:
+                # Update install plan with available version
+                install_plan["torch_spec"] = f"torch=={available_version}"
+                self.log(f"Using available version: {install_plan['torch_spec']}")
+            
             self.log(f"Installing {install_plan['torch_spec']}...")
             venv_path = Path(python_executable).parent.parent
-            self._delete_torch_directory(venv_path)  # Only delete if verification failed
+            self._delete_torch_directory(venv_path)
             
             success, last_lines, exit_code = self._run_pip_worker(
                 action="install",
                 package=install_plan["torch_spec"],
                 python_executable=python_executable,
                 index_url=install_plan["torch_index_url"],
-                pip_args=["--no-deps"]  # Only use --no-deps, not --force-reinstall by default
+                pip_args=["--no-deps", "--no-cache-dir"]
             )
             if not success:
-                self.log(f"ERROR: torch installation failed")
+                # RECOVERY: Binary install failed on Windows
+                if sys.platform == "win32":
+                    self.log("ERROR: Binary wheel installation failed on Windows")
+                    self.log("RECOMMENDATION: Recreate venv and try again")
+                    return False
                 return False
-            self.log("✓ torch installed")
+            
+            # GATE: NumPy integrity after torch install
+            numpy_ok, numpy_error = self._gate_numpy_integrity(python_executable)
+            if not numpy_ok:
+                self.log(f"ERROR: NumPy integrity check failed after torch install: {numpy_error}")
+                self.log("RECOMMENDATION: Recreate venv and try again")
+                return False
+            
+            # CRITICAL GATE: Torch integrity after torch install
+            torch_ok, torch_error = self._gate_torch_integrity(python_executable, install_plan["torch_spec"], require_cuda)
+            if not torch_ok:
+                self.log(f"ERROR: Torch integrity check failed after torch install: {torch_error}")
+                self.log("ABORTING: Installation failed - torch version or CUDA availability incorrect")
+                return False
+            
+            self.log("✓ torch installed and verified")
         
         # Verify torchvision
         torchvision_ok = self._verify_import(python_executable, "torchvision")
         if not torchvision_ok:
+            # GATE: Wheel availability for torchvision
+            wheel_ok, wheel_error, available_version = self._gate_wheel_availability(
+                python_executable, install_plan["torchvision_spec"], install_plan["torch_index_url"]
+            )
+            if not wheel_ok:
+                self.log(f"ERROR: Wheel availability gate failed for torchvision: {wheel_error}")
+                return False
+            
             self.log(f"Installing {install_plan['torchvision_spec']}...")
             success, last_lines, exit_code = self._run_pip_worker(
                 action="install",
@@ -2327,7 +2698,23 @@ if errorlevel 1 (
                 pip_args=["--no-deps"]
             )
             if not success:
-                self.log(f"ERROR: torchvision installation failed")
+                if sys.platform == "win32":
+                    self.log("ERROR: Binary wheel installation failed on Windows")
+                    self.log("RECOMMENDATION: Recreate venv and try again")
+                    return False
+                return False
+            
+            # GATE: NumPy integrity after torchvision install
+            numpy_ok, numpy_error = self._gate_numpy_integrity(python_executable)
+            if not numpy_ok:
+                self.log(f"ERROR: NumPy integrity check failed after torchvision install: {numpy_error}")
+                return False
+            
+            # CRITICAL GATE: Torch integrity after torchvision install
+            torch_ok, torch_error = self._gate_torch_integrity(python_executable, install_plan["torch_spec"], require_cuda)
+            if not torch_ok:
+                self.log(f"ERROR: Torch integrity check failed after torchvision install: {torch_error}")
+                self.log("ABORTING: Installation failed - torch corrupted")
                 return False
             self.log("✓ torchvision installed")
         else:
@@ -2336,6 +2723,14 @@ if errorlevel 1 (
         # Verify torchaudio
         torchaudio_ok = self._verify_import(python_executable, "torchaudio")
         if not torchaudio_ok:
+            # GATE: Wheel availability for torchaudio
+            wheel_ok, wheel_error, available_version = self._gate_wheel_availability(
+                python_executable, install_plan["torchaudio_spec"], install_plan["torch_index_url"]
+            )
+            if not wheel_ok:
+                self.log(f"ERROR: Wheel availability gate failed for torchaudio: {wheel_error}")
+                return False
+            
             self.log(f"Installing {install_plan['torchaudio_spec']}...")
             success, last_lines, exit_code = self._run_pip_worker(
                 action="install",
@@ -2345,15 +2740,31 @@ if errorlevel 1 (
                 pip_args=["--no-deps"]
             )
             if not success:
-                self.log(f"ERROR: torchaudio installation failed")
+                if sys.platform == "win32":
+                    self.log("ERROR: Binary wheel installation failed on Windows")
+                    self.log("RECOMMENDATION: Recreate venv and try again")
+                    return False
+                return False
+            
+            # GATE: NumPy integrity after torchaudio install
+            numpy_ok, numpy_error = self._gate_numpy_integrity(python_executable)
+            if not numpy_ok:
+                self.log(f"ERROR: NumPy integrity check failed after torchaudio install: {numpy_error}")
+                return False
+            
+            # CRITICAL GATE: Torch integrity after torchaudio install
+            torch_ok, torch_error = self._gate_torch_integrity(python_executable, install_plan["torch_spec"], require_cuda)
+            if not torch_ok:
+                self.log(f"ERROR: Torch integrity check failed after torchaudio install: {torch_error}")
+                self.log("ABORTING: Installation failed - torch corrupted")
                 return False
             self.log("✓ torchaudio installed")
         else:
             self.log("✓ torchaudio already installed")
         
-        # LAYER 3: huggingface-hub, tokenizers, transformers, datasets
+        # STATE: LAYER 3 INSTALLATION (huggingface-hub, tokenizers, transformers, datasets)
         self.log("=" * 60)
-        self.log("LAYER 3: huggingface-hub, tokenizers, transformers, datasets")
+        self.log("STATE: LAYER 3 - huggingface-hub, tokenizers, transformers, datasets")
         self.log("=" * 60)
         
         # Hard-fix huggingface-hub first
@@ -2371,6 +2782,25 @@ if errorlevel 1 (
         if not success:
             self.log(f"ERROR: huggingface-hub installation failed")
             return False
+        
+        # GATE: Check for constraint violations in output
+        if "constraint" in last_lines.lower() and "violated" in last_lines.lower():
+            self.log("ERROR: Constraint violation detected in pip output")
+            self.log("This is FATAL - constraints must be enforced")
+            return False
+        
+        # GATE: NumPy integrity after huggingface-hub install
+        numpy_ok, numpy_error = self._gate_numpy_integrity(python_executable)
+        if not numpy_ok:
+            self.log(f"ERROR: NumPy integrity check failed after huggingface-hub install: {numpy_error}")
+            return False
+        
+        # CRITICAL GATE: Torch integrity after huggingface-hub install
+        torch_ok, torch_error = self._gate_torch_integrity(python_executable, install_plan["torch_spec"], require_cuda)
+        if not torch_ok:
+            self.log(f"ERROR: Torch integrity check failed after huggingface-hub install: {torch_error}")
+            self.log("ABORTING: Installation failed - torch corrupted")
+            return False
         self.log("✓ huggingface-hub installed")
         
         # Install tokenizers
@@ -2383,6 +2813,24 @@ if errorlevel 1 (
         )
         if not success:
             self.log(f"ERROR: tokenizers installation failed")
+            return False
+        
+        # GATE: Constraint violations check
+        if "constraint" in last_lines.lower() and "violated" in last_lines.lower():
+            self.log("ERROR: Constraint violation detected")
+            return False
+        
+        # GATE: NumPy integrity
+        numpy_ok, numpy_error = self._gate_numpy_integrity(python_executable)
+        if not numpy_ok:
+            self.log(f"ERROR: NumPy integrity check failed after tokenizers install: {numpy_error}")
+            return False
+        
+        # CRITICAL GATE: Torch integrity
+        torch_ok, torch_error = self._gate_torch_integrity(python_executable, install_plan["torch_spec"], require_cuda)
+        if not torch_ok:
+            self.log(f"ERROR: Torch integrity check failed after tokenizers install: {torch_error}")
+            self.log("ABORTING: Installation failed - torch corrupted")
             return False
         self.log("✓ tokenizers installed")
         
@@ -2397,6 +2845,25 @@ if errorlevel 1 (
         if not success:
             self.log(f"ERROR: transformers installation failed")
             return False
+        
+        # GATE: Constraint violations check
+        if "constraint" in last_lines.lower() and "violated" in last_lines.lower():
+            self.log("ERROR: Constraint violation detected")
+            return False
+        
+        # GATE: NumPy integrity
+        numpy_ok, numpy_error = self._gate_numpy_integrity(python_executable)
+        if not numpy_ok:
+            self.log(f"ERROR: NumPy integrity check failed after transformers install: {numpy_error}")
+            return False
+        
+        # CRITICAL GATE: Torch integrity
+        torch_ok, torch_error = self._gate_torch_integrity(python_executable, install_plan["torch_spec"], require_cuda)
+        if not torch_ok:
+            self.log(f"ERROR: Torch integrity check failed after transformers install: {torch_error}")
+            self.log("ABORTING: Installation failed - torch corrupted")
+            return False
+        
         if not self._verify_import(python_executable, "transformers"):
             self.log(f"ERROR: transformers import verification failed")
             return False
@@ -2413,54 +2880,131 @@ if errorlevel 1 (
         if not success:
             self.log(f"ERROR: datasets installation failed")
             return False
+        
+        # GATE: Constraint violations check
+        if "constraint" in last_lines.lower() and "violated" in last_lines.lower():
+            self.log("ERROR: Constraint violation detected")
+            return False
+        
+        # GATE: NumPy integrity
+        numpy_ok, numpy_error = self._gate_numpy_integrity(python_executable)
+        if not numpy_ok:
+            self.log(f"ERROR: NumPy integrity check failed after datasets install: {numpy_error}")
+            return False
+        
+        # CRITICAL GATE: Torch integrity
+        torch_ok, torch_error = self._gate_torch_integrity(python_executable, install_plan["torch_spec"], require_cuda)
+        if not torch_ok:
+            self.log(f"ERROR: Torch integrity check failed after datasets install: {torch_error}")
+            self.log("ABORTING: Installation failed - torch corrupted")
+            return False
+        
         if not self._verify_import(python_executable, "datasets"):
             self.log(f"ERROR: datasets import verification failed")
             return False
         self.log("✓ datasets installed and verified")
         
-        # LAYER 4: trl, xformers, torchao, unsloth-zoo, unsloth
+        # STATE: LAYER 4 INSTALLATION (trl, xformers, torchao, unsloth-zoo, unsloth)
         self.log("=" * 60)
-        self.log("LAYER 4: trl, xformers, torchao, unsloth-zoo, unsloth")
+        self.log("STATE: LAYER 4 - trl, xformers, torchao, unsloth-zoo, unsloth")
         self.log("=" * 60)
         
-        layer4_packages = ["trl>=0.18.2,<0.25.0", "xformers", "torchao", "peft", "unsloth-zoo", "unsloth"]
-        for pkg in layer4_packages:
-            self.log(f"Installing {pkg}...")
+        layer4_packages = [
+            ("trl", ">=0.18.2,<0.25.0"),
+            ("xformers", ""),
+            ("torchao", ""),
+            ("peft", ""),
+            ("unsloth-zoo", ""),
+            ("unsloth", "")
+        ]
+        
+        for pkg_name, pkg_version in layer4_packages:
+            pkg_spec = f"{pkg_name}{pkg_version}" if pkg_version else pkg_name
+            self.log(f"Installing {pkg_spec}...")
+            
+            # CRITICAL: xformers must use --no-deps to prevent torch upgrade
+            pip_args = []
+            if pkg_name == "xformers":
+                pip_args = ["--no-deps"]
+                self.log("Using --no-deps for xformers to prevent torch upgrade")
+            
             success, last_lines, exit_code = self._run_pip_worker(
                 action="install",
-                package=pkg,
+                package=pkg_spec,
                 python_executable=python_executable,
-                pip_args=[]
+                pip_args=pip_args
             )
             if not success:
-                self.log(f"WARNING: {pkg} installation had issues (continuing)")
+                # For xformers, if it fails with --no-deps, skip it (it's optional)
+                if pkg_name == "xformers":
+                    self.log(f"WARNING: xformers installation failed with --no-deps (skipping to prevent torch upgrade)")
+                    continue
+                # For other packages, check if constraint violation caused failure
+                if "constraint" in last_lines.lower() or "would break" in last_lines.lower():
+                    self.log(f"WARNING: {pkg_spec} installation failed due to constraints (skipping)")
+                    continue
+                self.log(f"WARNING: {pkg_spec} installation had issues (continuing)")
             else:
-                self.log(f"✓ {pkg} installed")
+                # GATE: Constraint violations check (fatal)
+                if "constraint" in last_lines.lower() and "violated" in last_lines.lower():
+                    self.log(f"ERROR: Constraint violation detected for {pkg_spec}")
+                    self.log("This is FATAL - constraints must be enforced")
+                    return False
+                
+                # GATE: NumPy integrity (fatal)
+                numpy_ok, numpy_error = self._gate_numpy_integrity(python_executable)
+                if not numpy_ok:
+                    self.log(f"ERROR: NumPy integrity check failed after {pkg_spec} install: {numpy_error}")
+                    return False
+                
+                # CRITICAL GATE: Torch integrity after every Layer 4 install
+                torch_ok, torch_error = self._gate_torch_integrity(python_executable, install_plan["torch_spec"], require_cuda)
+                if not torch_ok:
+                    self.log(f"ERROR: Torch integrity check failed after {pkg_spec} install: {torch_error}")
+                    self.log("ABORTING: Installation failed - torch corrupted")
+                    return False
+                
+                self.log(f"✓ {pkg_spec} installed")
         
-        # Final verification: import test for core packages (GUI status rule)
+        # FINAL VERIFICATION
         self.log("=" * 60)
-        self.log("Final verification: Import test for core packages...")
-        self.log("Component is OK if import succeeds (ignore pip resolver warnings)")
-        core_imports = ["numpy", "transformers", "huggingface_hub", "datasets"]
-        all_ok = True
-        for pkg in core_imports:
-            if self._verify_import(python_executable, pkg):
-                self.log(f"  ✓ {pkg} import OK")
-            else:
-                self.log(f"  ✗ {pkg} import FAILED")
-                all_ok = False
+        self.log("FINAL VERIFICATION")
+        self.log("=" * 60)
         
-        if not all_ok:
+        if require_cuda:
+            final_verify_script = f"""
+import torch, transformers, datasets, huggingface_hub
+assert torch.__version__ == '{expected_torch_version}'
+assert torch.cuda.is_available()
+print('INSTALL OK')
+"""
+        else:
+            final_verify_script = f"""
+import torch, transformers, datasets, huggingface_hub
+assert torch.__version__ == '{expected_torch_version}'
+print('INSTALL OK')
+"""
+        
+        final_cmd = [python_executable, "-c", final_verify_script]
+        final_result = subprocess.run(
+            final_cmd,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            **self.subprocess_flags
+        )
+        
+        if final_result.returncode == 0 and "INSTALL OK" in final_result.stdout:
             self.log("=" * 60)
-            self.log("REPAIR FAILED - Import verification failed")
+            self.log("REPAIR COMPLETE - All components installed and verified")
+            self.log("=" * 60)
+            return True
+        else:
+            self.log("=" * 60)
+            self.log("REPAIR FAILED - Final verification failed")
+            self.log(f"Error: {final_result.stderr or final_result.stdout}")
             self.log("=" * 60)
             return False
-        
-        # Final summary
-        self.log("=" * 60)
-        self.log("REPAIR COMPLETE - All components installed and verified")
-        self.log("=" * 60)
-        return True
 
 
 if __name__ == "__main__":

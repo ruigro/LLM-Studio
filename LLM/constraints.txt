@@ -1,9 +1,10 @@
 # Global constraints for LLM Fine-tuning Studio
-# These constraints are applied to ALL pip install commands to prevent dependency conflicts
+# Generated dynamically from hardware/platform detection
 
-# PyTorch 2.5.1 requires sympy==1.13.1
+# NumPy constraint based on Python 3.10
+numpy<2
+
+# Always pinned packages
 sympy==1.13.1
-
-# transformers 4.51.3 and tokenizers require huggingface-hub<1.0
+fsspec<=2025.9.0
 huggingface-hub<1.0
-
