@@ -1371,15 +1371,71 @@ print(device_name)
             
             process = subprocess.Popen(cmd, **popen_flags)
             
-            # Stream output line by line
+            # Stream output line by line with timeout protection
+            # Use threading to read stdout so we can show progress during long downloads
             output_lines = []
+            import time
+            import threading
+            import queue as queue_module
             
-            # Read from stdout (stderr is redirected to stdout)
-            for line in process.stdout:
-                line = line.rstrip()
-                if line:
+            output_queue = queue_module.Queue()
+            read_done = threading.Event()
+            
+            def read_stdout():
+                """Read stdout in separate thread to prevent blocking"""
+                try:
+                    for line in process.stdout:
+                        line = line.rstrip()
+                        if line:
+                            output_queue.put(line)
+                except Exception:
+                    pass
+                finally:
+                    read_done.set()
+            
+            reader_thread = threading.Thread(target=read_stdout, daemon=True)
+            reader_thread.start()
+            
+            start_time = time.time()
+            last_output_time = start_time
+            max_silence = 30  # Show progress every 30 seconds
+            max_wait = 3600  # 1 hour max total
+            
+            # Process output with timeout checks
+            while True:
+                current_time = time.time()
+                
+                # Check overall timeout
+                if current_time - start_time > max_wait:
+                    process.kill()
+                    self.log(f"ERROR: Pip operation timed out after {max_wait} seconds")
+                    return False, "Operation timed out", 1
+                
+                # Try to get output (non-blocking)
+                try:
+                    line = output_queue.get(timeout=1.0)
                     output_lines.append(line)
                     self.log(line)
+                    last_output_time = current_time
+                except queue_module.Empty:
+                    # No output for 1 second
+                    if process.poll() is not None:
+                        # Process finished - drain remaining queue
+                        read_done.wait(timeout=2.0)
+                        while True:
+                            try:
+                                line = output_queue.get_nowait()
+                                output_lines.append(line)
+                                self.log(line)
+                            except queue_module.Empty:
+                                break
+                        break
+                    else:
+                        # Still running - check if we should show progress
+                        if current_time - last_output_time > max_silence:
+                            elapsed = int(current_time - start_time)
+                            self.log(f"[INFO] Still working... (running for {elapsed}s)")
+                            last_output_time = current_time
             
             # Wait for process to complete
             exit_code = process.wait()

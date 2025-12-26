@@ -1,11 +1,4 @@
-# CRITICAL: PyTorch stack pins (NEVER reinstall or upgrade)
-torch==2.5.1+cu124
-torchvision==0.20.1+cu124
-torchaudio==2.5.1+cu124
-
-# Required pins
+# Initial constraints (before torch selection)
+numpy<2
 sympy==1.13.1
 huggingface-hub>=0.30.0,<1.0
-
-# NumPy constraint based on Python 3.10
-numpy<2
