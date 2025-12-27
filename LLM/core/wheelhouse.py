@@ -53,13 +53,15 @@ class WheelhouseManager:
         """Log message to console"""
         print(f"[WHEELHOUSE] {message}")
     
-    def prepare_wheelhouse(self, cuda_config: str, python_version: Tuple[int, int]) -> Tuple[bool, str]:
+    def prepare_wheelhouse(self, cuda_config: str, python_version: Tuple[int, int], package_versions: dict = None) -> Tuple[bool, str]:
         """
         Download all wheels to wheelhouse with exact versions.
         
         Args:
             cuda_config: CUDA configuration key (e.g., "cu124")
             python_version: Python version tuple (e.g., (3, 12))
+            package_versions: Optional dict of {package_name: exact_version} from ProfileSelector.
+                            If provided, uses these instead of manifest.
         
         Returns:
             Tuple of (success: bool, error_message: str)
@@ -69,6 +71,13 @@ class WheelhouseManager:
             
             # Clear existing wheelhouse
             self._clear_wheelhouse()
+            
+            # If package_versions provided, use hardware-adaptive installation
+            if package_versions:
+                return self._prepare_from_profile(cuda_config, python_version, package_versions)
+            
+            # Otherwise, use legacy manifest-based installation
+            return self._prepare_from_manifest(cuda_config, python_version)
             
             # Get CUDA-specific packages
             if cuda_config not in self.manifest["cuda_configs"]:
@@ -144,6 +153,170 @@ class WheelhouseManager:
         except Exception as e:
             return False, f"Wheelhouse preparation exception: {str(e)}"
     
+    def _prepare_from_profile(self, cuda_config: str, python_version: Tuple[int, int], package_versions: dict) -> Tuple[bool, str]:
+        """
+        Prepare wheelhouse from ProfileSelector package versions (hardware-adaptive).
+        
+        Args:
+            cuda_config: CUDA config for torch index URL
+            python_version: Python version tuple
+            package_versions: Dict of {package_name: exact_version}
+        
+        Returns:
+            Tuple of (success, error_message)
+        """
+        try:
+            # Get torch index URL
+            torch_index = None
+            if cuda_config in self.manifest.get("cuda_configs", {}):
+                torch_index = self.manifest["cuda_configs"][cuda_config]["torch_index"]
+            
+            # Phase 1: Download torch stack from CUDA index
+            self.log("Phase 1: Downloading torch stack from CUDA index")
+            torch_packages = ["torch", "torchvision", "torchaudio"]
+            
+            for pkg_name in torch_packages:
+                if pkg_name in package_versions:
+                    pkg_version = package_versions[pkg_name]
+                    self.log(f"  Downloading {pkg_name}=={pkg_version}")
+                    success, error = self._download_wheel(
+                        package=f"{pkg_name}=={pkg_version}",
+                        index_url=torch_index,
+                        no_deps=True,  # Critical: no deps for torch
+                        python_version=python_version
+                    )
+                    if not success:
+                        return False, f"Failed to download {pkg_name}: {error}"
+            
+            # Phase 2: Download all other packages
+            self.log("Phase 2: Downloading all other packages")
+            
+            # Sort packages by priority (critical packages first)
+            critical_order = [
+                "typing-extensions", "numpy", "safetensors", "tokenizers",
+                "huggingface-hub", "transformers", "peft", "bitsandbytes",
+                "accelerate", "datasets"
+            ]
+            
+            remaining = [pkg for pkg in package_versions if pkg not in torch_packages]
+            ordered_packages = []
+            
+            # Add critical packages in order
+            for critical in critical_order:
+                if critical in remaining:
+                    ordered_packages.append(critical)
+            
+            # Add remaining packages
+            for pkg in remaining:
+                if pkg not in ordered_packages:
+                    ordered_packages.append(pkg)
+            
+            for pkg_name in ordered_packages:
+                pkg_version = package_versions[pkg_name]
+                self.log(f"  Downloading {pkg_name}=={pkg_version}")
+                
+                success, error = self._download_wheel(
+                    package=f"{pkg_name}=={pkg_version}",
+                    index_url=None,  # Use PyPI
+                    no_deps=False,  # Allow deps for non-torch packages
+                    python_version=python_version
+                )
+                if not success:
+                    # Check if it's critical
+                    if pkg_name in critical_order:
+                        return False, f"Failed to download critical package {pkg_name}: {error}"
+                    else:
+                        self.log(f"  WARNING: Failed to download optional package {pkg_name}: {error}")
+            
+            # Phase 3: Verify no blacklisted packages
+            self.log("Phase 3: Verifying no blacklisted packages")
+            success, error = self._verify_no_blacklist()
+            if not success:
+                return False, error
+            
+            # Phase 4: Count wheels
+            wheel_count = len(list(self.wheelhouse.glob("*.whl")))
+            self.log(f"Phase 4: Verification complete ({wheel_count} wheels)")
+            self.log("✓ Wheelhouse preparation complete")
+            
+            return True, ""
+            
+        except Exception as e:
+            return False, f"Profile-based preparation failed: {str(e)}"
+    
+    def _prepare_from_manifest(self, cuda_config: str, python_version: Tuple[int, int]) -> Tuple[bool, str]:
+        """
+        Legacy manifest-based preparation (for backwards compatibility).
+        """
+        try:
+            # Get CUDA-specific packages
+            if cuda_config not in self.manifest["cuda_configs"]:
+                return False, f"Unknown CUDA config: {cuda_config}"
+            
+            cuda_packages = self.manifest["cuda_configs"][cuda_config]["packages"]
+            torch_index = self.manifest["cuda_configs"][cuda_config]["torch_index"]
+            
+            # Phase 1: Download torch stack from CUDA index
+            self.log("Phase 1: Downloading torch stack from CUDA index")
+            for pkg_name, pkg_version in cuda_packages.items():
+                self.log(f"  Downloading {pkg_name}=={pkg_version}")
+                success, error = self._download_wheel(
+                    package=f"{pkg_name}=={pkg_version}",
+                    index_url=torch_index,
+                    no_deps=True,
+                    python_version=python_version
+                )
+                if not success:
+                    return False, f"Failed to download {pkg_name}: {error}"
+            
+            # Phase 2: Download core dependencies
+            self.log("Phase 2: Downloading core dependencies")
+            deps = sorted(self.manifest["core_dependencies"], key=lambda x: x["order"])
+            
+            for dep in deps:
+                pkg_name = dep["name"]
+                
+                if dep["version"] == "FROM_CUDA_CONFIG":
+                    continue
+                
+                if "platform" in dep and dep["platform"] != sys.platform:
+                    self.log(f"  Skipping {pkg_name} (platform mismatch)")
+                    continue
+                
+                version_spec = dep["version"]
+                no_deps = "--no-deps" in dep.get("install_args", [])
+                
+                self.log(f"  Downloading {pkg_name}{version_spec}")
+                success, error = self._download_wheel(
+                    package=f"{pkg_name}{version_spec}",
+                    index_url=None,
+                    no_deps=no_deps,
+                    python_version=python_version
+                )
+                if not success:
+                    if dep.get("critical", False):
+                        return False, f"Failed to download critical package {pkg_name}: {error}"
+                    else:
+                        self.log(f"  WARNING: Failed to download optional package {pkg_name}: {error}")
+            
+            # Phase 3: Verify no blacklisted packages
+            self.log("Phase 3: Verifying no blacklisted packages")
+            success, error = self._verify_no_blacklist()
+            if not success:
+                return False, error
+            
+            # Phase 4: Verify all critical packages present
+            self.log("Phase 4: Verifying all wheels present")
+            success, error = self._verify_wheels_present(deps, cuda_packages)
+            if not success:
+                return False, error
+            
+            self.log("✓ Wheelhouse preparation complete")
+            return True, ""
+            
+        except Exception as e:
+            return False, f"Manifest-based preparation failed: {str(e)}"
+    
     def _clear_wheelhouse(self):
         """Clear existing wheelhouse"""
         if self.wheelhouse.exists():
@@ -186,7 +359,10 @@ class WheelhouseManager:
         # Add python version constraint if specified
         if python_version:
             py_ver = f"{python_version[0]}.{python_version[1]}"
-            cmd.extend(["--python-version", py_ver])
+            cmd.extend([
+                "--python-version", py_ver,
+                "--only-binary=:all:"  # Required when using --python-version
+            ])
         
         cmd.append(package)
         

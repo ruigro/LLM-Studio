@@ -28,20 +28,26 @@ REM Check if bootstrap venv exists
 if not exist "%BOOTSTRAP_PYTHON%" (
     echo Creating bootstrap venv...
     
-    REM Find system Python
+    REM Find system Python (prefer 3.10-3.12)
     set "SYSTEM_PYTHON="
-    for %%P in (py -3.10 py -3 python3.10 python3 python) do (
+    for %%P in (py -3.12 py -3.11 py -3.10 python3.12 python3.11 python3.10 python3 python py -3) do (
         %%P --version >nul 2>&1
         if !ERRORLEVEL! EQU 0 (
-            for /f "delims=" %%E in ('%%P -c "import sys; print(sys.executable)" 2^>nul') do set "SYSTEM_PYTHON=%%E"
-            if defined SYSTEM_PYTHON goto :found_python
+            REM Check if version is in supported range (3.10-3.12)
+            for /f "delims=" %%V in ('%%P -c "import sys; v=sys.version_info; print(v.major*100+v.minor)" 2^>nul') do (
+                if %%V GEQ 310 if %%V LEQ 312 (
+                    for /f "delims=" %%E in ('%%P -c "import sys; print(sys.executable)" 2^>nul') do set "SYSTEM_PYTHON=%%E"
+                    if defined SYSTEM_PYTHON goto :found_python
+                )
+            )
         )
     )
     
     :found_python
     if not defined SYSTEM_PYTHON (
-        echo ERROR: Cannot find system Python!
-        echo Please install Python 3.10+ and try again.
+        echo ERROR: Cannot find compatible Python!
+        echo This installer requires Python 3.10, 3.11, or 3.12.
+        echo Please install a supported Python version from https://www.python.org/downloads/
         pause
         exit /b 1
     )

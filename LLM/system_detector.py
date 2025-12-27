@@ -310,9 +310,33 @@ class SystemDetector:
                         capture_output=True, text=True, timeout=10, **self.subprocess_flags
                     )
                     if cuda_version_cmd.returncode == 0 and cuda_version_cmd.stdout.strip():
-                        result["version"] = cuda_version_cmd.stdout.strip().split('\n')[0].strip()
+                        cuda_ver_raw = cuda_version_cmd.stdout.strip().split('\n')[0].strip()
+                        # Filter out "Not Supported" or similar messages
+                        if cuda_ver_raw and not cuda_ver_raw.lower().startswith("not"):
+                            result["version"] = cuda_ver_raw
                 except Exception as e:
                     result.setdefault("warnings", []).append(f"Could not get CUDA version from nvidia-smi: {str(e)[:100]}")
+                
+                # Get compute capability for each GPU
+                try:
+                    compute_cmd = subprocess.run(
+                        ["nvidia-smi", "--query-gpu=compute_cap", "--format=csv,noheader"],
+                        capture_output=True, text=True, timeout=10, **self.subprocess_flags
+                    )
+                    if compute_cmd.returncode == 0 and compute_cmd.stdout.strip():
+                        compute_caps = compute_cmd.stdout.strip().split('\n')
+                        for idx, cap in enumerate(compute_caps):
+                            if idx < len(result["gpus"]):
+                                result["gpus"][idx]["compute_capability"] = cap.strip()
+                except Exception as e:
+                    result.setdefault("warnings", []).append(f"Could not get compute capability: {str(e)[:100]}")
+                
+                # If CUDA version not detected but we have driver, that's still useful
+                if not result.get("version") and result.get("driver_version"):
+                    result.setdefault("warnings", []).append(
+                        f"CUDA version detection failed, but driver {result['driver_version']} detected. "
+                        "Installer will infer CUDA version from driver."
+                    )
                 
                 return True
             else:
@@ -771,6 +795,63 @@ class SystemDetector:
             recommendations["pytorch_build"] = "cpu"
         
         return recommendations
+
+
+    def get_hardware_profile(self) -> Dict:
+        """
+        Get complete hardware profile for package selection.
+        Returns all relevant hardware info in a structured format.
+        """
+        results = self.detect_all()
+        
+        cuda_info = results.get("cuda", {})
+        hardware_info = results.get("hardware", {})
+        python_info = results.get("python", {})
+        
+        # Determine best GPU (highest compute capability, then VRAM)
+        best_gpu = None
+        if cuda_info.get("gpus"):
+            gpus_with_compute = [g for g in cuda_info["gpus"] if g.get("compute_capability")]
+            if gpus_with_compute:
+                # Sort by compute capability (as float), then by VRAM
+                best_gpu = max(gpus_with_compute, key=lambda g: (
+                    float(g.get("compute_capability", "0")),
+                    self._parse_vram(g.get("memory", "0"))
+                ))
+            else:
+                best_gpu = cuda_info["gpus"][0]  # Fallback to first GPU
+        
+        profile = {
+            "cuda_version": cuda_info.get("version"),
+            "cuda_driver_version": cuda_info.get("driver_version"),
+            "compute_capability": best_gpu.get("compute_capability") if best_gpu else None,
+            "gpu_model": best_gpu.get("name") if best_gpu else None,
+            "vram_gb": self._parse_vram(best_gpu.get("memory")) if best_gpu else 0,
+            "gpu_count": len(cuda_info.get("gpus", [])),
+            "all_gpus": cuda_info.get("gpus", []),
+            "cpu_arch": hardware_info.get("cpu", {}).get("architecture", "unknown"),
+            "cpu_cores": hardware_info.get("cpu", {}).get("cores", 0),
+            "ram_gb": hardware_info.get("ram", {}).get("total_gb", 0),
+            "os": sys.platform,
+            "python_version": python_info.get("version", "unknown")
+        }
+        
+        return profile
+    
+    def _parse_vram(self, memory_str: str) -> float:
+        """Parse VRAM string like '24576 MiB' to GB float"""
+        try:
+            if not memory_str:
+                return 0.0
+            # Extract number
+            import re
+            match = re.search(r'(\d+)', str(memory_str))
+            if match:
+                mem_mb = int(match.group(1))
+                return round(mem_mb / 1024.0, 1)  # Convert MiB to GB
+        except:
+            pass
+        return 0.0
 
 
 def detect_all() -> Dict:

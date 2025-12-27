@@ -6,6 +6,7 @@ Immutable installer for LLM Fine-tuning Studio
 
 import sys
 import os
+import json
 from pathlib import Path
 from typing import Tuple
 
@@ -26,13 +27,22 @@ class InstallerV2:
     def __init__(self):
         """Initialize installer coordinator"""
         self.root = Path(__file__).parent
-        self.manifest = self.root / "metadata" / "dependencies.json"
+        self.manifest_path = self.root / "metadata" / "dependencies.json"
+        self.compat_matrix_path = self.root / "metadata" / "compatibility_matrix.json"
         self.wheelhouse = self.root / "wheelhouse"
         self.venv = self.root / ".venv"
         
-        # Verify manifest exists
-        if not self.manifest.exists():
-            raise FileNotFoundError(f"Manifest not found: {self.manifest}")
+        # Verify manifest exists and load it
+        if not self.manifest_path.exists():
+            raise FileNotFoundError(f"Manifest not found: {self.manifest_path}")
+        
+        with open(self.manifest_path) as f:
+            self.manifest = json.load(f)
+        
+        # Check if compatibility matrix exists (for hardware-adaptive mode)
+        self.use_adaptive = self.compat_matrix_path.exists()
+        if not self.use_adaptive:
+            self.log("⚠ Compatibility matrix not found. Using legacy fixed-version mode.")
     
     def log(self, message: str):
         """Log message to console"""
@@ -63,8 +73,53 @@ class InstallerV2:
             # Display detection results
             self._display_detection_results(results)
             
-            # Determine CUDA config
-            cuda_config = self._determine_cuda_config(results)
+            # Validate Python version BEFORE determining CUDA config
+            python_version = (sys.version_info.major, sys.version_info.minor)
+            min_py = tuple(map(int, self.manifest["python_min"].split('.')))
+            max_py = tuple(map(int, self.manifest["python_max"].split('.')))
+            
+            if python_version < min_py or python_version > max_py:
+                raise ValueError(
+                    f"\n✗ Python {python_version[0]}.{python_version[1]} is not supported.\n"
+                    f"  Required: Python {self.manifest['python_min']} - {self.manifest['python_max']}\n"
+                    f"  Current: Python {sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}\n\n"
+                    f"  Please use a supported Python version.\n"
+                    f"  You can install Python 3.10, 3.11, or 3.12 from:\n"
+                    f"  https://www.python.org/downloads/"
+                )
+            
+            # Hardware-adaptive mode: Use ProfileSelector
+            if self.use_adaptive:
+                self.log("\n🎯 Using hardware-adaptive installation")
+                
+                from core.profile_selector import ProfileSelector
+                
+                # Get hardware profile
+                hw_profile = detector.get_hardware_profile()
+                
+                # Select optimal profile
+                selector = ProfileSelector(self.compat_matrix_path)
+                try:
+                    profile_name, package_versions, warnings = selector.select_profile(hw_profile)
+                    
+                    self.log(f"\n✓ Selected profile: {profile_name}")
+                    self.log(f"  {selector.get_profile_description(profile_name)}")
+                    
+                    for warning in warnings:
+                        self.log(f"  ⚠ {warning}")
+                    
+                    # Determine CUDA config from selected profile
+                    cuda_config = self._extract_cuda_config(package_versions.get("torch", ""))
+                    
+                except Exception as e:
+                    raise ValueError(f"Profile selection failed: {str(e)}")
+            
+            # Legacy mode: Use fixed versions from manifest
+            else:
+                self.log("\n⚠ Using legacy fixed-version installation")
+                cuda_config = self._determine_cuda_config(results)
+                package_versions = None  # Will use manifest
+            
             self.log(f"\n✓ Target configuration: {cuda_config}")
             
             # PHASE 1: Prepare wheelhouse (unless skipped)
@@ -72,10 +127,14 @@ class InstallerV2:
                 self.log("\nPHASE 1: Wheelhouse Preparation")
                 self.log("-" * 60)
                 
-                wheelhouse_mgr = WheelhouseManager(self.manifest, self.wheelhouse)
+                wheelhouse_mgr = WheelhouseManager(self.manifest_path, self.wheelhouse)
                 
                 python_version = (sys.version_info.major, sys.version_info.minor)
-                success, error = wheelhouse_mgr.prepare_wheelhouse(cuda_config, python_version)
+                success, error = wheelhouse_mgr.prepare_wheelhouse(
+                    cuda_config, 
+                    python_version,
+                    package_versions  # Pass hardware-specific versions or None
+                )
                 
                 if not success:
                     self.log(f"\n✗ Wheelhouse preparation failed:")
@@ -102,7 +161,7 @@ class InstallerV2:
             self.log("\nPHASE 2-6: Environment Installation")
             self.log("-" * 60)
             
-            installer = ImmutableInstaller(self.venv, self.wheelhouse, self.manifest)
+            installer = ImmutableInstaller(self.venv, self.wheelhouse, self.manifest_path)
             success, error = installer.install(cuda_config)
             
             if not success:
@@ -181,6 +240,44 @@ class InstallerV2:
             )
         
         cuda_version = cuda_info.get("version", "")
+        driver_version = cuda_info.get("driver_version", "")
+        
+        # Handle missing CUDA version - try to infer from driver
+        if not cuda_version or cuda_version == "None":
+            if driver_version:
+                try:
+                    driver_major = int(driver_version.split('.')[0])
+                    # Map driver version to CUDA version
+                    # Driver 560+ supports CUDA 12.6+
+                    # Driver 550+ supports CUDA 12.4+
+                    # Driver 520+ supports CUDA 12.1+
+                    if driver_major >= 550:
+                        cuda_version = "12.4"
+                        self.log(f"  Inferred CUDA 12.4+ from driver {driver_version}")
+                    elif driver_major >= 520:
+                        cuda_version = "12.1"
+                        self.log(f"  Inferred CUDA 12.1+ from driver {driver_version}")
+                    elif driver_major >= 470:
+                        cuda_version = "11.8"
+                        self.log(f"  Inferred CUDA 11.8+ from driver {driver_version}")
+                    else:
+                        raise ValueError(
+                            f"Driver version {driver_version} is too old.\n"
+                            f"Please update NVIDIA drivers to version 520+ for CUDA 12 support."
+                        )
+                except ValueError as e:
+                    raise e
+                except Exception:
+                    pass
+            
+            if not cuda_version or cuda_version == "None":
+                raise ValueError(
+                    "Could not detect CUDA version. This application requires CUDA.\n"
+                    "Please ensure:\n"
+                    "  1. NVIDIA GPU is installed\n"
+                    "  2. NVIDIA drivers are up to date (version 520+ recommended)\n"
+                    "  3. Run 'nvidia-smi' in terminal to verify driver installation"
+                )
         
         # Map CUDA version to config
         if cuda_version.startswith("12.6") or cuda_version.startswith("12.5") or cuda_version.startswith("12.4"):
@@ -208,6 +305,15 @@ class InstallerV2:
                 f"Supported versions: 11.8, 12.1-12.3, 12.4-12.6\n"
                 f"Please update your NVIDIA drivers"
             )
+    
+    def _extract_cuda_config(self, torch_version: str) -> str:
+        """Extract CUDA config from torch version string like '2.5.1+cu124' → 'cu124'"""
+        if "+cu" in torch_version:
+            parts = torch_version.split("+cu")
+            if len(parts) > 1:
+                return "cu" + parts[1][:3]  # Extract '124' from 'cu124' or just 'cu124'
+        # Default fallback based on most common
+        return "cu121"
     
     def verify_installation(self) -> bool:
         """

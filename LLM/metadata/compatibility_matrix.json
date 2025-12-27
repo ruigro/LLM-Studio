@@ -1,0 +1,194 @@
+{
+  "format_version": "1.0",
+  "description": "Hardware-specific package version profiles. Each profile is a tested, working combination.",
+  
+  "profiles": {
+    "cuda124_sm89": {
+      "description": "CUDA 12.4+, RTX 4090/4080 (Ada Lovelace, compute 8.9)",
+      "hardware": {
+        "cuda_min": "12.4",
+        "compute_capability_min": 8.9,
+        "gpu_examples": ["RTX 4090", "RTX 4080", "RTX 4070 Ti"]
+      },
+      "packages": {
+        "typing-extensions": "4.12.2",
+        "numpy": "1.26.4",
+        "torch": "2.5.1+cu124",
+        "torchvision": "0.20.1+cu124",
+        "torchaudio": "2.5.1+cu124",
+        "transformers": "4.51.3",
+        "tokenizers": "0.21.0",
+        "safetensors": "0.7.0",
+        "huggingface-hub": "0.27.1",
+        "peft": "0.13.2",
+        "accelerate": "1.2.1",
+        "bitsandbytes": "0.44.1",
+        "datasets": "3.2.0",
+        "triton-windows": "3.1.0",
+        "PySide6": "6.8.1",
+        "PySide6-Essentials": "6.8.1",
+        "PySide6-Addons": "6.8.1"
+      }
+    },
+    
+    "cuda121_sm86": {
+      "description": "CUDA 12.1-12.3, RTX 3060/3070/3080/3090 (Ampere, compute 8.6)",
+      "hardware": {
+        "cuda_min": "12.1",
+        "cuda_max": "12.3",
+        "compute_capability_min": 8.6,
+        "gpu_examples": ["RTX 3090", "RTX 3080", "RTX 3070", "RTX 3060", "A6000"]
+      },
+      "packages": {
+        "typing-extensions": "4.12.2",
+        "numpy": "1.26.4",
+        "torch": "2.5.1+cu121",
+        "torchvision": "0.20.1+cu121",
+        "torchaudio": "2.5.1+cu121",
+        "transformers": "4.51.3",
+        "tokenizers": "0.21.0",
+        "safetensors": "0.7.0",
+        "huggingface-hub": "0.27.1",
+        "peft": "0.13.2",
+        "accelerate": "1.2.1",
+        "bitsandbytes": "0.44.1",
+        "datasets": "3.2.0",
+        "PySide6": "6.8.1",
+        "PySide6-Essentials": "6.8.1",
+        "PySide6-Addons": "6.8.1"
+      }
+    },
+    
+    "cuda121_sm80": {
+      "description": "CUDA 12.1-12.3, A100/A30/A2000 (Ampere workstation, compute 8.0)",
+      "hardware": {
+        "cuda_min": "12.1",
+        "cuda_max": "12.3",
+        "compute_capability_min": 8.0,
+        "compute_capability_max": 8.5,
+        "gpu_examples": ["A100", "A30", "A10", "RTX A6000", "RTX A5000", "RTX A2000"]
+      },
+      "packages": {
+        "typing-extensions": "4.12.2",
+        "numpy": "1.26.4",
+        "torch": "2.5.1+cu121",
+        "torchvision": "0.20.1+cu121",
+        "torchaudio": "2.5.1+cu121",
+        "transformers": "4.51.3",
+        "tokenizers": "0.21.0",
+        "safetensors": "0.7.0",
+        "huggingface-hub": "0.27.1",
+        "peft": "0.13.2",
+        "accelerate": "1.2.1",
+        "bitsandbytes": "0.44.1",
+        "datasets": "3.2.0",
+        "PySide6": "6.8.1",
+        "PySide6-Essentials": "6.8.1",
+        "PySide6-Addons": "6.8.1"
+      }
+    },
+    
+    "cuda118_sm75": {
+      "description": "CUDA 11.8, RTX 2060/2070/2080/Ti (Turing, compute 7.5)",
+      "hardware": {
+        "cuda_min": "11.8",
+        "cuda_max": "11.8",
+        "compute_capability_min": 7.5,
+        "gpu_examples": ["RTX 2080 Ti", "RTX 2080", "RTX 2070", "RTX 2060", "Tesla T4"]
+      },
+      "packages": {
+        "typing-extensions": "4.8.0",
+        "numpy": "1.26.4",
+        "torch": "2.5.1+cu118",
+        "torchvision": "0.20.1+cu118",
+        "torchaudio": "2.5.1+cu118",
+        "transformers": "4.45.0",
+        "tokenizers": "0.20.4",
+        "safetensors": "0.4.5",
+        "huggingface-hub": "0.25.2",
+        "peft": "0.12.0",
+        "accelerate": "1.0.1",
+        "bitsandbytes": "0.43.3",
+        "datasets": "3.0.1",
+        "PySide6": "6.7.3",
+        "PySide6-Essentials": "6.7.3",
+        "PySide6-Addons": "6.7.3"
+      }
+    }
+  },
+  
+  "fallback_rules": {
+    "unknown_gpu": {
+      "action": "use_profile",
+      "profile": "cuda121_sm86",
+      "reason": "RTX 3000 series (Ampere) is most common"
+    },
+    "low_vram": {
+      "threshold_gb": 8,
+      "action": "warn",
+      "message": "GPU has less than 8GB VRAM. Fine-tuning large models may fail or require smaller batch sizes."
+    },
+    "very_low_vram": {
+      "threshold_gb": 4,
+      "action": "block",
+      "message": "GPU has less than 4GB VRAM. This is insufficient for LLM fine-tuning. Minimum 6GB recommended."
+    },
+    "old_cuda": {
+      "cuda_max": "11.7",
+      "action": "warn",
+      "message": "CUDA version is older than 11.8. Please update NVIDIA drivers for better compatibility."
+    },
+    "mixed_gpus": {
+      "action": "use_lowest_common",
+      "message": "Multiple GPUs detected with different capabilities. Using configuration for the least capable GPU to ensure compatibility."
+    }
+  },
+  
+  "compute_capability_map": {
+    "9.0": {"architecture": "Hopper", "profile": "cuda124_sm89"},
+    "8.9": {"architecture": "Ada Lovelace", "profile": "cuda124_sm89"},
+    "8.6": {"architecture": "Ampere (RTX 30xx)", "profile": "cuda121_sm86"},
+    "8.0": {"architecture": "Ampere (A-series)", "profile": "cuda121_sm80"},
+    "7.5": {"architecture": "Turing (RTX 20xx)", "profile": "cuda118_sm75"},
+    "7.0": {"architecture": "Volta", "profile": "cuda118_sm75"}
+  },
+  
+  "cuda_version_map": {
+    "12.6": "cuda124_sm89",
+    "12.5": "cuda124_sm89",
+    "12.4": "cuda124_sm89",
+    "12.3": "cuda121_sm86",
+    "12.2": "cuda121_sm86",
+    "12.1": "cuda121_sm86",
+    "11.8": "cuda118_sm75"
+  },
+  
+  "common_packages": {
+    "comment": "Packages that don't vary by hardware",
+    "sympy": "1.13.1",
+    "networkx": "3.6.1",
+    "jinja2": "3.1.6",
+    "fsspec": "2025.9.0",
+    "filelock": "3.20.1",
+    "mpmath": "1.3.0",
+    "regex": "2024.11.6",
+    "pyyaml": "6.0.2",
+    "requests": "2.32.3",
+    "packaging": "24.2",
+    "tqdm": "4.67.1",
+    "sentencepiece": "0.2.0",
+    "evaluate": "0.4.3",
+    "einops": "0.8.1",
+    "timm": "1.0.12",
+    "open-clip-torch": "2.29.0",
+    "pandas": "2.2.3",
+    "psutil": "7.2.0",
+    "streamlit": "1.41.1"
+  },
+  
+  "blacklist": {
+    "packages": ["torchao", "pytorch-ao", "torchao-nightly", "torch-ao"],
+    "reason": "These packages cause transformers import failures and are not needed for our use case"
+  }
+}
+

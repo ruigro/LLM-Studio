@@ -7,13 +7,14 @@ from PySide6.QtCore import Qt, QProcess, QTimer, QThread, Signal, QProcessEnviro
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QTabWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QLineEdit, QPushButton, QFileDialog, QComboBox, QTextEdit, QPlainTextEdit,
-    QSpinBox, QDoubleSpinBox, QMessageBox, QListWidget, QListWidgetItem, QSplitter, QToolBar, QScrollArea, QGridLayout, QFrame, QProgressBar, QSizePolicy, QTabBar, QStyleOptionTab, QStyle, QStackedWidget
+    QSpinBox, QDoubleSpinBox, QMessageBox, QListWidget, QListWidgetItem, QSplitter, QToolBar, QScrollArea, QGridLayout, QFrame, QProgressBar, QSizePolicy, QTabBar, QStyleOptionTab, QStyle, QStackedWidget, QGroupBox
 )
 from PySide6.QtGui import QAction, QIcon, QFont, QMouseEvent, QCursor
 
 from desktop_app.model_card_widget import ModelCard, DownloadedModelCard
 from desktop_app.training_widgets import MetricCard
 from desktop_app.chat_widget import ChatWidget
+from desktop_app.splash_screen import SplashScreen
 
 from system_detector import SystemDetector
 from smart_installer import SmartInstaller
@@ -76,6 +77,26 @@ class InstallerThread(QThread):
             self.log_output.emit("\nFull traceback:")
             self.log_output.emit(error_details)
             self.finished_signal.emit(False)
+
+
+class SystemDetectThread(QThread):
+    """Thread for running system detection without freezing UI."""
+    detected = Signal(dict)        # system_info dict
+    error = Signal(str)            # error string
+
+    def run(self):
+        try:
+            detector = SystemDetector()
+            system_info = {
+                "python": detector.detect_python(),
+                "cuda": detector.detect_cuda(),
+                "pytorch": detector.detect_pytorch(),
+                "hardware": detector.detect_hardware(),
+            }
+            self.detected.emit(system_info)
+        except Exception as e:
+            import traceback
+            self.error.emit(traceback.format_exc())
 
 
 class DownloadThread(QThread):
@@ -254,7 +275,7 @@ QToolBar {
 
 
 class MainWindow(QMainWindow):
-    def __init__(self) -> None:
+    def __init__(self, splash: SplashScreen = None) -> None:
         super().__init__()
         # Remove native Windows title bar but keep window resizable
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.Window | Qt.WindowMinMaxButtonsHint)
@@ -275,13 +296,88 @@ class MainWindow(QMainWindow):
         self.current_cursor_shape = None  # Track current cursor shape to avoid unnecessary changes
         
         # Model integrity checker
+        if splash:
+            splash.update_progress(5, "Initializing model checker", "")
         self.model_checker = ModelIntegrityChecker()
-        
-        # Detect real system info
-        self.system_info = SystemDetector().detect_all()
-        
-        # Store SmartInstaller instance for reuse
-        self.installer = SmartInstaller()
+
+        # IMPORTANT:
+        # - If splash is provided (slow path): do full detection synchronously with UI updates.
+        # - If splash is None (fast path): do NOT run detection here (it can take minutes and freeze at 50%).
+        #   Instead, use lightweight placeholders and refresh after `_background_system_check()` completes.
+        if splash:
+            splash.update_progress(10, "Detecting system", "")
+            splash.set_checking("Python")
+
+            detector = SystemDetector()
+            self.system_info = {}
+
+            # Detect Python
+            splash.set_checking("Python")
+            python_info = detector.detect_python()
+            self.system_info["python"] = python_info
+            ver = python_info.get("version", "Unknown")
+            splash.set_result("Python", f"{ver}", python_info.get("found", False))
+            splash.update_progress(20, "Python detected", "")
+
+            # Detect CUDA/GPUs
+            splash.set_checking("CUDA & GPUs")
+            cuda_info = detector.detect_cuda()
+            self.system_info["cuda"] = cuda_info
+            if cuda_info.get("found"):
+                gpus = cuda_info.get("gpus", [])
+                for idx, gpu in enumerate(gpus):
+                    gpu_name = gpu.get("name", f"GPU {idx}")
+                    gpu_mem = gpu.get("memory", "N/A")
+                    splash.set_result(f"GPU {idx}", f"{gpu_name} ({gpu_mem})", True)
+                splash.update_progress(40, f"CUDA v{cuda_info.get('version', 'N/A')}", "")
+            else:
+                splash.set_result("CUDA & GPUs", "Not detected (CPU mode)", False)
+                splash.update_progress(40, "No CUDA", "")
+
+            # Detect PyTorch
+            splash.set_checking("PyTorch")
+            pytorch_info = detector.detect_pytorch()
+            self.system_info["pytorch"] = pytorch_info
+            if pytorch_info.get("found"):
+                ver = pytorch_info.get("version", "Unknown")
+                cuda = " + CUDA" if pytorch_info.get("cuda_available") else " (CPU only)"
+                splash.set_result("PyTorch", f"v{ver}{cuda}", True)
+            else:
+                splash.set_result("PyTorch", "Not installed", False)
+            splash.update_progress(60, "PyTorch detected", "")
+
+            # Detect Hardware
+            splash.set_checking("Hardware (CPU/RAM)")
+            hardware_info = detector.detect_hardware()
+            self.system_info["hardware"] = hardware_info
+            cpu_name = hardware_info.get("cpu_name", "Unknown CPU")
+            if len(cpu_name) > 40:
+                cpu_name = cpu_name[:37] + "..."
+            cpu_cores = hardware_info.get("cpu", {}).get("cores", "?")
+            ram = hardware_info.get("ram_gb", 0)
+            splash.set_result("CPU", f"{cpu_name} ({cpu_cores} cores)", True)
+            splash.set_result("RAM", f"{ram:.1f} GB", True)
+            splash.update_progress(80, "Hardware detected", "")
+
+            # Store SmartInstaller instance for reuse
+            splash.set_checking("Installer state")
+            self.installer = SmartInstaller()
+            splash.set_result("Installer", "Ready", True)
+            splash.update_progress(90, "Building UI", "")
+        else:
+            # Fast init: placeholders only (real detection happens in `_background_system_check`)
+            pyver = ".".join(map(str, sys.version_info[:3]))
+            self.system_info = {
+                "python": {"found": True, "version": pyver},
+                "cuda": {"found": False, "gpus": [], "driver_version": None, "version": None},
+                "pytorch": {"found": False, "cuda_available": False, "version": None, "cuda_version": None},
+                "hardware": {"cpu_name": "Unknown", "cpu": {"cores": 0}, "ram_gb": 0},
+            }
+            self.installer = SmartInstaller()
+
+        # Background detection state (fast path uses this to populate real values)
+        self._bg_detect_thread: SystemDetectThread | None = None
+        self._bg_detect_started: bool = False
 
         # Create a beautiful unified header
         header_widget = QFrame()
@@ -363,6 +459,7 @@ class MainWindow(QMainWindow):
         python_label = QLabel(f"🐍 Python {python_ver}")
         python_label.setStyleSheet("color: white; font-size: 11pt; font-weight: bold; background: transparent;")
         sys_info_layout.addWidget(python_label)
+        self.header_python_label = python_label
         
         # PyTorch info
         if pytorch_info.get("found"):
@@ -376,6 +473,7 @@ class MainWindow(QMainWindow):
             pytorch_label = QLabel("🔥 PyTorch: Not found")
         pytorch_label.setStyleSheet("color: white; font-size: 11pt; font-weight: bold; background: transparent;")
         sys_info_layout.addWidget(pytorch_label)
+        self.header_pytorch_label = pytorch_label
         
         # RAM info (round to nearest power of 2 for cleaner display)
         ram_gb = hardware_info.get("ram_gb", 0)
@@ -394,6 +492,7 @@ class MainWindow(QMainWindow):
         ram_label = QLabel(f"💾 RAM: {ram_display} GB")
         ram_label.setStyleSheet("color: white; font-size: 11pt; font-weight: bold; background: transparent;")
         sys_info_layout.addWidget(ram_label)
+        self.header_ram_label = ram_label
         
         header_layout.addWidget(sys_info_widget)
         
@@ -489,6 +588,8 @@ class MainWindow(QMainWindow):
         # Create tab widget for content (hide the tab bar since we're using custom buttons)
         tabs = QTabWidget()
         tabs.tabBar().setVisible(False)
+        # IMPORTANT: store on self for other callbacks (GPU refresh, background detection, etc.)
+        self.tabs = tabs
         
         tabs.addTab(self._build_home_tab(), "Home")
         tabs.addTab(self._build_train_tab(), "Train")
@@ -1482,64 +1583,35 @@ class MainWindow(QMainWindow):
         )
         setup_layout.addLayout(cuda_status)
         
-        # Dependencies status with install button
+        # Dependencies status (FAST, non-blocking)
+        # IMPORTANT: Do not call SmartInstaller.get_installation_checklist() here.
+        # It runs subprocess import checks and can freeze the UI at the 50% splash.
         deps_row = QHBoxLayout()
-        
-        # Check if key packages are installed using SmartInstaller (checks target venv Python)
         deps_ok = True
-        missing_packages = []
-        
+        missing_packages: list[str] = []
+
         try:
-            # Get target venv Python path
-            target_python = self._get_target_venv_python()
-            
-            # Use SmartInstaller to check packages (uses target venv Python)
-            installer = SmartInstaller()
-            checklist = installer.get_installation_checklist(python_executable=target_python)
-            
-            # Map component names to package names for checking
-            component_to_pkg = {
-                'PyTorch (CUDA)': 'torch',
-                'transformers': 'transformers',
-                'tokenizers': 'tokenizers',
-                'datasets': 'datasets',
-                'accelerate': 'accelerate',
-                'peft': 'peft',
-                'numpy': 'numpy',
-                'bitsandbytes': 'bitsandbytes',
-                'unsloth': 'unsloth',
-            }
-            
-            # Check critical packages - map component names to what's in checklist
-            # The checklist uses package names (e.g., 'transformers') not component names (e.g., 'PyTorch (CUDA)')
-            critical_packages = ['transformers', 'tokenizers', 'datasets', 'accelerate', 'peft', 'numpy']
-            critical_components = ['PyTorch (CUDA)']  # Special component name
-            
-            for item in checklist:
-                component = item.get('component', '')
-                status = item.get('status', 'missing')
-                status_text = item.get('status_text', '')
-                
-                # Check if this component is in our critical list
-                if component in critical_packages or component in critical_components:
-                    if status != 'installed':
-                        deps_ok = False
-                        # Clean up status text
-                        clean_text = status_text.replace('✓ ', '').replace('⚠ ', '').replace('✗ ', '')
-                        if clean_text and clean_text not in missing_packages:
-                            missing_packages.append(clean_text)
+            import importlib.util
+
+            def _has(pkg: str) -> bool:
+                return importlib.util.find_spec(pkg) is not None
+
+            critical = ["torch", "transformers", "tokenizers", "datasets", "accelerate", "peft", "numpy"]
+            for pkg in critical:
+                if not _has(pkg):
+                    deps_ok = False
+                    missing_packages.append(pkg)
         except Exception as e:
-            # If checking fails, assume dependencies are missing
-            print(f"Error checking dependencies: {e}")
+            print(f"Error checking dependencies (fast): {e}")
             deps_ok = False
-            missing_packages.append("Error checking dependencies")
-        
+            missing_packages.append("dependency-check-error")
+
         if deps_ok:
-            deps_msg = "✅ Packages installed (runtime validated by Fix Issues)"
+            deps_msg = "✅ Core packages found (full validation runs via Fix Issues)"
         else:
-            deps_msg = f"Missing: {', '.join(missing_packages[:5])}"  # Show first 5
-            if len(missing_packages) > 5:
-                deps_msg += f" (+{len(missing_packages) - 5} more)"
+            deps_msg = f"Missing: {', '.join(missing_packages[:6])}"
+            if len(missing_packages) > 6:
+                deps_msg += f" (+{len(missing_packages) - 6} more)"
         
         deps_status_widget = self._create_status_widget(
             "📦 Dependencies",
@@ -2954,6 +3026,13 @@ class MainWindow(QMainWindow):
         env = QProcessEnvironment.systemEnvironment()
         env.insert("PYTHONIOENCODING", "utf-8")
         env.insert("PYTHONUTF8", "1")
+        
+        # Set GPU selection from Train tab dropdown
+        if hasattr(self, 'gpu_select') and self.gpu_select.isEnabled():
+            selected_gpu_idx = self.gpu_select.currentIndex()
+            env.insert("CUDA_VISIBLE_DEVICES", str(selected_gpu_idx))
+            self.train_log.appendPlainText(f"[INFO] Using GPU {selected_gpu_idx}: {self.gpu_select.currentText()}")
+        
         proc.setProcessEnvironment(env)
         
         proc.readyReadStandardOutput.connect(lambda: self._append_proc_output(proc, self.train_log))
@@ -3027,6 +3106,39 @@ class MainWindow(QMainWindow):
 
         # Title
         layout.addWidget(QLabel("<h2>🧪 Test Models - Side-by-Side Chat</h2>"))
+        
+        # GPU selection for inference
+        gpu_frame = QGroupBox("⚙️ Hardware Settings")
+        gpu_layout = QVBoxLayout(gpu_frame)
+        
+        cuda_info = self.system_info.get("cuda", {})
+        gpus = cuda_info.get("gpus", [])
+        
+        # GPU selection dropdown for test tab
+        gpu_row = QHBoxLayout()
+        gpu_row.addWidget(QLabel("GPU for Inference:"))
+        self.test_gpu_select = QComboBox()
+        
+        if gpus:
+            for idx, gpu in enumerate(gpus):
+                gpu_name = gpu.get("name", f"GPU {idx}")
+                vram = gpu.get("memory", "N/A")
+                self.test_gpu_select.addItem(f"GPU {idx}: {gpu_name} ({vram})")
+            info_text = f"✅ {len(gpus)} GPU(s) detected - select one for inference"
+        else:
+            self.test_gpu_select.addItem("No GPUs available - CPU mode")
+            self.test_gpu_select.setEnabled(False)
+            info_text = "⚠️ No GPUs detected (CPU mode)"
+        
+        gpu_row.addWidget(self.test_gpu_select, 1)
+        gpu_layout.addLayout(gpu_row)
+        
+        self.test_gpu_info = QLabel(info_text)
+        self.test_gpu_info.setStyleSheet("color: #888; padding: 5px; font-size: 10pt;")
+        self.test_gpu_info.setWordWrap(True)
+        gpu_layout.addWidget(self.test_gpu_info)
+        
+        layout.addWidget(gpu_frame)
 
         # Side-by-side model comparison (TOP - Chat)
         models_layout = QHBoxLayout()
@@ -3187,6 +3299,14 @@ class MainWindow(QMainWindow):
         proc.setWorkingDirectory(str(self.root))
         proc.setProcessChannelMode(QProcess.MergedChannels)
         
+        # Set GPU selection via environment variable
+        env = QProcessEnvironment.systemEnvironment()
+        if hasattr(self, 'test_gpu_select') and self.test_gpu_select.isEnabled():
+            selected_gpu_idx = self.test_gpu_select.currentIndex()
+            env.insert("CUDA_VISIBLE_DEVICES", str(selected_gpu_idx))
+        
+        proc.setProcessEnvironment(env)
+        
         # Connect to read output and update last bubble
         proc.readyReadStandardOutput.connect(
             lambda: self._update_inference_output_a(proc)
@@ -3205,26 +3325,24 @@ class MainWindow(QMainWindow):
         # Accumulate text in buffer
         self.inference_buffer_a += text
         
-        # Extract the actual response (skip loading messages, etc.)
-        # Look for lines that are actual model output
+        # Filter out only warnings and technical messages, keep everything else
         lines = self.inference_buffer_a.split('\n')
-        response_lines = []
-        capture = False
+        filtered_lines = []
         
         for line in lines:
-            # Skip status messages
-            if any(x in line for x in ['[INFO]', '[OK]', 'Loading', 'Generating', 'FutureWarning', 'UserWarning']):
+            # Skip only these specific patterns
+            if any(x in line for x in [
+                'FutureWarning', 'UserWarning', 'TRANSFORMERS_CACHE',
+                'warnings.warn', 'DeprecationWarning'
+            ]):
                 continue
-            # Start capturing after we see model is loaded
-            if 'Set pad_token' in line or 'Model loaded' in line:
-                capture = True
-                continue
-            if capture and line.strip():
-                response_lines.append(line)
+            # Keep everything else
+            if line.strip():
+                filtered_lines.append(line)
         
-        # Update the chat bubble with cleaned response
-        if response_lines:
-            clean_response = '\n'.join(response_lines).strip()
+        # Update the chat bubble with filtered output
+        if filtered_lines:
+            clean_response = '\n'.join(filtered_lines).strip()
             if clean_response:
                 self.chat_widget_a.update_last_ai_message(clean_response)
         elif self.inference_buffer_a.strip() and 'Loading' not in self.inference_buffer_a:
@@ -3259,6 +3377,14 @@ class MainWindow(QMainWindow):
         proc.setWorkingDirectory(str(self.root))
         proc.setProcessChannelMode(QProcess.MergedChannels)
         
+        # Set GPU selection via environment variable
+        env = QProcessEnvironment.systemEnvironment()
+        if hasattr(self, 'test_gpu_select') and self.test_gpu_select.isEnabled():
+            selected_gpu_idx = self.test_gpu_select.currentIndex()
+            env.insert("CUDA_VISIBLE_DEVICES", str(selected_gpu_idx))
+        
+        proc.setProcessEnvironment(env)
+        
         # Connect to read output and update last bubble
         proc.readyReadStandardOutput.connect(
             lambda: self._update_inference_output_b(proc)
@@ -3277,25 +3403,24 @@ class MainWindow(QMainWindow):
         # Accumulate text in buffer
         self.inference_buffer_b += text
         
-        # Extract the actual response (skip loading messages, etc.)
+        # Filter out only warnings and technical messages, keep everything else
         lines = self.inference_buffer_b.split('\n')
-        response_lines = []
-        capture = False
+        filtered_lines = []
         
         for line in lines:
-            # Skip status messages
-            if any(x in line for x in ['[INFO]', '[OK]', 'Loading', 'Generating', 'FutureWarning', 'UserWarning']):
+            # Skip only these specific patterns
+            if any(x in line for x in [
+                'FutureWarning', 'UserWarning', 'TRANSFORMERS_CACHE',
+                'warnings.warn', 'DeprecationWarning'
+            ]):
                 continue
-            # Start capturing after we see model is loaded
-            if 'Set pad_token' in line or 'Model loaded' in line:
-                capture = True
-                continue
-            if capture and line.strip():
-                response_lines.append(line)
+            # Keep everything else
+            if line.strip():
+                filtered_lines.append(line)
         
-        # Update the chat bubble with cleaned response
-        if response_lines:
-            clean_response = '\n'.join(response_lines).strip()
+        # Update the chat bubble with filtered output
+        if filtered_lines:
+            clean_response = '\n'.join(filtered_lines).strip()
             if clean_response:
                 self.chat_widget_b.update_last_ai_message(clean_response)
         elif self.inference_buffer_b.strip() and 'Loading' not in self.inference_buffer_b:
@@ -3335,50 +3460,8 @@ class MainWindow(QMainWindow):
         info.setStyleSheet("background: transparent; color: #888; font-size: 11pt; margin-bottom: 20px;")
         layout.addWidget(info)
         
-        # Get target venv Python path
-        target_python = self._get_target_venv_python()
-        
-        # Use SmartInstaller to get accurate package status (checks target venv Python)
-        installer = SmartInstaller()
-        checklist = installer.get_installation_checklist(python_executable=target_python)
-        
-        # Create a map of component -> status for quick lookup
-        component_status_map = {}
-        for item in checklist:
-            component = item.get('component', '')
-            component_status_map[component] = {
-                'status': item.get('status', 'unknown'),
-                'installed_version': item.get('installed_version') or item.get('version', 'N/A'),
-                'status_text': item.get('status_text', '')
-            }
-        
-        # Helper to get installed version from checklist
-        def get_installed_version_from_checklist(pkg_name):
-            """Get installed version from checklist by matching component names"""
-            # Map package names to component names
-            pkg_to_component = {
-                'torch': 'PyTorch (CUDA)',
-                'torchvision': 'PyTorch Vision',
-                'torchaudio': 'PyTorch Audio',
-                'triton-windows': 'Triton (Windows)',
-                'triton': 'Triton (Windows)',
-            }
-            
-            component = pkg_to_component.get(pkg_name, pkg_name)
-            if component in component_status_map:
-                installed_ver = component_status_map[component].get('installed_version')
-                # Check if it's a valid version (not None, not 'N/A', not 'any')
-                if installed_ver and installed_ver not in ['N/A', 'any', '']:
-                    return installed_ver
-            
-            # Try direct lookup by package name
-            if pkg_name in component_status_map:
-                installed_ver = component_status_map[pkg_name].get('installed_version')
-                if installed_ver and installed_ver not in ['N/A', 'any', '']:
-                    return installed_ver
-            
-            # If not found, return None (will trigger subprocess check in caller)
-            return None
+        # IMPORTANT: This tab must be non-blocking.
+        # Do NOT call SmartInstaller.get_installation_checklist() here because it runs subprocess checks and can freeze UI.
         
         # Get installed versions using target Python
         try:
@@ -3518,29 +3601,21 @@ class MainWindow(QMainWindow):
                 
                 required_version = required_packages[pkg_name]
                 
-                # Get installed version using target venv Python
-                installed_version = get_installed_version_from_checklist(pkg_name)
-                is_installed = installed_version is not None and installed_version != "N/A" and installed_version != "any"
-                
-                # If not found in checklist, try subprocess check
-                if not is_installed or not installed_version:
+                # Get installed version quickly from current environment (no subprocess)
+                installed_version = None
+                dist_candidates = [pkg_name]
+                if pkg_name == "triton-windows":
+                    dist_candidates = ["triton", "triton-windows"]
+                for dist in dist_candidates:
                     try:
-                        import subprocess
-                        # Handle special case: triton-windows package name but triton module
-                        check_name = "triton" if pkg_name == "triton-windows" else pkg_name
-                        # Use import-based verification for all packages (no metadata)
-                        module_name = check_name.replace("-", "_")
-                        result = subprocess.run(
-                            [target_python, "-c", f"import {module_name}; print({module_name}.__version__)"],
-                            capture_output=True,
-                            text=True,
-                            timeout=5
-                        )
-                        if result.returncode == 0:
-                            installed_version = result.stdout.strip()
-                            is_installed = True
-                    except:
-                        pass
+                        installed_version = version(dist)
+                        break
+                    except PackageNotFoundError:
+                        continue
+                    except Exception:
+                        continue
+
+                is_installed = bool(installed_version)
                 
                 # Determine status and color
                 status = "unknown"
@@ -3840,6 +3915,157 @@ respective package directories or official repositories.
         if data:
             widget.appendPlainText(data.rstrip("\n"))
 
+    def _background_system_check(self):
+        """Backward-compatible entrypoint (kept for older call sites)."""
+        self._start_background_detection()
+
+    def _log_to_app_log(self, message: str) -> None:
+        """Best-effort logger for pythonw launches (no console)."""
+        try:
+            logs_dir = self.root / "logs"
+            logs_dir.mkdir(parents=True, exist_ok=True)
+            log_path = logs_dir / "app.log"
+            with log_path.open("a", encoding="utf-8", errors="replace") as f:
+                f.write(message.rstrip() + "\n")
+        except Exception:
+            pass
+
+    def _start_background_detection(self) -> None:
+        """Run system detection in a worker thread and apply results to the UI."""
+        # Ensure UI is fully constructed before running detection (timers can fire during __init__
+        # because the splash screen calls processEvents()).
+        if not hasattr(self, "tabs") or self.tabs is None:
+            QTimer.singleShot(250, self._start_background_detection)
+            return
+
+        if self._bg_detect_started:
+            return
+        self._bg_detect_started = True
+        self._log_to_app_log("[BACKGROUND] Starting system detection thread...")
+
+        t = SystemDetectThread()
+        self._bg_detect_thread = t
+
+        def _on_detected(system_info: dict) -> None:
+            try:
+                self.system_info.update(system_info)
+                self._update_header_system_info()
+
+                # Refresh Home tab (System Status + Requirements) to show real detected values
+                try:
+                    if hasattr(self, "tabs") and self.tabs is not None and self.tabs.count() > 0:
+                        current_index = self.tabs.currentIndex()
+                        self.tabs.removeTab(0)
+                        self.tabs.insertTab(0, self._build_home_tab(), "🏠 Home")
+                        self.tabs.setCurrentIndex(current_index)
+                except Exception as e:
+                    self._log_to_app_log(f"[BACKGROUND] Failed to rebuild Home tab: {e}")
+
+                # Refresh GPU dropdowns (Train/Test)
+                try:
+                    self._refresh_gpu_selectors()
+                except Exception as e:
+                    self._log_to_app_log(f"[BACKGROUND] Failed to refresh GPU selectors: {e}")
+
+                gpu_count = len(self.system_info.get("cuda", {}).get("gpus", []) or [])
+                self._log_to_app_log(f"[BACKGROUND] Detection complete. GPU(s)={gpu_count}")
+            finally:
+                self._bg_detect_thread = None
+
+        def _on_error(trace: str) -> None:
+            self._log_to_app_log("[BACKGROUND] Detection crashed:\n" + trace)
+            self._bg_detect_thread = None
+
+        t.detected.connect(_on_detected)
+        t.error.connect(_on_error)
+        t.finished.connect(lambda: self._log_to_app_log("[BACKGROUND] Detection thread finished."))
+        t.start()
+    
+    def _update_header_system_info(self):
+        """Update the header system info labels with detected values"""
+        python_info = self.system_info.get("python", {})
+        pytorch_info = self.system_info.get("pytorch", {})
+        hardware_info = self.system_info.get("hardware", {})
+
+        # Python label
+        if hasattr(self, "header_python_label"):
+            pyver = python_info.get("version", "Unknown")
+            self.header_python_label.setText(f"🐍 Python {pyver}")
+
+        # PyTorch label
+        if hasattr(self, "header_pytorch_label"):
+            if pytorch_info.get("found"):
+                ptver = pytorch_info.get("version", "Unknown")
+                if pytorch_info.get("cuda_available"):
+                    cuver = pytorch_info.get("cuda_version", "Unknown")
+                    self.header_pytorch_label.setText(f"🔥 PyTorch {ptver} (CUDA {cuver})")
+                else:
+                    self.header_pytorch_label.setText(f"🔥 PyTorch {ptver} (CPU)")
+            else:
+                self.header_pytorch_label.setText("🔥 PyTorch: Not found")
+
+        # RAM label
+        if hasattr(self, "header_ram_label"):
+            ram_gb = hardware_info.get("ram_gb", 0) or 0
+            # Round to nearest common RAM size for display
+            if ram_gb > 60:
+                ram_display = 64
+            elif ram_gb > 30:
+                ram_display = 32
+            elif ram_gb > 14:
+                ram_display = 16
+            elif ram_gb > 6:
+                ram_display = 8
+            else:
+                ram_display = round(ram_gb)
+            self.header_ram_label.setText(f"💾 RAM: {ram_display} GB")
+
+    def _refresh_gpu_selectors(self) -> None:
+        """Refresh Train/Test GPU dropdowns based on latest detection results."""
+        cuda_info = self.system_info.get("cuda", {})
+        gpus = cuda_info.get("gpus", []) or []
+
+        # Train tab GPU selector
+        if hasattr(self, "gpu_select") and hasattr(self, "gpu_status_label") and hasattr(self, "training_info_label"):
+            self.gpu_select.blockSignals(True)
+            self.gpu_select.clear()
+
+            if gpus:
+                self.gpu_status_label.setText(f"✅ {len(gpus)} GPU{'s' if len(gpus) > 1 else ''} detected")
+                self.gpu_status_label.setStyleSheet("font-weight: bold; color: #4CAF50;")
+                self.gpu_select.setEnabled(True)
+                for idx, gpu in enumerate(gpus):
+                    gpu_name = gpu.get("name", f"GPU {idx}")
+                    self.gpu_select.addItem(f"GPU {idx}: {gpu_name}")
+                self.training_info_label.setText(f"⚡ Training will use: {self.gpu_select.currentText()}")
+            else:
+                self.gpu_status_label.setText("⚠️ No GPUs detected")
+                self.gpu_status_label.setStyleSheet("font-weight: bold; color: #FF9800;")
+                self.gpu_select.addItem("No GPUs available - CPU mode")
+                self.gpu_select.setEnabled(False)
+                self.training_info_label.setText("⚠️ Training will use CPU (slower)")
+
+            self.gpu_select.blockSignals(False)
+
+        # Test tab GPU selector
+        if hasattr(self, "test_gpu_select") and hasattr(self, "test_gpu_info"):
+            self.test_gpu_select.blockSignals(True)
+            self.test_gpu_select.clear()
+
+            if gpus:
+                for idx, gpu in enumerate(gpus):
+                    gpu_name = gpu.get("name", f"GPU {idx}")
+                    vram = gpu.get("memory", "VRAM unknown")
+                    self.test_gpu_select.addItem(f"GPU {idx}: {gpu_name} ({vram})")
+                self.test_gpu_select.setEnabled(True)
+                self.test_gpu_info.setText(f"✅ {len(gpus)} GPU(s) detected - select one for inference")
+            else:
+                self.test_gpu_select.addItem("No GPUs available - CPU mode")
+                self.test_gpu_select.setEnabled(False)
+                self.test_gpu_info.setText("⚠️ No GPUs detected (CPU mode)")
+
+            self.test_gpu_select.blockSignals(False)
+    
     def _refresh_locals(self) -> None:
         # Refresh downloaded models display
         self._refresh_models()
@@ -3950,14 +4176,51 @@ respective package directories or official repositories.
 
 
 def main() -> int:
+    # Optional startup watchdog (only enabled when explicitly requested)
+    # Set environment variable LLM_STARTUP_WATCHDOG=1 to enable.
+    try:
+        import os
+        if os.environ.get("LLM_STARTUP_WATCHDOG") == "1":
+            import faulthandler
+            logs_dir = get_app_root() / "logs"
+            logs_dir.mkdir(parents=True, exist_ok=True)
+            hang_log_path = logs_dir / "startup_hang.log"
+            hang_log = open(hang_log_path, "a", encoding="utf-8", errors="replace")
+            hang_log.write("\n==== startup_hang watchdog enabled ====\n")
+            hang_log.flush()
+            faulthandler.enable(file=hang_log, all_threads=True)
+            faulthandler.dump_traceback_later(30, repeat=True, file=hang_log)
+    except Exception:
+        pass
+
     app = QApplication(sys.argv)
     # Set base font size for the entire application - INCREASED to 16pt
     app_font = QFont()
     # Keep this modest; very large fonts require scroll areas (added above).
     app_font.setPointSize(14)
     app.setFont(app_font)
-    win = MainWindow()
+    
+    # Show splash screen with minimal info
+    splash = SplashScreen()
+    splash.show()
+    splash.update_progress(10, "Starting up", "Initializing LLM Fine-tuning Studio...")
+    app.processEvents()  # Force display
+    
+    # Create main window quickly (NO detection during init - pass None for splash)
+    splash.update_progress(50, "Creating interface", "")
+    app.processEvents()
+    
+    win = MainWindow(splash=None)  # Don't pass splash to skip slow detection
+    
+    # Show main window IMMEDIATELY
+    splash.update_progress(100, "Ready!", "")
+    app.processEvents()
     win.show()
+    splash.finish(win)
+    
+    # Do system detection in background after GUI is shown (threaded; safe if launched via pythonw)
+    QTimer.singleShot(500, lambda: win._start_background_detection())
+    
     return app.exec()
 
 

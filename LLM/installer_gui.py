@@ -551,6 +551,14 @@ class InstallerGUI:
             
             # Redirect installer logs to GUI
             import builtins
+            import io
+            
+            # Force UTF-8 encoding for stdout to handle Unicode symbols
+            if sys.platform == 'win32':
+                import codecs
+                sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+                sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
+            
             original_print = builtins.print
             
             def gui_print(*args, **kwargs):

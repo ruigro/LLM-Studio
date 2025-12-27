@@ -35,6 +35,13 @@
   
   "core_dependencies": [
     {
+      "name": "typing-extensions",
+      "version": ">=4.8.0",
+      "order": 0,
+      "critical": true,
+      "comment": "Required by torch before torch installs"
+    },
+    {
       "name": "numpy",
       "version": ">=1.26.0,<2.0",
       "order": 1,
@@ -144,7 +151,7 @@
     },
     {
       "name": "tokenizers",
-      "version": ">=0.20.0,<0.23",
+      "version": ">=0.21.0,<0.22",
       "order": 26,
       "critical": true,
       "comment": "Must be compatible with transformers version"

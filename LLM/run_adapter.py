@@ -14,6 +14,8 @@ import platform
 # Suppress known warnings
 warnings.filterwarnings("ignore", message=".*quantization_config.*")
 warnings.filterwarnings("ignore", message=".*pkg_resources.*")
+warnings.filterwarnings("ignore", message=".*TRANSFORMERS_CACHE.*")
+warnings.filterwarnings("ignore", category=FutureWarning, module="transformers")
 
 # Check if running on Windows
 IS_WINDOWS = platform.system() == "Windows"
@@ -291,12 +293,23 @@ def generate_text(tokenizer, model, prompt, max_new_tokens=128, temperature=0.7,
         gen_kwargs["do_sample"] = False
     
     with torch.no_grad():
-        out = model.generate(**inputs, **gen_kwargs)
+        try:
+            out = model.generate(**inputs, **gen_kwargs)
+        except Exception as e:
+            print(f"[ERROR] Generation failed: {e}")
+            import traceback
+            traceback.print_exc()
+            return ""
     
     # Return only newly generated tokens (exclude prompt)
     input_len = inputs["input_ids"].shape[1]
     gen_ids = out[0][input_len:]
     text = tokenizer.decode(gen_ids, skip_special_tokens=True)
+    
+    # Debug: Check if output is empty
+    if not text or not text.strip():
+        print(f"[WARN] Empty generation. Input length: {input_len}, Output length: {len(out[0])}, New tokens: {len(gen_ids)}")
+    
     return text
 
 
@@ -331,8 +344,13 @@ def main():
     # Generate and print only the new text (no prompt echo)
     print("[INFO] Generating...")
     out = generate_text(tokenizer, model, prompt, max_new_tokens=args.max_new_tokens, temperature=args.temperature, model_type=args.model_type)
-    print("\n--- OUTPUT ---\n")
-    print(out)
+    
+    if out and out.strip():
+        print("\n--- OUTPUT ---\n")
+        print(out)
+    else:
+        print("[ERROR] No output generated. Model may have failed to produce text.")
+        print("[DEBUG] Check CUDA availability and model loading above.")
 
 
 if __name__ == "__main__":

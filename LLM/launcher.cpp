@@ -350,11 +350,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
         // PySide6 is broken - launch installer GUI via bootstrap
         std::wstring runInstallerBat = exeDir + L"\\run_installer.bat";
         if (FileExists(runInstallerBat)) {
-            // Use run_installer.bat which ensures bootstrap is used
             ShellExecuteW(NULL, L"open", runInstallerBat.c_str(), NULL, exeDir.c_str(), SW_SHOW);
-            return 0;  // Exit - installer GUI will handle repair
+            return 0;
         } else {
-            // Fallback: try installer_gui.py directly (it has bootstrap guard)
             std::wstring installerGui = exeDir + L"\\installer_gui.py";
             if (FileExists(installerGui)) {
                 ShellExecuteW(NULL, L"open", systemPython.c_str(), installerGui.c_str(), exeDir.c_str(), SW_SHOW);
@@ -407,7 +405,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
         // Dependency check script missing - log warning but continue
         // (This shouldn't happen in normal operation, but don't block launch)
         std::wstring warnLog = exeDir + L"\\logs\\launcher_warning.log";
-        std::ofstream warnFile(warnLog, std::ios::app);
+        std::ofstream warnFile(warnLog.c_str(), std::ios::app);
         if (warnFile.is_open()) {
             warnFile << "WARNING: check_dependencies.py not found, skipping dependency check\n";
             warnFile.close();
@@ -418,8 +416,17 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     std::wstring scriptArgs = L"-m desktop_app.main";
     std::wstring logFile = exeDir + L"\\logs\\app.log";
     
+    // Ensure .setup_complete marker exists so setup wizard is skipped
+    std::wstring setupMarker = exeDir + L"\\.setup_complete";
+    if (!FileExists(setupMarker)) {
+        std::ofstream marker(setupMarker.c_str());
+        if (marker.is_open()) {
+            marker << "ready";
+            marker.close();
+        }
+    }
+
     int exitCode = LaunchPythonApp(exeDir, venvPython, scriptArgs, logFile);
-    
     if (exitCode != 0) {
         // App failed - open log in Notepad
         MessageBoxW(NULL, 
@@ -431,6 +438,6 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
         OpenLogInNotepad(logFile);
         return exitCode;
     }
-    
-    return 0;
+
+    return exitCode;
 }

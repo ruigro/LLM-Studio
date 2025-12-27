@@ -4,7 +4,18 @@ A comprehensive local LLM fine-tuning and inference platform with desktop GUI.
 
 ---
 
-## 🚨 **IMPORTANT: After Cloning on a New PC**
+## 🚀 **HOW TO RUN THE APP**
+
+**Just double-click:**
+```
+START.bat
+```
+
+**That's it!** First time will take 2-3 minutes to set up. After that, it's instant.
+
+---
+
+## 🚨 **After Cloning on a New PC**
 
 **Model weight files are NOT included in Git due to their large size (1-50 GB each)!**
 
@@ -31,20 +42,6 @@ This will:
 - **Quick Start:** [QUICK_START_AFTER_CLONE.md](QUICK_START_AFTER_CLONE.md)
 - **Detailed Guide:** [MODEL_MANAGEMENT_GUIDE.md](MODEL_MANAGEMENT_GUIDE.md)
 - **Solution Summary:** [SOLUTION_SUMMARY.md](SOLUTION_SUMMARY.md)
-
----
-
-## 🚀 Quick Start (After Models Are Downloaded)
-
-**To launch the app, double-click:**
-```
-start_electron.bat
-```
-
-This will:
-1. Auto-start the Streamlit server
-2. Open the desktop window
-3. Show your LLM Fine-tuning Studio
 
 ---
 
