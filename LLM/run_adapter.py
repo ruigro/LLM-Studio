@@ -130,6 +130,25 @@ def load_model(base_model, adapter_dir, use_4bit=True, offload=True):
         print(f"[INFO] Detected checkpoint subdirectory, using parent: {os.path.dirname(adapter_dir)}")
         adapter_dir = os.path.dirname(adapter_dir)
     
+    # Check if adapter_dir exists and has required files
+    import os
+    if not os.path.exists(adapter_dir):
+        raise RuntimeError(f"Adapter directory not found: {adapter_dir}")
+    
+    # Check for adapter files (adapter_model.safetensors, adapter_model.bin, or pytorch_model.bin)
+    adapter_files = ["adapter_model.safetensors", "adapter_model.bin", "adapter_config.json"]
+    has_adapter_files = any(os.path.exists(os.path.join(adapter_dir, f)) for f in adapter_files)
+    
+    if not has_adapter_files:
+        print(f"[ERROR] Adapter directory '{adapter_dir}' exists but contains no adapter weights!")
+        print(f"[ERROR] Expected files: {', '.join(adapter_files)}")
+        print(f"[INFO] Directory contents: {os.listdir(adapter_dir)}")
+        raise RuntimeError(
+            f"Incomplete adapter checkpoint at '{adapter_dir}'.\n"
+            f"The directory exists but contains no model weights.\n"
+            f"Please complete the training or select a different checkpoint."
+        )
+    
     # Try loading tokenizer from adapter dir first, then base model
     try:
         print(f"[INFO] Loading tokenizer from adapter dir: {adapter_dir}")

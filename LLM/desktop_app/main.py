@@ -2845,7 +2845,7 @@ class MainWindow(QMainWindow):
     def _toggle_batch_size(self):
         """Toggle between auto and manual batch size"""
         is_auto = self.batch_size_auto.isChecked()
-        self.batch_size_container.setVisible(not is_auto)
+        # Batch size spinbox is always hidden (auto mode is default and recommended)
         if is_auto:
             self.batch_size_auto.setText("✅ Optimal batch size")
         else:
@@ -3283,14 +3283,35 @@ class MainWindow(QMainWindow):
         # Reset buffer
         self.inference_buffer_a = ""
         
-        # Build command using existing infrastructure
-        cfg = InferenceConfig(
-            prompt=prompt,
-            base_model=model_path,  # Full path to downloaded model
-            max_new_tokens=512,
-            temperature=0.7
-        )
-        cmd = build_run_adapter_cmd(cfg)
+        # Check if this is an adapter or base model
+        from pathlib import Path
+        model_path_obj = Path(model_path)
+        is_adapter = (model_path_obj / "adapter_config.json").exists() or \
+                    (model_path_obj / "adapter_model.safetensors").exists() or \
+                    (model_path_obj / "adapter_model.bin").exists()
+        
+        # Detect if this is an instruct model (check if "instruct" is in the path)
+        model_path_lower = str(model_path).lower()
+        is_instruct = "instruct" in model_path_lower or "chat" in model_path_lower
+        model_type = "instruct" if is_instruct else "base"
+        
+        # Build command - use run_adapter.py for both base models and adapters
+        cmd = [
+            sys.executable, "-u", "run_adapter.py",
+            "--prompt", prompt,
+            "--max-new-tokens", "512",
+            "--temperature", "0.7",
+            "--model-type", model_type
+        ]
+        
+        if is_adapter:
+            # Load as adapter (requires base model + adapter)
+            cmd += ["--adapter-dir", model_path]
+            # TODO: Need to specify base model - for now use default
+            cmd += ["--base-model", "unsloth/llama-3.2-3b-instruct-unsloth-bnb-4bit"]
+        else:
+            # Load as base model only
+            cmd += ["--base-model", model_path, "--no-adapter"]
         
         # Create QProcess
         proc = QProcess(self)
@@ -3325,29 +3346,39 @@ class MainWindow(QMainWindow):
         # Accumulate text in buffer
         self.inference_buffer_a += text
         
-        # Filter out only warnings and technical messages, keep everything else
-        lines = self.inference_buffer_a.split('\n')
-        filtered_lines = []
-        
-        for line in lines:
-            # Skip only these specific patterns
-            if any(x in line for x in [
-                'FutureWarning', 'UserWarning', 'TRANSFORMERS_CACHE',
-                'warnings.warn', 'DeprecationWarning'
-            ]):
-                continue
-            # Keep everything else
-            if line.strip():
-                filtered_lines.append(line)
-        
-        # Update the chat bubble with filtered output
-        if filtered_lines:
-            clean_response = '\n'.join(filtered_lines).strip()
-            if clean_response:
-                self.chat_widget_a.update_last_ai_message(clean_response)
-        elif self.inference_buffer_a.strip() and 'Loading' not in self.inference_buffer_a:
-            # Fallback: show raw buffer if we can't parse it
-            self.chat_widget_a.update_last_ai_message(self.inference_buffer_a.strip())
+        # Extract only the actual output (after "--- OUTPUT ---")
+        if "--- OUTPUT ---" in self.inference_buffer_a:
+            # Split and take everything after the marker
+            parts = self.inference_buffer_a.split("--- OUTPUT ---", 1)
+            if len(parts) > 1:
+                actual_output = parts[1].strip()
+                if actual_output:
+                    self.chat_widget_a.update_last_ai_message(actual_output)
+        else:
+            # Before we see OUTPUT marker, check if there's any useful partial response
+            # Filter out all log lines (lines starting with [INFO], [WARN], [OK], etc.)
+            lines = self.inference_buffer_a.split('\n')
+            filtered_lines = []
+            
+            for line in lines:
+                # Skip log messages and technical output
+                if any(x in line for x in [
+                    '[INFO]', '[WARN]', '[OK]', '[ERROR]',
+                    'FutureWarning', 'UserWarning', 'TRANSFORMERS_CACHE',
+                    'warnings.warn', 'DeprecationWarning', 'Loading tokenizer',
+                    'Loading base model', 'Windows detected', 'Generating...',
+                    'Loading checkpoint shards:', '|', 'it/s', '█', '▌'
+                ]):
+                    continue
+                # Keep everything else
+                if line.strip():
+                    filtered_lines.append(line)
+            
+            # Only update if we have filtered content
+            if filtered_lines:
+                clean_response = '\n'.join(filtered_lines).strip()
+                if clean_response:
+                    self.chat_widget_a.update_last_ai_message(clean_response)
     
     def _on_inference_finished_a(self):
         """Called when Model A inference finishes"""
@@ -3361,14 +3392,35 @@ class MainWindow(QMainWindow):
         # Reset buffer
         self.inference_buffer_b = ""
         
-        # Build command using existing infrastructure
-        cfg = InferenceConfig(
-            prompt=prompt,
-            base_model=model_path,  # Full path to downloaded model
-            max_new_tokens=512,
-            temperature=0.7
-        )
-        cmd = build_run_adapter_cmd(cfg)
+        # Check if this is an adapter or base model
+        from pathlib import Path
+        model_path_obj = Path(model_path)
+        is_adapter = (model_path_obj / "adapter_config.json").exists() or \
+                    (model_path_obj / "adapter_model.safetensors").exists() or \
+                    (model_path_obj / "adapter_model.bin").exists()
+        
+        # Detect if this is an instruct model (check if "instruct" is in the path)
+        model_path_lower = str(model_path).lower()
+        is_instruct = "instruct" in model_path_lower or "chat" in model_path_lower
+        model_type = "instruct" if is_instruct else "base"
+        
+        # Build command - use run_adapter.py for both base models and adapters
+        cmd = [
+            sys.executable, "-u", "run_adapter.py",
+            "--prompt", prompt,
+            "--max-new-tokens", "512",
+            "--temperature", "0.7",
+            "--model-type", model_type
+        ]
+        
+        if is_adapter:
+            # Load as adapter (requires base model + adapter)
+            cmd += ["--adapter-dir", model_path]
+            # TODO: Need to specify base model - for now use default
+            cmd += ["--base-model", "unsloth/llama-3.2-3b-instruct-unsloth-bnb-4bit"]
+        else:
+            # Load as base model only
+            cmd += ["--base-model", model_path, "--no-adapter"]
         
         # Create QProcess
         proc = QProcess(self)
@@ -3403,29 +3455,39 @@ class MainWindow(QMainWindow):
         # Accumulate text in buffer
         self.inference_buffer_b += text
         
-        # Filter out only warnings and technical messages, keep everything else
-        lines = self.inference_buffer_b.split('\n')
-        filtered_lines = []
-        
-        for line in lines:
-            # Skip only these specific patterns
-            if any(x in line for x in [
-                'FutureWarning', 'UserWarning', 'TRANSFORMERS_CACHE',
-                'warnings.warn', 'DeprecationWarning'
-            ]):
-                continue
-            # Keep everything else
-            if line.strip():
-                filtered_lines.append(line)
-        
-        # Update the chat bubble with filtered output
-        if filtered_lines:
-            clean_response = '\n'.join(filtered_lines).strip()
-            if clean_response:
-                self.chat_widget_b.update_last_ai_message(clean_response)
-        elif self.inference_buffer_b.strip() and 'Loading' not in self.inference_buffer_b:
-            # Fallback: show raw buffer if we can't parse it
-            self.chat_widget_b.update_last_ai_message(self.inference_buffer_b.strip())
+        # Extract only the actual output (after "--- OUTPUT ---")
+        if "--- OUTPUT ---" in self.inference_buffer_b:
+            # Split and take everything after the marker
+            parts = self.inference_buffer_b.split("--- OUTPUT ---", 1)
+            if len(parts) > 1:
+                actual_output = parts[1].strip()
+                if actual_output:
+                    self.chat_widget_b.update_last_ai_message(actual_output)
+        else:
+            # Before we see OUTPUT marker, check if there's any useful partial response
+            # Filter out all log lines (lines starting with [INFO], [WARN], [OK], etc.)
+            lines = self.inference_buffer_b.split('\n')
+            filtered_lines = []
+            
+            for line in lines:
+                # Skip log messages and technical output
+                if any(x in line for x in [
+                    '[INFO]', '[WARN]', '[OK]', '[ERROR]',
+                    'FutureWarning', 'UserWarning', 'TRANSFORMERS_CACHE',
+                    'warnings.warn', 'DeprecationWarning', 'Loading tokenizer',
+                    'Loading base model', 'Windows detected', 'Generating...',
+                    'Loading checkpoint shards:', '|', 'it/s', '█', '▌'
+                ]):
+                    continue
+                # Keep everything else
+                if line.strip():
+                    filtered_lines.append(line)
+            
+            # Only update if we have filtered content
+            if filtered_lines:
+                clean_response = '\n'.join(filtered_lines).strip()
+                if clean_response:
+                    self.chat_widget_b.update_last_ai_message(clean_response)
     
     def _on_inference_finished_b(self):
         """Called when Model B inference finishes"""
@@ -4105,22 +4167,47 @@ respective package directories or official repositories.
         self.test_model_a.clear()
         self.test_model_a.addItem("None")
         
-        # Add base models
+        # Add base models from models folder
         if downloaded_models:
             for model_name in downloaded_models:
                 self.test_model_a.addItem(f"📦 {model_name}", str(models_dir / model_name))
         
-        # Add trained adapters
+        # Also check hf_models folder for downloaded base models
+        hf_models_dir = self.root / "hf_models"
+        if hf_models_dir.exists():
+            hf_downloaded = sorted([d.name for d in hf_models_dir.iterdir() if d.is_dir()])
+            for model_name in hf_downloaded:
+                # Convert directory name to HuggingFace format (org__model -> org/model)
+                display_name = model_name.replace("__", "/")
+                self.test_model_a.addItem(f"📦 {display_name}", str(hf_models_dir / model_name))
+        
+        # Add trained adapters (only if they have actual model weights)
         adapter_dir = self.root / "fine_tuned_adapter"
         if adapter_dir.exists():
-            trained_adapters = sorted([d for d in adapter_dir.iterdir() if d.is_dir() and (d / "adapter_config.json").exists()])
+            # Check for COMPLETE adapters (with model weights, not just config)
+            trained_adapters = []
+            for d in adapter_dir.iterdir():
+                if not d.is_dir():
+                    continue
+                # Check for actual model weight files
+                has_weights = any([
+                    (d / "adapter_model.safetensors").exists(),
+                    (d / "adapter_model.bin").exists(),
+                    (d / "pytorch_model.bin").exists(),
+                    (d / "model.safetensors").exists()
+                ])
+                if has_weights:
+                    trained_adapters.append(d)
+            
             if trained_adapters:
-                for adapter_path in trained_adapters:
+                for adapter_path in sorted(trained_adapters):
                     adapter_name = adapter_path.name
-                    self.test_model_a.addItem(f"🎯 {adapter_name}", str(adapter_path))
+                    self.test_model_a.addItem(f"🎯 {adapter_name} (adapter)", str(adapter_path))
         
-        if not downloaded_models and (not adapter_dir.exists() or not trained_adapters):
-            self.test_model_a.addItem("(No models available)")
+        # Show message if no models available at all
+        total_models_a = self.test_model_a.count() - 1  # Exclude "None" item
+        if total_models_a == 0:
+            self.test_model_a.addItem("(No models available - download from Models tab)")
         
         if current_a and current_a != "None":
             idx = self.test_model_a.findText(current_a)
@@ -4132,21 +4219,45 @@ respective package directories or official repositories.
         self.test_model_b.clear()
         self.test_model_b.addItem("None")
         
-        # Add base models
+        # Add base models from models folder
         if downloaded_models:
             for model_name in downloaded_models:
                 self.test_model_b.addItem(f"📦 {model_name}", str(models_dir / model_name))
         
-        # Add trained adapters
-        if adapter_dir.exists():
-            trained_adapters = sorted([d for d in adapter_dir.iterdir() if d.is_dir() and (d / "adapter_config.json").exists()])
-            if trained_adapters:
-                for adapter_path in trained_adapters:
-                    adapter_name = adapter_path.name
-                    self.test_model_b.addItem(f"🎯 {adapter_name}", str(adapter_path))
+        # Also check hf_models folder for downloaded base models
+        if hf_models_dir.exists():
+            hf_downloaded = sorted([d.name for d in hf_models_dir.iterdir() if d.is_dir()])
+            for model_name in hf_downloaded:
+                # Convert directory name to HuggingFace format (org__model -> org/model)
+                display_name = model_name.replace("__", "/")
+                self.test_model_b.addItem(f"📦 {display_name}", str(hf_models_dir / model_name))
         
-        if not downloaded_models and (not adapter_dir.exists() or not trained_adapters):
-            self.test_model_b.addItem("(No models available)")
+        # Add trained adapters (only if they have actual model weights)
+        if adapter_dir.exists():
+            # Check for COMPLETE adapters (with model weights, not just config)
+            trained_adapters = []
+            for d in adapter_dir.iterdir():
+                if not d.is_dir():
+                    continue
+                # Check for actual model weight files
+                has_weights = any([
+                    (d / "adapter_model.safetensors").exists(),
+                    (d / "adapter_model.bin").exists(),
+                    (d / "pytorch_model.bin").exists(),
+                    (d / "model.safetensors").exists()
+                ])
+                if has_weights:
+                    trained_adapters.append(d)
+            
+            if trained_adapters:
+                for adapter_path in sorted(trained_adapters):
+                    adapter_name = adapter_path.name
+                    self.test_model_b.addItem(f"🎯 {adapter_name} (adapter)", str(adapter_path))
+        
+        # Show message if no models available at all
+        total_models_b = self.test_model_b.count() - 1  # Exclude "None" item
+        if total_models_b == 0:
+            self.test_model_b.addItem("(No models available - download from Models tab)")
         
         if current_b and current_b != "None":
             idx = self.test_model_b.findText(current_b)
