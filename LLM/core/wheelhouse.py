@@ -53,7 +53,7 @@ class WheelhouseManager:
         """Log message to console"""
         print(f"[WHEELHOUSE] {message}")
     
-    def prepare_wheelhouse(self, cuda_config: str, python_version: Tuple[int, int], package_versions: dict = None) -> Tuple[bool, str]:
+    def prepare_wheelhouse(self, cuda_config: str, python_version: Tuple[int, int], package_versions: dict = None, force_redownload: bool = False) -> Tuple[bool, str]:
         """
         Download all wheels to wheelhouse with exact versions.
         
@@ -62,6 +62,8 @@ class WheelhouseManager:
             python_version: Python version tuple (e.g., (3, 12))
             package_versions: Optional dict of {package_name: exact_version} from ProfileSelector.
                             If provided, uses these instead of manifest.
+            force_redownload: If True, clear wheelhouse and re-download everything.
+                            If False (default), skip if wheelhouse is already complete.
         
         Returns:
             Tuple of (success: bool, error_message: str)
@@ -69,8 +71,16 @@ class WheelhouseManager:
         try:
             self.log(f"Preparing wheelhouse for {cuda_config}, Python {python_version[0]}.{python_version[1]}")
             
-            # Clear existing wheelhouse
-            self._clear_wheelhouse()
+            # Check if wheelhouse already has wheels (skip re-download unless forced)
+            existing_wheels = list(self.wheelhouse.glob("*.whl"))
+            if existing_wheels and not force_redownload:
+                self.log(f"Wheelhouse already contains {len(existing_wheels)} wheels - skipping re-download")
+                self.log("(Delete wheelhouse folder or set force_redownload=True to re-download)")
+                return True, ""
+            
+            # Clear existing wheelhouse only if forced or if starting fresh
+            if force_redownload or not existing_wheels:
+                self._clear_wheelhouse()
             
             # If package_versions provided, use hardware-adaptive installation
             if package_versions:
