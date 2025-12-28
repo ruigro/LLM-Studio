@@ -128,12 +128,12 @@
   },
   
   "compute_capability_map": {
-    "10.0": "cuda124_ampere_ada_blackwell",
-    "9.0": "cuda124_ampere_ada_blackwell",
-    "8.9": "cuda124_ampere_ada_blackwell",
-    "8.6": "cuda121_ampere",
-    "8.0": "cuda121_ampere",
-    "7.5": "cuda118_turing"
+    "10.0": {"architecture": "Blackwell", "profile": "cuda124_ampere_ada_blackwell"},
+    "9.0": {"architecture": "Hopper", "profile": "cuda124_ampere_ada_blackwell"},
+    "8.9": {"architecture": "Ada Lovelace", "profile": "cuda124_ampere_ada_blackwell"},
+    "8.6": {"architecture": "Ampere (RTX 30xx)", "profile": "cuda121_ampere"},
+    "8.0": {"architecture": "Ampere (A-series)", "profile": "cuda121_ampere"},
+    "7.5": {"architecture": "Turing (RTX 20xx)", "profile": "cuda118_turing"}
   },
   
   "common_packages": {
