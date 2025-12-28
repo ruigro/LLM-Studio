@@ -167,7 +167,65 @@ class InstallerV2:
             if not success:
                 self.log(f"\n✗ Installation failed:")
                 self.log(f"  {error}")
-                return False
+                
+                # Check if this is a version mismatch error (wheelhouse has wrong versions)
+                if "Could not find a version" in error or "No matching distribution" in error:
+                    self.log("\n⚠ Detected version mismatch - this usually means:")
+                    self.log("  - Wheelhouse contains packages from a different hardware profile")
+                    self.log("  - Or cached packages are outdated")
+                    self.log("\n🔄 Auto-fixing: Clearing wheelhouse and retrying...")
+                    
+                    # Clear wheelhouse
+                    if self.wheelhouse.exists():
+                        import shutil
+                        shutil.rmtree(self.wheelhouse, ignore_errors=True)
+                        self.log("  ✓ Wheelhouse cleared")
+                    
+                    # Clear venv
+                    if self.venv.exists():
+                        import shutil
+                        shutil.rmtree(self.venv, ignore_errors=True)
+                        self.log("  ✓ Venv cleared")
+                    
+                    self.log("\n🔄 Retrying installation with fresh downloads...")
+                    self.log("=" * 60)
+                    
+                    # Retry: Prepare wheelhouse again
+                    self.log("\nPHASE 1 (RETRY): Wheelhouse Preparation")
+                    self.log("-" * 60)
+                    
+                    wheelhouse_mgr = WheelhouseManager(self.manifest_path, self.wheelhouse)
+                    python_version = (sys.version_info.major, sys.version_info.minor)
+                    success, error = wheelhouse_mgr.prepare_wheelhouse(
+                        cuda_config, 
+                        python_version,
+                        package_versions,
+                        force_redownload=True  # Force fresh download
+                    )
+                    
+                    if not success:
+                        self.log(f"\n✗ Retry failed - wheelhouse preparation:")
+                        self.log(f"  {error}")
+                        return False
+                    
+                    self.log("\n✓ Wheelhouse ready (retry)")
+                    
+                    # Retry: Install again
+                    self.log("\nPHASE 2-6 (RETRY): Environment Installation")
+                    self.log("-" * 60)
+                    
+                    installer = ImmutableInstaller(self.venv, self.wheelhouse, self.manifest_path)
+                    success, error = installer.install(cuda_config)
+                    
+                    if not success:
+                        self.log(f"\n✗ Installation still failed after retry:")
+                        self.log(f"  {error}")
+                        return False
+                    
+                    self.log("\n✓ Installation succeeded after retry!")
+                else:
+                    # Not a version mismatch error - don't retry
+                    return False
             
             self.log("\n" + "=" * 60)
             self.log("✓ Installation complete!")

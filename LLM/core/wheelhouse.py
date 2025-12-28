@@ -74,12 +74,34 @@ class WheelhouseManager:
             # Check if wheelhouse already has wheels (skip re-download unless forced)
             existing_wheels = list(self.wheelhouse.glob("*.whl"))
             if existing_wheels and not force_redownload:
-                self.log(f"Wheelhouse already contains {len(existing_wheels)} wheels - skipping re-download")
-                self.log("(Delete wheelhouse folder or set force_redownload=True to re-download)")
-                return True, ""
+                # Verify wheelhouse has correct versions (if using profile-based installation)
+                if package_versions:
+                    # Check if critical packages match expected versions
+                    critical_packages = ["torch", "transformers", "tokenizers"]
+                    mismatch = False
+                    for pkg in critical_packages:
+                        if pkg in package_versions:
+                            expected_version = package_versions[pkg]
+                            # Check if wheel with this version exists
+                            matching_wheels = list(self.wheelhouse.glob(f"{pkg}-{expected_version}*.whl"))
+                            if not matching_wheels:
+                                self.log(f"⚠ Version mismatch: {pkg}=={expected_version} not found in wheelhouse")
+                                mismatch = True
+                                break
+                    
+                    if mismatch:
+                        self.log("Wheelhouse contains wrong versions - clearing and re-downloading")
+                        self._clear_wheelhouse()
+                    else:
+                        self.log(f"✓ Wheelhouse already contains {len(existing_wheels)} wheels with correct versions - skipping re-download")
+                        return True, ""
+                else:
+                    self.log(f"Wheelhouse already contains {len(existing_wheels)} wheels - skipping re-download")
+                    self.log("(Delete wheelhouse folder or set force_redownload=True to re-download)")
+                    return True, ""
             
             # Clear existing wheelhouse only if forced or if starting fresh
-            if force_redownload or not existing_wheels:
+            elif force_redownload:
                 self._clear_wheelhouse()
             
             # If package_versions provided, use hardware-adaptive installation
