@@ -143,11 +143,13 @@ class ProfileSelector:
         
         # Fallback to default
         if not selected_profile:
-            selected_profile = self.fallback_rules["unknown_gpu"]["profile"]
+            # Try "unknown_gpu" first, then "unknown_older_gpu" as safest fallback
+            fallback_rule = self.fallback_rules.get("unknown_gpu") or self.fallback_rules.get("unknown_older_gpu")
+            selected_profile = fallback_rule["profile"]
             warnings.append(
                 f"Could not determine optimal profile for {gpu_model}. "
                 f"Using fallback: {selected_profile}. "
-                f"Reason: {self.fallback_rules['unknown_gpu']['reason']}"
+                f"Reason: {fallback_rule['reason']}"
             )
             print(f"[PROFILE] Using fallback profile '{selected_profile}'")
         
