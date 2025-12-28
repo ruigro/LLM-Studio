@@ -108,7 +108,7 @@
     }
   },
   
-  "compute_capability_to_profile": {
+  "compute_capability_map": {
     "10.0": "cuda124_ampere_ada_blackwell",
     "9.0": "cuda124_ampere_ada_blackwell",
     "8.9": "cuda124_ampere_ada_blackwell",

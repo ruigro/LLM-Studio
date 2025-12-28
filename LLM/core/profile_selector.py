@@ -27,9 +27,10 @@ class ProfileSelector:
         
         self.profiles = self.matrix["profiles"]
         self.fallback_rules = self.matrix["fallback_rules"]
-        self.compute_map = self.matrix["compute_capability_map"]
-        self.cuda_map = self.matrix["cuda_version_map"]
-        self.common_packages = self.matrix["common_packages"]
+        # Support both field names for backwards compatibility
+        self.compute_map = self.matrix.get("compute_capability_map") or self.matrix.get("compute_capability_to_profile", {})
+        self.cuda_map = self.matrix.get("cuda_version_map", {})
+        self.common_packages = self.matrix.get("common_packages", {})
     
     def select_profile(self, hardware_profile: Dict) -> Tuple[str, Dict, list]:
         """
