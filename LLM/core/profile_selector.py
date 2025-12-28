@@ -95,6 +95,35 @@ class ProfileSelector:
                     )
                     print(f"[PROFILE] Using closest profile '{profile_name}' for compute {compute_cap}")
         
+        # Fallback: Detect by GPU model name if compute capability is missing
+        if not selected_profile and gpu_model and gpu_model != "unknown":
+            gpu_lower = gpu_model.lower()
+            # RTX 50 series (Blackwell)
+            if any(x in gpu_lower for x in ["rtx 5090", "rtx 5080", "rtx 5070", "rtx 5060"]):
+                selected_profile = "cuda124_ampere_ada_blackwell"
+                warnings.append(f"Detected {gpu_model} - using RTX 50 series profile")
+                print(f"[PROFILE] Selected '{selected_profile}' based on GPU model name")
+            # RTX 40 series (Ada Lovelace)
+            elif any(x in gpu_lower for x in ["rtx 4090", "rtx 4080", "rtx 4070", "rtx 4060"]):
+                selected_profile = "cuda124_ampere_ada_blackwell"
+                warnings.append(f"Detected {gpu_model} - using RTX 40 series profile")
+                print(f"[PROFILE] Selected '{selected_profile}' based on GPU model name")
+            # RTX 30 series (Ampere)
+            elif any(x in gpu_lower for x in ["rtx 3090", "rtx 3080", "rtx 3070", "rtx 3060"]):
+                selected_profile = "cuda121_ampere"
+                warnings.append(f"Detected {gpu_model} - using RTX 30 series profile")
+                print(f"[PROFILE] Selected '{selected_profile}' based on GPU model name")
+            # RTX 20 series (Turing) + T-series Quadro
+            elif any(x in gpu_lower for x in ["rtx 2080", "rtx 2070", "rtx 2060", "t1000", "t600", "t400", "quadro t"]):
+                selected_profile = "cuda118_turing"
+                warnings.append(f"Detected {gpu_model} - using RTX 20 series / Quadro T profile")
+                print(f"[PROFILE] Selected '{selected_profile}' based on GPU model name")
+            # A-series workstation
+            elif any(x in gpu_lower for x in ["a100", "a30", "a10", "a6000", "a5000", "a4000", "a2000"]):
+                selected_profile = "cuda121_ampere"
+                warnings.append(f"Detected {gpu_model} - using Ampere workstation profile")
+                print(f"[PROFILE] Selected '{selected_profile}' based on GPU model name")
+        
         # Secondary selection: by CUDA version
         if not selected_profile and cuda_version:
             # Try exact match
