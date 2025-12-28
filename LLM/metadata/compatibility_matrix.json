@@ -105,6 +105,25 @@
     "no_cuda": {
       "action": "error",
       "message": "CPU-only mode not yet implemented. NVIDIA GPU required."
+    },
+    "low_vram": {
+      "threshold_gb": 8,
+      "action": "warn",
+      "message": "GPU has less than 8GB VRAM. Fine-tuning large models may fail or require smaller batch sizes."
+    },
+    "very_low_vram": {
+      "threshold_gb": 4,
+      "action": "block",
+      "message": "GPU has less than 4GB VRAM. This is insufficient for LLM fine-tuning. Minimum 6GB recommended."
+    },
+    "old_cuda": {
+      "cuda_max": "11.7",
+      "action": "warn",
+      "message": "CUDA version is older than 11.8. Please update NVIDIA drivers for better compatibility."
+    },
+    "mixed_gpus": {
+      "action": "use_lowest_common",
+      "message": "Multiple GPUs detected with different capabilities. Using configuration for the least capable GPU to ensure compatibility."
     }
   },
   
