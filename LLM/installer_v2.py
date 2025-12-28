@@ -168,26 +168,31 @@ class InstallerV2:
                 self.log(f"\n✗ Installation failed:")
                 self.log(f"  {error}")
                 
-                # Check if this is a version mismatch error (wheelhouse has wrong versions)
-                if "Could not find a version" in error or "No matching distribution" in error:
-                    self.log("\n⚠ Detected version mismatch - this usually means:")
-                    self.log("  - Wheelhouse contains packages from a different hardware profile")
-                    self.log("  - Or cached packages are outdated")
-                    self.log("\n🔄 Auto-fixing: Clearing wheelhouse and retrying...")
+                # Check if this is SPECIFICALLY a version mismatch error with the wheelhouse
+                # Only retry if we see package version errors AND wheelhouse exists
+                is_version_error = any(phrase in error for phrase in [
+                    "Could not find a version",
+                    "No matching distribution found"
+                ])
+                
+                has_wheelhouse = self.wheelhouse.exists() and len(list(self.wheelhouse.glob("*.whl"))) > 0
+                
+                if is_version_error and has_wheelhouse:
+                    self.log("\n⚠ Detected version mismatch between wheelhouse and installation requirements")
+                    self.log("  This usually means the wheelhouse was built for different hardware")
+                    self.log("\n🔄 Auto-fixing: Clearing wheelhouse and re-downloading for your hardware...")
                     
-                    # Clear wheelhouse
-                    if self.wheelhouse.exists():
-                        import shutil
-                        shutil.rmtree(self.wheelhouse, ignore_errors=True)
-                        self.log("  ✓ Wheelhouse cleared")
+                    # Clear wheelhouse only
+                    import shutil
+                    shutil.rmtree(self.wheelhouse, ignore_errors=True)
+                    self.log("  ✓ Wheelhouse cleared")
                     
                     # Clear venv
                     if self.venv.exists():
-                        import shutil
                         shutil.rmtree(self.venv, ignore_errors=True)
                         self.log("  ✓ Venv cleared")
                     
-                    self.log("\n🔄 Retrying installation with fresh downloads...")
+                    self.log("\n🔄 Retrying installation with fresh downloads for your GPU...")
                     self.log("=" * 60)
                     
                     # Retry: Prepare wheelhouse again
@@ -224,7 +229,7 @@ class InstallerV2:
                     
                     self.log("\n✓ Installation succeeded after retry!")
                 else:
-                    # Not a version mismatch error - don't retry
+                    # Not a version mismatch error - just fail without retry
                     return False
             
             self.log("\n" + "=" * 60)
