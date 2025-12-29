@@ -192,6 +192,7 @@ QListWidget {
 }
 QLabel {
     color: #fafafa;
+    text-decoration: none;
 }
 QFrame {
     border: none;
@@ -265,12 +266,460 @@ QListWidget {
 }
 QLabel {
     color: #262730;
+    text-decoration: none;
 }
 QToolBar {
     background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #667eea, stop:1 #764ba2);
     border: none;
     spacing: 10px;
 }
+"""
+
+# Color theme definitions - each color has dark and light variants
+COLOR_THEMES = {
+    "purple": {
+        "dark": {
+            "primary": "#667eea",
+            "secondary": "#764ba2",
+            "accent": "#7c8ef5"
+        },
+        "light": {
+            "primary": "#667eea",
+            "secondary": "#764ba2",
+            "accent": "#7c8ef5"
+        }
+    },
+    "yellow": {
+        "dark": {
+            "primary": "#fbbf24",
+            "secondary": "#f59e0b",
+            "accent": "#fcd34d"
+        },
+        "light": {
+            "primary": "#d97706",
+            "secondary": "#f59e0b",
+            "accent": "#fbbf24"
+        }
+    },
+    "red": {
+        "dark": {
+            "primary": "#ef4444",
+            "secondary": "#dc2626",
+            "accent": "#f87171"
+        },
+        "light": {
+            "primary": "#dc2626",
+            "secondary": "#b91c1c",
+            "accent": "#ef4444"
+        }
+    },
+    "navy": {
+        "dark": {
+            "primary": "#3b82f6",
+            "secondary": "#1e40af",
+            "accent": "#60a5fa"
+        },
+        "light": {
+            "primary": "#1e40af",
+            "secondary": "#1e3a8a",
+            "accent": "#3b82f6"
+        }
+    },
+    "green": {
+        "dark": {
+            "primary": "#10b981",
+            "secondary": "#059669",
+            "accent": "#34d399"
+        },
+        "light": {
+            "primary": "#059669",
+            "secondary": "#047857",
+            "accent": "#10b981"
+        }
+    },
+    "gray": {
+        "dark": {
+            "primary": "#6b7280",
+            "secondary": "#4b5563",
+            "accent": "#9ca3af"
+        },
+        "light": {
+            "primary": "#4b5563",
+            "secondary": "#374151",
+            "accent": "#6b7280"
+        }
+    }
+}
+
+
+def hex_to_rgba(hex_color: str, alpha: float = 1.0) -> str:
+    """Convert hex color to rgba string"""
+    hex_color = hex_color.lstrip('#')
+    r = int(hex_color[0:2], 16)
+    g = int(hex_color[2:4], 16)
+    b = int(hex_color[4:6], 16)
+    return f"rgba({r}, {g}, {b}, {alpha})"
+
+def get_theme_stylesheet(dark_mode: bool, color_theme: str) -> str:
+    """Generate theme stylesheet with specified color theme"""
+    colors = COLOR_THEMES[color_theme]["dark" if dark_mode else "light"]
+    primary = colors["primary"]
+    secondary = colors["secondary"]
+    accent = colors["accent"]
+    
+    # Convert to rgba with 40% transparency (60% opacity) for transparent elements
+    primary_rgba = hex_to_rgba(primary, 0.6)
+    secondary_rgba = hex_to_rgba(secondary, 0.6)
+    accent_rgba = hex_to_rgba(accent, 0.65)
+    
+    if dark_mode:
+        return f"""
+QMainWindow {{
+    background-color: #0e1117;
+    color: #fafafa;
+    border: 2px solid {primary};
+    border-radius: 12px;
+}}
+/* Remove all underlines from HTML content in QLabel - comprehensive rules */
+QLabel {{
+    text-decoration: none !important;
+    border: none !important;
+    border-bottom: none !important;
+}}
+QLabel * {{
+    text-decoration: none !important;
+    border: none !important;
+    border-bottom: none !important;
+}}
+/* Remove underlines from all HTML elements in QLabel */
+QLabel a {{
+    text-decoration: none !important;
+    border: none !important;
+    border-bottom: none !important;
+}}
+QLabel b {{
+    text-decoration: none !important;
+    border: none !important;
+    border-bottom: none !important;
+}}
+QLabel strong {{
+    text-decoration: none !important;
+    border: none !important;
+    border-bottom: none !important;
+}}
+QLabel h1, QLabel h2, QLabel h3, QLabel h4, QLabel h5, QLabel h6 {{
+    text-decoration: none !important;
+    border: none !important;
+    border-bottom: none !important;
+}}
+QLabel p {{
+    text-decoration: none !important;
+    border: none !important;
+    border-bottom: none !important;
+}}
+QLabel span {{
+    text-decoration: none !important;
+    border: none !important;
+    border-bottom: none !important;
+}}
+QLabel li {{
+    text-decoration: none !important;
+    border: none !important;
+    border-bottom: none !important;
+}}
+QLabel div {{
+    text-decoration: none !important;
+    border: none !important;
+    border-bottom: none !important;
+}}
+/* Window border container with transparency */
+QFrame#windowBorderContainer {{
+    background: transparent;
+    border: 2px solid {primary};
+    border-radius: 12px;
+}}
+QWidget {{
+    background-color: rgba(14, 17, 23, 0.2);
+    color: #fafafa;
+}}
+/* Header styling with transparency */
+/* 
+ * IMPORTANT: NEVER ADD border-bottom TO QFrame ELEMENTS!
+ * 
+ * This was removed to fix double-line issues at the bottom of pages and the app window.
+ * Adding border-bottom to QFrame creates unwanted bottom borders on all pages.
+ * If you need a border, use a specific object name or class, not the global QFrame rule.
+ */
+QFrame {{
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+        stop:0 rgba(60, 60, 80, 0.2), stop:0.5 rgba(40, 40, 60, 0.2), stop:1 rgba(60, 60, 80, 0.2));
+    border: none;
+    border-bottom: none;
+    border-radius: 0px;
+}}
+/* Navigation buttons with transparency */
+QPushButton {{
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 {primary_rgba}, stop:1 {secondary_rgba});
+    color: white;
+    border: none;
+    padding: 10px 20px;
+    font-size: 14pt;
+    font-weight: bold;
+    border-top-left-radius: 4px;
+    border-top-right-radius: 4px;
+}}
+QPushButton:checked {{
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 {secondary_rgba}, stop:1 {primary_rgba});
+}}
+QPushButton:hover {{
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 {accent_rgba}, stop:1 {primary_rgba});
+}}
+QTabWidget::pane {{
+    border: 1px solid #262730;
+    background-color: #0e1117;
+}}
+QTabBar::tab {{
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 {primary}, stop:1 {secondary});
+    color: white;
+    padding: 8px 16px;
+    margin-right: 2px;
+    border-top-left-radius: 4px;
+    border-top-right-radius: 4px;
+}}
+QTabBar::tab:selected {{
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 {secondary}, stop:1 {primary});
+}}
+QLineEdit, QTextEdit, QPlainTextEdit, QComboBox, QSpinBox, QDoubleSpinBox {{
+    background-color: #262730;
+    color: #fafafa;
+    border: 1px solid #3a3a3a;
+    border-radius: 4px;
+    padding: 4px;
+}}
+/* Training dashboard buttons */
+QPushButton#train_start, QPushButton#train_stop {{
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 {primary_rgba}, stop:1 {secondary_rgba});
+    color: white;
+    border: 2px solid {primary};
+    border-radius: 8px;
+    padding: 12px 24px;
+    font-size: 16pt;
+    font-weight: bold;
+    min-height: 50px;
+}}
+QPushButton#train_start:hover, QPushButton#train_stop:hover {{
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 {secondary_rgba}, stop:1 {primary_rgba});
+    border: 2px solid {accent};
+}}
+/* Regular buttons (not navigation) with transparency */
+QPushButton[class!="nav-button"] {{
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 {primary_rgba}, stop:1 {secondary_rgba});
+    color: white;
+    border: none;
+    border-radius: 4px;
+    padding: 6px 12px;
+    font-weight: bold;
+}}
+QPushButton[class!="nav-button"]:hover {{
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 {secondary_rgba}, stop:1 {primary_rgba});
+}}
+QPushButton:disabled {{
+    background-color: rgba(58, 58, 58, 0.2);
+    color: #808080;
+}}
+QListWidget {{
+    background-color: #262730;
+    color: #fafafa;
+    border: 1px solid #3a3a3a;
+}}
+QLabel {{
+    color: #fafafa;
+    text-decoration: none;
+}}
+QFrame {{
+    border: none;
+    background-color: #1a1d23;
+}}
+QFrame[frameShape="4"] {{
+    border: none;
+    border-radius: 8px;
+    background-color: #1a1d23;
+}}
+QToolBar {{
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 {primary}, stop:1 {secondary});
+    border: none;
+    spacing: 10px;
+}}
+"""
+    else:
+        return f"""
+QMainWindow {{
+    background-color: #ffffff;
+    color: #262730;
+    border: 2px solid {primary};
+    border-radius: 12px;
+}}
+/* Remove all underlines from HTML content in QLabel - comprehensive rules */
+QLabel {{
+    text-decoration: none !important;
+    border: none !important;
+    border-bottom: none !important;
+}}
+QLabel * {{
+    text-decoration: none !important;
+    border: none !important;
+    border-bottom: none !important;
+}}
+/* Remove underlines from all HTML elements in QLabel */
+QLabel a {{
+    text-decoration: none !important;
+    border: none !important;
+    border-bottom: none !important;
+}}
+QLabel b {{
+    text-decoration: none !important;
+    border: none !important;
+    border-bottom: none !important;
+}}
+QLabel strong {{
+    text-decoration: none !important;
+    border: none !important;
+    border-bottom: none !important;
+}}
+QLabel h1, QLabel h2, QLabel h3, QLabel h4, QLabel h5, QLabel h6 {{
+    text-decoration: none !important;
+    border: none !important;
+    border-bottom: none !important;
+}}
+QLabel p {{
+    text-decoration: none !important;
+    border: none !important;
+    border-bottom: none !important;
+}}
+QLabel span {{
+    text-decoration: none !important;
+    border: none !important;
+    border-bottom: none !important;
+}}
+QLabel li {{
+    text-decoration: none !important;
+    border: none !important;
+    border-bottom: none !important;
+}}
+QLabel div {{
+    text-decoration: none !important;
+    border: none !important;
+    border-bottom: none !important;
+}}
+/* Window border container with transparency */
+QFrame#windowBorderContainer {{
+    background: transparent;
+    border: 2px solid {primary};
+    border-radius: 12px;
+}}
+QWidget {{
+    background-color: rgba(255, 255, 255, 0.2);
+    color: #262730;
+}}
+/* Header styling with transparency */
+/* 
+ * IMPORTANT: NEVER ADD border-bottom TO QFrame ELEMENTS!
+ * 
+ * This was removed to fix double-line issues at the bottom of pages and the app window.
+ * Adding border-bottom to QFrame creates unwanted bottom borders on all pages.
+ * If you need a border, use a specific object name or class, not the global QFrame rule.
+ */
+QFrame {{
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+        stop:0 rgba(240, 240, 250, 0.2), stop:0.5 rgba(220, 220, 240, 0.2), stop:1 rgba(200, 200, 230, 0.2));
+    border: none;
+    border-bottom: none;
+    border-radius: 0px;
+}}
+/* Navigation buttons with transparency */
+QPushButton {{
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 {primary_rgba}, stop:1 {secondary_rgba});
+    color: white;
+    border: none;
+    padding: 10px 20px;
+    font-size: 14pt;
+    font-weight: bold;
+    border-top-left-radius: 4px;
+    border-top-right-radius: 4px;
+}}
+QPushButton:checked {{
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 {secondary_rgba}, stop:1 {primary_rgba});
+}}
+QPushButton:hover {{
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 {accent_rgba}, stop:1 {primary_rgba});
+}}
+QTabWidget::pane {{
+    border: 1px solid #e0e0e0;
+    background-color: #ffffff;
+}}
+QTabBar::tab {{
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 {primary}, stop:1 {secondary});
+    color: white;
+    padding: 8px 16px;
+    margin-right: 2px;
+    border-top-left-radius: 4px;
+    border-top-right-radius: 4px;
+}}
+QTabBar::tab:selected {{
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 {secondary}, stop:1 {primary});
+}}
+QLineEdit, QTextEdit, QPlainTextEdit, QComboBox, QSpinBox, QDoubleSpinBox {{
+    background-color: #f5f5f5;
+    color: #262730;
+    border: 1px solid #d0d0d0;
+    border-radius: 4px;
+    padding: 4px;
+}}
+/* Training dashboard buttons */
+QPushButton#train_start, QPushButton#train_stop {{
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 {primary_rgba}, stop:1 {secondary_rgba});
+    color: white;
+    border: 2px solid {primary};
+    border-radius: 8px;
+    padding: 12px 24px;
+    font-size: 16pt;
+    font-weight: bold;
+    min-height: 50px;
+}}
+QPushButton#train_start:hover, QPushButton#train_stop:hover {{
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 {secondary_rgba}, stop:1 {primary_rgba});
+    border: 2px solid {accent};
+}}
+/* Regular buttons (not navigation) with transparency */
+QPushButton[class!="nav-button"] {{
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 {primary_rgba}, stop:1 {secondary_rgba});
+    color: white;
+    border: none;
+    border-radius: 4px;
+    padding: 6px 12px;
+    font-weight: bold;
+}}
+QPushButton[class!="nav-button"]:hover {{
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 {secondary_rgba}, stop:1 {primary_rgba});
+}}
+QPushButton:disabled {{
+    background-color: rgba(224, 224, 224, 0.2);
+    color: #a0a0a0;
+}}
+QListWidget {{
+    background-color: #f5f5f5;
+    color: #262730;
+    border: 1px solid #d0d0d0;
+}}
+QLabel {{
+    color: #262730;
+    text-decoration: none;
+}}
+QToolBar {{
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 {primary}, stop:1 {secondary});
+    border: none;
+    spacing: 10px;
+}}
 """
 
 
@@ -285,6 +734,15 @@ class MainWindow(QMainWindow):
 
         self.root = get_app_root()
         self.dark_mode = True  # Start in dark mode
+        self.color_theme = "purple"  # Default color theme
+        
+        # Store references to widgets with hardcoded colors for theme updates
+        self.themed_widgets = {
+            "frames": [],
+            "labels": [],
+            "buttons": [],
+            "containers": []
+        }
         
         # Window dragging and resizing support
         self.drag_position = None
@@ -383,15 +841,7 @@ class MainWindow(QMainWindow):
         header_widget = QFrame()
         header_widget.setFrameShape(QFrame.StyledPanel)
         header_widget.setMinimumHeight(80)
-        header_widget.setStyleSheet("""
-            QFrame {
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, 
-                    stop:0 #667eea, stop:0.5 #764ba2, stop:1 #f093fb);
-                border: 2px solid #667eea;
-                border-radius: 12px;
-                padding: 15px;
-            }
-        """)
+        # Header styling will be applied by theme system
         # Store header reference for dragging
         self.header_widget = header_widget
         # Make header draggable
@@ -402,31 +852,130 @@ class MainWindow(QMainWindow):
         
         header_layout = QHBoxLayout(header_widget)
         header_layout.setContentsMargins(20, 10, 20, 10)
-        header_layout.setSpacing(20)
+        header_layout.setSpacing(15)
         
-        # Left: Theme toggle button
-        theme_btn = QPushButton("🌙 Dark Mode")
-        theme_btn.setMinimumHeight(50)
-        theme_btn.setStyleSheet("""
-            QPushButton {
+        # Left: Theme controls container
+        theme_container = QWidget()
+        theme_container.setStyleSheet("background: transparent;")
+        theme_layout = QHBoxLayout(theme_container)
+        theme_layout.setContentsMargins(0, 0, 0, 0)
+        theme_layout.setSpacing(0)  # No spacing - attach theme button to color selector
+        
+        # Dark/Light mode toggle button (same size as color selector, icon on top, text below)
+        theme_btn_container = QWidget()
+        theme_btn_container.setFixedSize(70, 50)
+        theme_btn_container.setStyleSheet("""
+            QWidget {
                 background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                    stop:0 rgba(60, 60, 80, 0.6), stop:1 rgba(40, 40, 60, 0.6));
-                color: white;
-                border: 2px solid rgba(255, 255, 255, 0.4);
-                border-radius: 12px;
-                padding: 10px 20px;
-                font-size: 14pt;
-                font-weight: bold;
-            }
-            QPushButton:hover {
-                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                    stop:0 rgba(80, 80, 100, 0.7), stop:1 rgba(60, 60, 80, 0.7));
-                border: 2px solid rgba(255, 255, 255, 0.6);
+                    stop:0 rgba(60, 60, 80, 0.8), stop:1 rgba(40, 40, 60, 0.8));
+                border: 1px solid rgba(255, 255, 255, 0.2);
+                border-radius: 6px;
             }
         """)
-        theme_btn.clicked.connect(self._toggle_theme)
-        self.theme_btn = theme_btn
-        header_layout.addWidget(theme_btn)
+        theme_btn_layout = QVBoxLayout(theme_btn_container)
+        theme_btn_layout.setContentsMargins(4, 4, 4, 4)
+        theme_btn_layout.setSpacing(2)
+        theme_btn_layout.setAlignment(Qt.AlignCenter)
+        
+        # Icon label (bigger)
+        theme_icon = QLabel("🌙")
+        theme_icon.setAlignment(Qt.AlignCenter)
+        theme_icon.setStyleSheet("""
+            QLabel {
+                background: transparent;
+                color: white;
+                font-size: 20pt;
+                border: none;
+            }
+        """)
+        theme_btn_layout.addWidget(theme_icon)
+        
+        # Text label
+        theme_text = QLabel("Dark")
+        theme_text.setAlignment(Qt.AlignCenter)
+        theme_text.setStyleSheet("""
+            QLabel {
+                background: transparent;
+                color: white;
+                font-size: 9pt;
+                font-weight: bold;
+                border: none;
+            }
+        """)
+        theme_btn_layout.addWidget(theme_text)
+        
+        # Make the container clickable
+        theme_btn_container.mousePressEvent = lambda e: self._toggle_theme()
+        theme_btn_container.setCursor(QCursor(Qt.PointingHandCursor))
+        
+        # Store references for updates
+        self.theme_btn_container = theme_btn_container
+        self.theme_icon = theme_icon
+        self.theme_text = theme_text
+        theme_layout.addWidget(theme_btn_container)
+        
+        # Color theme selector (2 rows x 3 columns)
+        color_selector = QWidget()
+        color_selector.setFixedSize(70, 50)
+        color_selector.setStyleSheet("background: rgba(40, 40, 60, 0.4); border: 1px solid rgba(255, 255, 255, 0.2); border-radius: 6px;")
+        color_layout = QVBoxLayout(color_selector)
+        color_layout.setContentsMargins(4, 4, 4, 4)
+        color_layout.setSpacing(3)
+        
+        # Row 1: Purple, Yellow, Red
+        row1 = QHBoxLayout()
+        row1.setContentsMargins(0, 0, 0, 0)
+        row1.setSpacing(3)
+        
+        # Row 2: Navy, Green, Gray
+        row2 = QHBoxLayout()
+        row2.setContentsMargins(0, 0, 0, 0)
+        row2.setSpacing(3)
+        
+        color_themes = ["purple", "yellow", "red", "navy", "green", "gray"]
+        color_colors = {
+            "purple": "#667eea",
+            "yellow": "#fbbf24",
+            "red": "#ef4444",
+            "navy": "#3b82f6",
+            "green": "#10b981",
+            "gray": "#6b7280"
+        }
+        
+        self.color_buttons = {}
+        for i, theme_name in enumerate(color_themes):
+            color_btn = QPushButton()
+            color_btn.setFixedSize(18, 18)
+            color_btn.setCheckable(True)
+            color_btn.setStyleSheet(f"""
+                QPushButton {{
+                    background-color: {color_colors[theme_name]};
+                    border: 2px solid rgba(255, 255, 255, 0.4);
+                    border-radius: 3px;
+                }}
+                QPushButton:checked {{
+                    border: 3px solid white;
+                }}
+                QPushButton:hover {{
+                    border: 2px solid rgba(255, 255, 255, 0.8);
+                }}
+            """)
+            color_btn.clicked.connect(lambda checked, t=theme_name: self._set_color_theme(t))
+            if theme_name == "purple":
+                color_btn.setChecked(True)
+            self.color_buttons[theme_name] = color_btn
+            
+            # Add to appropriate row
+            if i < 3:
+                row1.addWidget(color_btn)
+            else:
+                row2.addWidget(color_btn)
+        
+        color_layout.addLayout(row1)
+        color_layout.addLayout(row2)
+        
+        theme_layout.addWidget(color_selector)
+        header_layout.addWidget(theme_container)
         
         # Center: App title (transparent background)
         title_label = QLabel(APP_TITLE)
@@ -542,29 +1091,11 @@ class MainWindow(QMainWindow):
         self.requirements_btn = QPushButton("🔧")  # Tool icon only
         self.info_btn = QPushButton("ℹ️ Info")
         
-        # Style buttons to look like tabs
-        tab_button_style = """
-            QPushButton {
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #667eea, stop:1 #764ba2);
-                color: white;
-                border: none;
-                padding: 10px 20px;
-                font-size: 14pt;
-                font-weight: bold;
-                border-top-left-radius: 4px;
-                border-top-right-radius: 4px;
-            }
-            QPushButton:checked {
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #764ba2, stop:1 #667eea);
-            }
-            QPushButton:hover {
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #7c8ef5, stop:1 #8a5cb8);
-            }
-        """
+        # Navigation buttons will be styled by theme system
         
         for btn in [self.home_btn, self.train_btn, self.download_btn, self.test_btn, self.logs_btn, self.requirements_btn, self.info_btn]:
             btn.setCheckable(True)
-            btn.setStyleSheet(tab_button_style)
+            # Navigation buttons will be styled by theme system
         
         # Special styling for requirements button (icon only, smaller)
         self.requirements_btn.setMaximumWidth(60)
@@ -618,13 +1149,7 @@ class MainWindow(QMainWindow):
         border_container = QFrame()
         border_container.setFrameShape(QFrame.NoFrame)
         border_container.setObjectName("windowBorderContainer")
-        border_container.setStyleSheet("""
-            QFrame#windowBorderContainer {
-                background: transparent;
-                border: 2px solid #667eea;
-                border-radius: 12px;
-            }
-        """)
+        # Border styling will be handled by theme system
         border_layout = QVBoxLayout(border_container)
         border_layout.setContentsMargins(2, 2, 2, 2)  # Small margin for border visibility
         border_layout.setSpacing(0)
@@ -1298,14 +1823,140 @@ class MainWindow(QMainWindow):
         self.dark_mode = not self.dark_mode
         self._apply_theme()
 
+    def _get_theme_colors(self):
+        """Get current theme colors"""
+        return COLOR_THEMES[self.color_theme]["dark" if self.dark_mode else "light"]
+    
+    def _get_frame_border_style(self, primary_color: str = None) -> str:
+        """Get frame border style with current theme color"""
+        if primary_color is None:
+            primary_color = self._get_theme_colors()["primary"]
+        return f"border: 2px solid {primary_color};"
+    
+    def _get_gradient_style(self, primary_color: str = None, secondary_color: str = None) -> str:
+        """Get gradient style with current theme colors"""
+        colors = self._get_theme_colors()
+        if primary_color is None:
+            primary_color = colors["primary"]
+        if secondary_color is None:
+            secondary_color = colors["secondary"]
+        return f"qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 {primary_color}, stop:1 {secondary_color})"
+    
+    def _set_color_theme(self, theme_name: str) -> None:
+        """Set the color theme"""
+        self.color_theme = theme_name
+        # Update button checked states
+        for name, btn in self.color_buttons.items():
+            btn.setChecked(name == theme_name)
+        # Reapply theme with new color
+        self._apply_theme()
+    
     def _apply_theme(self) -> None:
         """Apply the current theme"""
+        # Use dynamic theme with selected color
+        stylesheet = get_theme_stylesheet(self.dark_mode, self.color_theme)
+        self.setStyleSheet(stylesheet)
+        
+        # Update theme button icon and text
         if self.dark_mode:
-            self.setStyleSheet(DARK_THEME)
-            self.theme_btn.setText("🌙 Dark Mode")
+            self.theme_icon.setText("🌙")
+            self.theme_text.setText("Dark")
         else:
-            self.setStyleSheet(LIGHT_THEME)
-            self.theme_btn.setText("☀️ Light Mode")
+            self.theme_icon.setText("☀️")
+            self.theme_text.setText("Light")
+        
+        # Update header border with theme color
+        colors = self._get_theme_colors()
+        primary = colors["primary"]
+        secondary = colors["secondary"]
+        accent = colors["accent"]
+        
+        if hasattr(self, 'header_widget'):
+            # IMPORTANT: Never add border-bottom here - it creates double-line issues
+            self.header_widget.setStyleSheet(f"""
+                QFrame {{
+                    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                        stop:0 rgba(60, 60, 80, 0.6), stop:0.5 rgba(40, 40, 60, 0.6), stop:1 rgba(60, 60, 80, 0.6));
+                    border: none;
+                    border-bottom: none;
+                    border-radius: 0px;
+                }}
+            """)
+        
+        # Update all themed widgets
+        self._update_themed_widgets(primary, secondary, accent)
+    
+    def _update_themed_widgets(self, primary: str, secondary: str, accent: str) -> None:
+        """Update all stored themed widgets with current colors"""
+        # Update frames
+        for frame in self.themed_widgets["frames"]:
+            obj_name = frame.objectName()
+            if obj_name == "titleFrame":
+                frame.setStyleSheet(f"""
+                    QFrame#titleFrame {{
+                        background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                            stop:0 rgba(60, 60, 80, 0.4), stop:1 rgba(40, 40, 60, 0.4));
+                        border: 2px solid {primary};
+                        border-radius: 12px;
+                        padding: 15px;
+                    }}
+                """)
+            elif obj_name == "leftColumnContainer":
+                frame.setStyleSheet(f"""
+                    QFrame#leftColumnContainer {{
+                        background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                            stop:0 rgba(60, 60, 80, 0.4), stop:1 rgba(40, 40, 60, 0.4));
+                        border: 2px solid {primary};
+                        border-radius: 12px;
+                        padding: 15px;
+                    }}
+                """)
+            elif obj_name == "rightColumnContainer":
+                frame.setStyleSheet(f"""
+                    QFrame#rightColumnContainer {{
+                        background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                            stop:0 rgba(60, 60, 80, 0.4), stop:1 rgba(40, 40, 60, 0.4));
+                        border: 2px solid {primary};
+                        border-radius: 12px;
+                        padding: 15px;
+                    }}
+                """)
+        
+        # Update buttons
+        for btn in self.themed_widgets["buttons"]:
+            obj_name = btn.objectName()
+            if obj_name == "refreshGpuBtn":
+                btn.setStyleSheet(f"""
+                    QPushButton#refreshGpuBtn {{
+                        background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                            stop:0 rgba(60, 60, 80, 0.4), stop:1 rgba(40, 40, 60, 0.4));
+                        border: 2px solid {primary};
+                        border-radius: 12px;
+                        padding: 8px 15px;
+                        color: white;
+                        font-size: 11pt;
+                        font-weight: bold;
+                    }}
+                    QPushButton#refreshGpuBtn:hover {{
+                        background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                            stop:0 rgba(80, 80, 100, 0.5), stop:1 rgba(60, 60, 80, 0.5));
+                        border: 2px solid {accent};
+                    }}
+                    QPushButton#refreshGpuBtn:pressed {{
+                        background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                            stop:0 rgba(50, 50, 70, 0.5), stop:1 rgba(30, 30, 50, 0.5));
+                    }}
+                """)
+        
+        # Update labels
+        for label in self.themed_widgets["labels"]:
+            obj_name = label.objectName()
+            if obj_name == "modelAHeader":
+                label.setStyleSheet(f"font-size: 16pt; padding: 10px; background: {self._get_gradient_style(primary, secondary)}; color: white; border-radius: 6px;")
+            elif obj_name == "modelBHeader":
+                label.setStyleSheet(f"font-size: 16pt; padding: 10px; background: {self._get_gradient_style(primary, secondary)}; color: white; border-radius: 6px;")
+            elif obj_name == "trainModelHeader":
+                label.setStyleSheet(f"font-size: 14pt; color: {primary}; border: none; padding: 0;")
         
         # Update chat widgets theme
         if hasattr(self, 'chat_widgets'):
@@ -1331,20 +1982,23 @@ class MainWindow(QMainWindow):
         # Welcome title in a styled container
         title_frame = QFrame()
         title_frame.setFrameShape(QFrame.StyledPanel)
-        title_frame.setStyleSheet("""
-            QFrame {
+        title_frame.setObjectName("titleFrame")
+        colors = self._get_theme_colors()
+        title_frame.setStyleSheet(f"""
+            QFrame#titleFrame {{
                 background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
                     stop:0 rgba(60, 60, 80, 0.4), stop:1 rgba(40, 40, 60, 0.4));
-                border: 2px solid #667eea;
+                {self._get_frame_border_style(colors["primary"])}
                 border-radius: 12px;
                 padding: 15px;
-            }
+            }}
         """)
+        self.themed_widgets["frames"].append(title_frame)
         title_layout = QVBoxLayout(title_frame)
         title_layout.setContentsMargins(0, 12, 0, 12)
-        title = QLabel("<h1>Welcome to LLM Fine-tuning Studio</h1>")
+        title = QLabel("Welcome to LLM Fine-tuning Studio")
         title.setAlignment(Qt.AlignCenter)
-        title.setStyleSheet("color: white; background: transparent; border: none; padding: 0;")
+        title.setStyleSheet("color: white; background: transparent; border: none; padding: 0; font-size: 24pt; font-weight: bold; text-decoration: none;")
         title_layout.addWidget(title)
         layout.addWidget(title_frame)
         
@@ -1358,58 +2012,72 @@ class MainWindow(QMainWindow):
         left_container.setFrameShape(QFrame.StyledPanel)
         left_container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         left_container.setObjectName("leftColumnContainer")  # Give it a unique name
-        left_container.setStyleSheet("""
-            QFrame#leftColumnContainer {
+        colors = self._get_theme_colors()
+        left_container.setStyleSheet(f"""
+            QFrame#leftColumnContainer {{
                 background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
                     stop:0 rgba(60, 60, 80, 0.4), stop:1 rgba(40, 40, 60, 0.4));
-                border: 2px solid #667eea;
+                {self._get_frame_border_style(colors["primary"])}
                 border-radius: 12px;
                 padding: 15px;
-            }
+            }}
         """)
+        self.themed_widgets["frames"].append(left_container)
         left_layout = QVBoxLayout(left_container)
         left_layout.setSpacing(15)
         left_layout.setContentsMargins(15, 15, 15, 15)
         
         # Features section
-        features_header = QLabel("<h2>🚀 Features</h2>")
-        features_header.setStyleSheet("background: transparent; color: white;")
+        features_header = QLabel("🚀 Features")
+        features_header.setStyleSheet("background: transparent; color: white; font-size: 18pt; font-weight: bold; text-decoration: none; border: none; border-bottom: none;")
+        font = features_header.font()
+        font.setUnderline(False)
+        features_header.setFont(font)
         left_layout.addWidget(features_header)
         features_text = QLabel("""
-<p>This application provides a beautiful, user-friendly interface to:</p>
-<ul style="line-height: 1.8;">
-<li><b>🎯 Train Models:</b> Select from popular pre-trained models and fine-tune them with your data</li>
-<li><b>📥 Upload Datasets:</b> Easy drag-and-drop for JSONL format datasets</li>
-<li><b>🧪 Test Models:</b> Interactive chat interface to test your fine-tuned models</li>
-<li><b>✅ Validate Performance:</b> Run validation tests and view detailed results</li>
-<li><b>📊 Track History:</b> View all your trained models and training logs</li>
+<p style="text-decoration: none; border: none; border-bottom: none;"><span style="text-decoration: none; border: none; border-bottom: none;">This application provides a beautiful, user-friendly interface to:</span></p>
+<ul style="line-height: 1.8; text-decoration: none; border: none; border-bottom: none;">
+<li style="text-decoration: none; border: none; border-bottom: none;"><span style="font-weight: bold; text-decoration: none; border: none; border-bottom: none;">🎯 Train Models:</span> <span style="text-decoration: none; border: none; border-bottom: none;">Select from popular pre-trained models and fine-tune them with your data</span></li>
+<li style="text-decoration: none; border: none; border-bottom: none;"><span style="font-weight: bold; text-decoration: none; border: none; border-bottom: none;">📥 Upload Datasets:</span> <span style="text-decoration: none; border: none; border-bottom: none;">Easy drag-and-drop for JSONL format datasets</span></li>
+<li style="text-decoration: none; border: none; border-bottom: none;"><span style="font-weight: bold; text-decoration: none; border: none; border-bottom: none;">🧪 Test Models:</span> <span style="text-decoration: none; border: none; border-bottom: none;">Interactive chat interface to test your fine-tuned models</span></li>
+<li style="text-decoration: none; border: none; border-bottom: none;"><span style="font-weight: bold; text-decoration: none; border: none; border-bottom: none;">✅ Validate Performance:</span> <span style="text-decoration: none; border: none; border-bottom: none;">Run validation tests and view detailed results</span></li>
+<li style="text-decoration: none; border: none; border-bottom: none;"><span style="font-weight: bold; text-decoration: none; border: none; border-bottom: none;">📊 Track History:</span> <span style="text-decoration: none; border: none; border-bottom: none;">View all your trained models and training logs</span></li>
 </ul>
         """)
         features_text.setWordWrap(True)
         features_text.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-        features_text.setStyleSheet("background: transparent; color: white;")
+        features_text.setStyleSheet("background: transparent; color: white; text-decoration: none; border: none; border-bottom: none;")
+        font = features_text.font()
+        font.setUnderline(False)
+        features_text.setFont(font)
         left_layout.addWidget(features_text)
         
         # Quick Start Guide section
-        guide_header = QLabel("<h2>📋 Quick Start Guide</h2>")
-        guide_header.setStyleSheet("background: transparent; color: white;")
+        guide_header = QLabel("📋 Quick Start Guide")
+        guide_header.setStyleSheet("background: transparent; color: white; font-size: 18pt; font-weight: bold; text-decoration: none; border: none; border-bottom: none;")
+        font = guide_header.font()
+        font.setUnderline(False)
+        guide_header.setFont(font)
         left_layout.addWidget(guide_header)
         guide_text = QLabel("""
-<ol style="line-height: 2;">
-<li><b>Prepare Your Dataset:</b> Create a JSONL file with format:
-<pre style="background: #2a2a2a; padding: 10px; border-radius: 5px; margin: 10px 0;">
+<ol style="line-height: 2; text-decoration: none; border: none; border-bottom: none;">
+<li style="text-decoration: none; border: none; border-bottom: none;"><span style="font-weight: bold; text-decoration: none; border: none; border-bottom: none;">Prepare Your Dataset:</span> <span style="text-decoration: none; border: none; border-bottom: none;">Create a JSONL file with format:</span>
+<pre style="background: #2a2a2a; padding: 10px; border-radius: 5px; margin: 10px 0; text-decoration: none; border: none; border-bottom: none;">
 {"instruction": "Your instruction here", "output": "Expected output here"}
 </pre>
 </li>
-<li><b>Go to Train Model:</b> Select a base model and upload your dataset</li>
-<li><b>Configure Training:</b> Adjust epochs, batch size, and LoRA parameters</li>
-<li><b>Start Training:</b> Click the train button and monitor progress</li>
-<li><b>Test Your Model:</b> Use the Test Model tab to try your fine-tuned model</li>
+<li style="text-decoration: none; border: none; border-bottom: none;"><span style="font-weight: bold; text-decoration: none; border: none; border-bottom: none;">Go to Train Model:</span> <span style="text-decoration: none; border: none; border-bottom: none;">Select a base model and upload your dataset</span></li>
+<li style="text-decoration: none; border: none; border-bottom: none;"><span style="font-weight: bold; text-decoration: none; border: none; border-bottom: none;">Configure Training:</span> <span style="text-decoration: none; border: none; border-bottom: none;">Adjust epochs, batch size, and LoRA parameters</span></li>
+<li style="text-decoration: none; border: none; border-bottom: none;"><span style="font-weight: bold; text-decoration: none; border: none; border-bottom: none;">Start Training:</span> <span style="text-decoration: none; border: none; border-bottom: none;">Click the train button and monitor progress</span></li>
+<li style="text-decoration: none; border: none; border-bottom: none;"><span style="font-weight: bold; text-decoration: none; border: none; border-bottom: none;">Test Your Model:</span> <span style="text-decoration: none; border: none; border-bottom: none;">Use the Test Model tab to try your fine-tuned model</span></li>
 </ol>
         """)
         guide_text.setWordWrap(True)
         guide_text.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-        guide_text.setStyleSheet("background: transparent; color: white;")
+        guide_text.setStyleSheet("background: transparent; color: white; text-decoration: none; border: none; border-bottom: none;")
+        font = guide_text.font()
+        font.setUnderline(False)
+        guide_text.setFont(font)
         left_layout.addWidget(guide_text)
         
         left_layout.addStretch(1)
@@ -1422,23 +2090,59 @@ class MainWindow(QMainWindow):
         right_container.setFrameShape(QFrame.StyledPanel)
         right_container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         right_container.setObjectName("rightColumnContainer")  # Give it a unique name
-        right_container.setStyleSheet("""
-            QFrame#rightColumnContainer {
+        colors = self._get_theme_colors()
+        right_container.setStyleSheet(f"""
+            QFrame#rightColumnContainer {{
                 background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
                     stop:0 rgba(60, 60, 80, 0.4), stop:1 rgba(40, 40, 60, 0.4));
-                border: 2px solid #667eea;
+                {self._get_frame_border_style(colors["primary"])}
                 border-radius: 12px;
                 padding: 15px;
-            }
+            }}
         """)
+        self.themed_widgets["frames"].append(right_container)
         right_layout = QVBoxLayout(right_container)
         right_layout.setSpacing(15)
         right_layout.setContentsMargins(15, 15, 15, 15)
 
         # System Status section
-        sys_status_header = QLabel("<h2>📊 System Status</h2>")
-        sys_status_header.setStyleSheet("background: transparent; color: white;")
-        right_layout.addWidget(sys_status_header)
+        sys_status_header_row = QHBoxLayout()
+        sys_status_header = QLabel("📊 System Status")
+        sys_status_header.setStyleSheet("background: transparent; color: white; font-size: 18pt; font-weight: bold; text-decoration: none; border: none; border-bottom: none;")
+        font = sys_status_header.font()
+        font.setUnderline(False)
+        sys_status_header.setFont(font)
+        sys_status_header_row.addWidget(sys_status_header)
+        sys_status_header_row.addStretch(1)
+        
+        refresh_btn = QPushButton("🔄 Refresh Hardware Detection")
+        refresh_btn.setObjectName("refreshGpuBtn")
+        colors = self._get_theme_colors()
+        refresh_btn.setStyleSheet(f"""
+            QPushButton#refreshGpuBtn {{
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 rgba(60, 60, 80, 0.4), stop:1 rgba(40, 40, 60, 0.4));
+                {self._get_frame_border_style(colors["primary"])}
+                border-radius: 12px;
+                padding: 8px 15px;
+                color: white;
+                font-size: 11pt;
+                font-weight: bold;
+            }}
+            QPushButton#refreshGpuBtn:hover {{
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 rgba(80, 80, 100, 0.5), stop:1 rgba(60, 60, 80, 0.5));
+                border: 2px solid {colors["accent"]};
+            }}
+            QPushButton#refreshGpuBtn:pressed {{
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 rgba(50, 50, 70, 0.5), stop:1 rgba(30, 30, 50, 0.5));
+            }}
+        """)
+        refresh_btn.clicked.connect(self._refresh_gpu_detection)
+        self.themed_widgets["buttons"].append(refresh_btn)
+        sys_status_header_row.addWidget(refresh_btn)
+        right_layout.addLayout(sys_status_header_row)
 
         # System info cards
         sys_frame = QWidget()
@@ -1447,39 +2151,16 @@ class MainWindow(QMainWindow):
         sys_layout.setSpacing(6)  # Tighter spacing
         sys_layout.setContentsMargins(10, 8, 10, 8)  # Tighter margins
 
-        refresh_btn = QPushButton("🔄 Refresh GPU Detection")
-        refresh_btn.setMaximumWidth(200)  # Compact button
-        refresh_btn.setStyleSheet("""
-            QPushButton {
-                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                    stop:0 rgba(60, 60, 80, 0.4), stop:1 rgba(40, 40, 60, 0.4));
-                border: 2px solid #667eea;
-                border-radius: 12px;
-                padding: 8px 15px;
-                color: white;
-                font-size: 11pt;
-                font-weight: bold;
-            }
-            QPushButton:hover {
-                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                    stop:0 rgba(80, 80, 100, 0.5), stop:1 rgba(60, 60, 80, 0.5));
-                border: 2px solid #7c8ef5;
-            }
-            QPushButton:pressed {
-                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                    stop:0 rgba(50, 50, 70, 0.5), stop:1 rgba(30, 30, 50, 0.5));
-            }
-        """)
-        refresh_btn.clicked.connect(self._refresh_gpu_detection)
-        sys_layout.addWidget(refresh_btn)
-
         # Get real GPU info
         cuda_info = self.system_info.get("cuda", {})
         gpus = cuda_info.get("gpus", [])
         
         if gpus:
-            gpu_status = QLabel(f"✅ <b>{len(gpus)} GPU{'s' if len(gpus) > 1 else ''} detected</b>")
-            gpu_status.setStyleSheet("background: transparent; color: #4CAF50; font-weight: bold;")
+            gpu_status = QLabel(f"✅ <span style='font-weight: bold; text-decoration: none; border: none; border-bottom: none;'>{len(gpus)} GPU{'s' if len(gpus) > 1 else ''} detected</span>")
+            gpu_status.setStyleSheet("background: transparent; color: #4CAF50; font-weight: bold; text-decoration: none; border: none; border-bottom: none;")
+            font = gpu_status.font()
+            font.setUnderline(False)
+            gpu_status.setFont(font)
             sys_layout.addWidget(gpu_status)
             
             # Display each GPU
@@ -1488,33 +2169,70 @@ class MainWindow(QMainWindow):
                 gpu_name = gpu.get("name", "Unknown GPU")
                 gpu_mem = gpu.get("memory", "Unknown")
                 
-                gpu_label = QLabel(f"<b>GPU {idx}:</b> {gpu_name}")
-                gpu_label.setStyleSheet("background: transparent; color: white;")
+                gpu_label = QLabel(f"<span style='font-weight: bold; text-decoration: none; border: none; border-bottom: none;'>GPU {idx}:</span> <span style='text-decoration: none; border: none; border-bottom: none;'>{gpu_name}</span>")
+                gpu_label.setStyleSheet("background: transparent; color: white; text-decoration: none; border: none; border-bottom: none;")
+                font = gpu_label.font()
+                font.setUnderline(False)
+                gpu_label.setFont(font)
                 gpu_row.addWidget(gpu_label)
                 gpu_row.addStretch(1)
-                gpu_mem_label = QLabel(f"💾 <b>{gpu_mem}</b>")
-                gpu_mem_label.setStyleSheet("background: transparent; color: white;")
+                gpu_mem_label = QLabel(f"💾 <span style='font-weight: bold; text-decoration: none; border: none; border-bottom: none;'>{gpu_mem}</span>")
+                gpu_mem_label.setStyleSheet("background: transparent; color: white; text-decoration: none; border: none; border-bottom: none;")
+                font = gpu_mem_label.font()
+                font.setUnderline(False)
+                gpu_mem_label.setFont(font)
                 gpu_row.addWidget(gpu_mem_label)
                 sys_layout.addLayout(gpu_row)
         else:
-            gpu_status = QLabel("⚠️ <b>No GPUs detected</b>")
-            gpu_status.setStyleSheet("background: transparent; color: #FF9800; font-weight: bold;")
+            gpu_status = QLabel("⚠️ <span style='font-weight: bold; text-decoration: none; border: none; border-bottom: none;'>No GPUs detected</span>")
+            gpu_status.setStyleSheet("background: transparent; color: #FF9800; font-weight: bold; text-decoration: none; border: none; border-bottom: none;")
+            font = gpu_status.font()
+            font.setUnderline(False)
+            gpu_status.setFont(font)
             sys_layout.addWidget(gpu_status)
             cpu_label = QLabel("Training will use CPU (slower)")
-            cpu_label.setStyleSheet("background: transparent; color: white;")
+            cpu_label.setStyleSheet("background: transparent; color: white; text-decoration: none;")
             sys_layout.addWidget(cpu_label)
 
-        hr_label = QLabel("<hr>")
-        hr_label.setStyleSheet("background: transparent;")
-        sys_layout.addWidget(hr_label)
+        # CPU Information
+        hardware_info = self.system_info.get("hardware", {})
+        cpu_name = hardware_info.get("cpu_name", "Unknown CPU")
+        cpu_cores = hardware_info.get("cpu", {}).get("cores", "?")
+        ram_gb = hardware_info.get("ram_gb", 0)
+        
+        cpu_row = QHBoxLayout()
+        cpu_name_label = QLabel(f"<span style='font-weight: bold; text-decoration: none; border: none; border-bottom: none;'>CPU:</span> <span style='text-decoration: none; border: none; border-bottom: none;'>{cpu_name}</span>")
+        cpu_name_label.setStyleSheet("background: transparent; color: white; text-decoration: none; border: none; border-bottom: none;")
+        font = cpu_name_label.font()
+        font.setUnderline(False)
+        cpu_name_label.setFont(font)
+        cpu_row.addWidget(cpu_name_label)
+        cpu_row.addStretch(1)
+        
+        cpu_specs_text = f"<span style='font-weight: bold; text-decoration: none; border: none; border-bottom: none;'>{cpu_cores} cores</span>"
+        if ram_gb:
+            cpu_specs_text = f"<span style='font-weight: bold; text-decoration: none; border: none; border-bottom: none;'>{cpu_cores} cores</span> | <span style='font-weight: bold; text-decoration: none; border: none; border-bottom: none;'>💾 {ram_gb} GB RAM</span>"
+        cpu_specs_label = QLabel(cpu_specs_text)
+        cpu_specs_label.setStyleSheet("background: transparent; color: white; text-decoration: none; border: none; border-bottom: none;")
+        font = cpu_specs_label.font()
+        font.setUnderline(False)
+        cpu_specs_label.setFont(font)
+        cpu_row.addWidget(cpu_specs_label)
+        sys_layout.addLayout(cpu_row)
 
         # Status - compact single line
         status_row = QHBoxLayout()
-        status_label = QLabel("<b>Status:</b>")
-        status_label.setStyleSheet("background: transparent; color: white;")
+        status_label = QLabel("<span style='font-weight: bold; text-decoration: none; border: none; border-bottom: none;'>Status:</span>")
+        status_label.setStyleSheet("background: transparent; color: white; text-decoration: none; border: none; border-bottom: none;")
+        font = status_label.font()
+        font.setUnderline(False)
+        status_label.setFont(font)
         status_row.addWidget(status_label)
-        status_val = QLabel("<span style='font-size: 16pt; font-weight: bold; color: #4CAF50;'>Ready</span>")
-        status_val.setStyleSheet("background: transparent;")
+        status_val = QLabel("<span style='font-size: 16pt; font-weight: bold; color: #4CAF50; text-decoration: none; border: none; border-bottom: none;'>Ready</span>")
+        status_val.setStyleSheet("background: transparent; text-decoration: none; border: none; border-bottom: none;")
+        font = status_val.font()
+        font.setUnderline(False)
+        status_val.setFont(font)
         status_row.addWidget(status_val)
         status_row.addStretch(1)
         sys_layout.addLayout(status_row)
@@ -1522,8 +2240,11 @@ class MainWindow(QMainWindow):
         right_layout.addWidget(sys_frame)
         
         # Software Requirements section
-        requirements_header = QLabel("<h2>⚙️ Software Requirements & Setup</h2>")
-        requirements_header.setStyleSheet("background: transparent; color: white;")
+        requirements_header = QLabel("⚙️ Software Requirements & Setup")
+        requirements_header.setStyleSheet("background: transparent; color: white; font-size: 18pt; font-weight: bold; text-decoration: none; border: none; border-bottom: none;")
+        font = requirements_header.font()
+        font.setUnderline(False)
+        requirements_header.setFont(font)
         right_layout.addWidget(requirements_header)
 
         setup_frame = QWidget()
@@ -1693,7 +2414,12 @@ class MainWindow(QMainWindow):
         left_layout = QVBoxLayout(left_widget)
         left_layout.setSpacing(15)
         
-        left_layout.addWidget(QLabel("<h2>📚 Curated Models for Fine-tuning</h2>"))
+        curated_label = QLabel("📚 Curated Models for Fine-tuning")
+        curated_label.setStyleSheet("font-size: 18pt; font-weight: bold; text-decoration: none; border: none; border-bottom: none;")
+        font = curated_label.font()
+        font.setUnderline(False)
+        curated_label.setFont(font)
+        left_layout.addWidget(curated_label)
         
         # Scroll area for curated models
         curated_scroll = QScrollArea()
@@ -1714,7 +2440,12 @@ class MainWindow(QMainWindow):
         right_layout.setSpacing(15)
         
         # Section 1: Downloaded Models
-        right_layout.addWidget(QLabel("<h2>📥 Downloaded Models</h2>"))
+        downloaded_label = QLabel("📥 Downloaded Models")
+        downloaded_label.setStyleSheet("font-size: 18pt; font-weight: bold; text-decoration: none; border: none; border-bottom: none;")
+        font = downloaded_label.font()
+        font.setUnderline(False)
+        downloaded_label.setFont(font)
+        right_layout.addWidget(downloaded_label)
         
         downloaded_scroll = QScrollArea()
         downloaded_scroll.setWidgetResizable(True)
@@ -1733,7 +2464,12 @@ class MainWindow(QMainWindow):
         right_layout.addWidget(downloaded_scroll)
         
         # Section 2: Search Hugging Face
-        right_layout.addWidget(QLabel("<h2>🔍 Search Hugging Face</h2>"))
+        search_label = QLabel("🔍 Search Hugging Face")
+        search_label.setStyleSheet("font-size: 18pt; font-weight: bold; text-decoration: none; border: none; border-bottom: none;")
+        font = search_label.font()
+        font.setUnderline(False)
+        search_label.setFont(font)
+        right_layout.addWidget(search_label)
         
         search_row = QHBoxLayout()
         self.hf_query = QLineEdit()
@@ -2079,7 +2815,8 @@ class MainWindow(QMainWindow):
         left_layout.setSpacing(15)
         
         # TOP ROW: Model and Dataset in 2 columns
-        top_row_header = QLabel("<h2>🎯 Model & Dataset Configuration</h2>")
+        top_row_header = QLabel("🎯 Model & Dataset Configuration")
+        top_row_header.setStyleSheet("font-size: 18pt; font-weight: bold; text-decoration: none;")
         left_layout.addWidget(top_row_header)
         
         top_row_widget = QWidget()
@@ -2103,7 +2840,10 @@ class MainWindow(QMainWindow):
         model_layout.setSpacing(12)
         
         model_header = QLabel("🤖 <b>Select Base Model</b>")
-        model_header.setStyleSheet("font-size: 14pt; color: #667eea; border: none; padding: 0;")
+        model_header.setObjectName("trainModelHeader")
+        colors = self._get_theme_colors()
+        model_header.setStyleSheet(f"font-size: 14pt; color: {colors['primary']}; border: none; padding: 0;")
+        self.themed_widgets["labels"].append(model_header)
         model_layout.addWidget(model_header)
         
         self.train_base_model = QComboBox()
@@ -2180,7 +2920,9 @@ class MainWindow(QMainWindow):
         left_layout.addWidget(top_row_widget)
         
         # Training Parameters Section
-        left_layout.addWidget(QLabel("<h2>⚙️ Training Parameters</h2>"))
+        params_label = QLabel("⚙️ Training Parameters")
+        params_label.setStyleSheet("font-size: 18pt; font-weight: bold; text-decoration: none;")
+        left_layout.addWidget(params_label)
         
         params_frame = QFrame()
         params_frame.setFrameShape(QFrame.StyledPanel)
@@ -2364,7 +3106,9 @@ class MainWindow(QMainWindow):
         left_layout.addWidget(params_frame)
         
         # GPU Selection Section
-        left_layout.addWidget(QLabel("<h2>💻 Select GPU(s) for Training</h2>"))
+        gpu_select_label = QLabel("💻 Select GPU(s) for Training")
+        gpu_select_label.setStyleSheet("font-size: 18pt; font-weight: bold; text-decoration: none;")
+        left_layout.addWidget(gpu_select_label)
         
         gpu_frame = QFrame()
         gpu_frame.setFrameShape(QFrame.StyledPanel)
@@ -2417,17 +3161,14 @@ class MainWindow(QMainWindow):
         # Start Training Button
         start_btn_layout = QHBoxLayout()
         self.train_start = QPushButton("🚀 Start Training")
+        self.train_start.setObjectName("train_start")
         self.train_start.setMinimumHeight(50)
         self.train_start.clicked.connect(lambda: (self._start_training(), self._switch_to_dashboard()))
-        self.train_start.setStyleSheet("""
-            QPushButton {
-                font-size: 16pt;
-                font-weight: bold;
-            }
-        """)
+        # Training button styling will be handled by theme system
         start_btn_layout.addWidget(self.train_start)
         
         self.train_stop = QPushButton("⏹ Stop")
+        self.train_stop.setObjectName("train_stop")
         self.train_stop.setEnabled(False)
         self.train_stop.setMinimumHeight(50)
         self.train_stop.clicked.connect(self._stop_training)
@@ -2723,7 +3464,7 @@ class MainWindow(QMainWindow):
         loss_title.setStyleSheet("color: white; font-size: 12pt;")
         loss_section_layout.addWidget(loss_title)
         
-        self.loss_chart_label = QLabel("Loss chart will appear here once training starts...")
+        self.loss_chart_label = QLabel("")
         self.loss_chart_label.setAlignment(Qt.AlignCenter)
         self.loss_chart_label.setStyleSheet("color: #888;")
         loss_section_layout.addWidget(self.loss_chart_label, 1)
@@ -2809,7 +3550,8 @@ class MainWindow(QMainWindow):
         viewer_layout.setContentsMargins(15, 15, 15, 15)
         
         # Header
-        header = QLabel("<h2>🔍 Dataset Viewer</h2>")
+        header = QLabel("🔍 Dataset Viewer")
+        header.setStyleSheet("font-size: 18pt; font-weight: bold; text-decoration: none;")
         viewer_layout.addWidget(header)
         
         # Format validation status
@@ -3105,7 +3847,9 @@ class MainWindow(QMainWindow):
         layout.setSpacing(15)
 
         # Title
-        layout.addWidget(QLabel("<h2>🧪 Test Models - Side-by-Side Chat</h2>"))
+        test_title = QLabel("🧪 Test Models - Side-by-Side Chat")
+        test_title.setStyleSheet("font-size: 18pt; font-weight: bold; text-decoration: none;")
+        layout.addWidget(test_title)
         
         # GPU selection for inference
         gpu_frame = QGroupBox("⚙️ Hardware Settings")
@@ -3151,7 +3895,10 @@ class MainWindow(QMainWindow):
         
         # Header
         header_a = QLabel("🔵 <b>Model A</b>")
-        header_a.setStyleSheet("font-size: 16pt; padding: 10px; background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #667eea, stop:1 #764ba2); color: white; border-radius: 6px;")
+        header_a.setObjectName("modelAHeader")
+        colors = self._get_theme_colors()
+        header_a.setStyleSheet(f"font-size: 16pt; padding: 10px; background: {self._get_gradient_style(colors['primary'], colors['secondary'])}; color: white; border-radius: 6px;")
+        self.themed_widgets["labels"].append(header_a)
         model_a_layout.addWidget(header_a)
         
         # Model selection
@@ -3173,7 +3920,10 @@ class MainWindow(QMainWindow):
         
         # Header
         header_b = QLabel("🟢 <b>Model B</b>")
-        header_b.setStyleSheet("font-size: 16pt; padding: 10px; background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #4CAF50, stop:1 #2E7D32); color: white; border-radius: 6px;")
+        header_b.setObjectName("modelBHeader")
+        colors = self._get_theme_colors()
+        header_b.setStyleSheet(f"font-size: 16pt; padding: 10px; background: {self._get_gradient_style(colors['primary'], colors['secondary'])}; color: white; border-radius: 6px;")
+        self.themed_widgets["labels"].append(header_b)
         model_b_layout.addWidget(header_b)
         
         # Model selection
@@ -3511,9 +4261,9 @@ class MainWindow(QMainWindow):
         layout.setSpacing(20)
         
         # Title
-        title = QLabel("<h1>🔧 Required Packages & Versions</h1>")
+        title = QLabel("🔧 Required Packages & Versions")
         title.setAlignment(Qt.AlignCenter)
-        title.setStyleSheet("background: transparent; color: white;")
+        title.setStyleSheet("background: transparent; color: white; font-size: 24pt; font-weight: bold; text-decoration: none;")
         layout.addWidget(title)
         
         # Info text
@@ -3652,8 +4402,8 @@ class MainWindow(QMainWindow):
         
         for category, package_names in categories.items():
             # Category header
-            cat_label = QLabel(f"<h3 style='color: #667eea;'>{category}</h3>")
-            cat_label.setStyleSheet("background: transparent; color: #667eea;")
+            cat_label = QLabel(category)
+            cat_label.setStyleSheet("background: transparent; color: #667eea; font-size: 16pt; font-weight: bold; text-decoration: none;")
             content_layout.addWidget(cat_label)
             
             # Packages in this category
@@ -3778,8 +4528,9 @@ class MainWindow(QMainWindow):
         layout.setSpacing(20)
         
         # Title
-        title = QLabel("<h1>ℹ️ About LLM Fine-tuning Studio</h1>")
+        title = QLabel("ℹ️ About LLM Fine-tuning Studio")
         title.setAlignment(Qt.AlignCenter)
+        title.setStyleSheet("font-size: 24pt; font-weight: bold; text-decoration: none;")
         layout.addWidget(title)
         
         # Two-column layout using QSplitter for fixed 50/50 split
@@ -3799,7 +4550,8 @@ class MainWindow(QMainWindow):
         credits_inner = QVBoxLayout(credits_frame)
         credits_inner.setSpacing(12)
         
-        credits_title = QLabel("<h2>💝 Credits</h2>")
+        credits_title = QLabel("💝 Credits")
+        credits_title.setStyleSheet("font-size: 18pt; font-weight: bold; text-decoration: none;")
         credits_inner.addWidget(credits_title)
         
         credits_text = QLabel("""
@@ -3841,7 +4593,8 @@ class MainWindow(QMainWindow):
         license_inner = QVBoxLayout(license_frame)
         license_inner.setSpacing(12)
         
-        license_title = QLabel("<h2>📜 License Information</h2>")
+        license_title = QLabel("📜 License Information")
+        license_title.setStyleSheet("font-size: 18pt; font-weight: bold; text-decoration: none;")
         license_inner.addWidget(license_title)
         
         license_text = QLabel("""
@@ -3849,7 +4602,7 @@ class MainWindow(QMainWindow):
 This application uses the following open-source libraries and tools:
 </p>
 
-<h3 style="color: #667eea; margin-top: 12px; font-size: 12pt;">Core Libraries</h3>
+<h3 style='text-decoration: none;' style="color: #667eea; margin-top: 12px; font-size: 12pt;">Core Libraries</h3>
 <ul style="line-height: 1.4; font-size: 10pt;">
 <li><b>Python 3.10+</b> - PSF License</li>
 <li><b>PySide6 (Qt for Python)</b> - LGPL v3<br>
@@ -3862,7 +4615,7 @@ This application uses the following open-source libraries and tools:
     <span style="color: #888;">Fast LLM fine-tuning</span></li>
 </ul>
 
-<h3 style="color: #667eea; margin-top: 12px; font-size: 12pt;">Training & Data</h3>
+<h3 style='text-decoration: none;' style="color: #667eea; margin-top: 12px; font-size: 12pt;">Training & Data</h3>
 <ul style="line-height: 1.4; font-size: 10pt;">
 <li><b>TRL</b> - Apache 2.0<br>
     <span style="color: #888;">SFTTrainer for supervised fine-tuning</span></li>
@@ -3874,7 +4627,7 @@ This application uses the following open-source libraries and tools:
     <span style="color: #888;">4-bit/8-bit quantization</span></li>
 </ul>
 
-<h3 style="color: #667eea; margin-top: 12px; font-size: 12pt;">Acceleration</h3>
+<h3 style='text-decoration: none;' style="color: #667eea; margin-top: 12px; font-size: 12pt;">Acceleration</h3>
 <ul style="line-height: 1.4; font-size: 10pt;">
 <li><b>xFormers</b> - BSD (Meta)<br>
     <span style="color: #888;">Memory-efficient attention</span></li>
@@ -3884,7 +4637,7 @@ This application uses the following open-source libraries and tools:
     <span style="color: #888;">GPU programming</span></li>
 </ul>
 
-<h3 style="color: #667eea; margin-top: 12px; font-size: 12pt;">Utilities</h3>
+<h3 style='text-decoration: none;' style="color: #667eea; margin-top: 12px; font-size: 12pt;">Utilities</h3>
 <ul style="line-height: 1.4; font-size: 10pt;">
 <li><b>huggingface_hub</b> - Apache 2.0</li>
 <li><b>psutil</b> - BSD-3-Clause</li>
@@ -3892,7 +4645,7 @@ This application uses the following open-source libraries and tools:
 <li><b>numpy</b> - BSD-3-Clause</li>
 </ul>
 
-<h3 style="color: #667eea; margin-top: 12px;">Models</h3>
+<h3 style='text-decoration: none;' style="color: #667eea; margin-top: 12px;">Models</h3>
 <ul style="line-height: 1.4;">
 <li><b>Llama Models</b> - Llama Community License (Meta)<br>
     <span style="color: #888;">Commercial use with restrictions</span></li>
@@ -3900,7 +4653,7 @@ This application uses the following open-source libraries and tools:
     <span style="color: #888;">Check model card on Hugging Face</span></li>
 </ul>
 
-<h3 style="color: #667eea; margin-top: 12px;">Important Notes</h3>
+<h3 style='text-decoration: none;' style="color: #667eea; margin-top: 12px;">Important Notes</h3>
 <p style="line-height: 1.4; background: #2a2a2a; padding: 12px; border-radius: 8px; border-left: 4px solid #667eea;">
 ⚠️ <b>Disclaimer:</b> This application is provided "AS IS" without warranty. 
 Users are responsible for complying with all applicable licenses.<br><br>

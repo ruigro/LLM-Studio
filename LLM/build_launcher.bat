@@ -4,6 +4,11 @@ echo   Building LLM Studio Launcher
 echo =============================================
 echo.
 
+REM Get script directory (generic path)
+set "SCRIPT_DIR=%~dp0"
+set "ICONS_DIR=%SCRIPT_DIR%..\icons"
+set "ICO_ICON=%ICONS_DIR%\owl_launcher.ico"
+
 REM Check if MinGW is installed
 where gcc >nul 2>&1
 if errorlevel 1 (
@@ -19,11 +24,39 @@ if errorlevel 1 (
     exit /b 1
 )
 
+REM Check if ICO icon exists
+if not exist "%ICO_ICON%" (
+    echo ERROR: ICO icon not found: %ICO_ICON%
+    echo Please make sure owl_launcher.ico exists in the icons folder
+    echo.
+    pause
+    exit /b 1
+)
+
+REM Copy icon to build directory for windres
+cd /d "%SCRIPT_DIR%"
+copy /Y "%ICO_ICON%" "owl_launcher.ico" >nul
+if errorlevel 1 (
+    echo ERROR: Failed to copy icon file
+    pause
+    exit /b 1
+)
+
+REM Verify icon file exists and has content
+if not exist "owl_launcher.ico" (
+    echo ERROR: Icon file not found after copy
+    pause
+    exit /b 1
+)
+
+echo.
 echo [1/3] Compiling resource file...
-windres launcher.rc -o launcher_res.o
+echo Using icon: owl_launcher.ico
+REM Use absolute path in resource file to ensure it's found
+windres -i launcher.rc -o launcher_res.o --input-format=rc --output-format=coff
 if errorlevel 1 (
     echo ERROR: Failed to compile resource file
-    echo Make sure rocket.ico exists in this directory
+    echo Make sure owl_launcher.ico exists in: %ICONS_DIR%
     pause
     exit /b 1
 )
@@ -43,6 +76,7 @@ echo SUCCESS: Launcher compiled (fully static, no DLL dependencies)
 echo.
 echo [3/3] Cleaning up temporary files...
 del launcher_res.o
+del owl_launcher.ico
 echo SUCCESS: Cleanup complete
 
 echo.

@@ -1,8 +1,8 @@
-IDI_ICON1 ICON "icon.ico"
+IDI_ICON1 ICON "owl_launcher.ico"
 
 1 VERSIONINFO
-FILEVERSION 1,0,0,0
-PRODUCTVERSION 1,0,0,0
+FILEVERSION 1,0,0,1
+PRODUCTVERSION 1,0,0,1
 BEGIN
   BLOCK "StringFileInfo"
   BEGIN
@@ -10,12 +10,12 @@ BEGIN
     BEGIN
       VALUE "CompanyName", "LLM Fine-tuning Studio"
       VALUE "FileDescription", "LLM Studio Launcher"
-      VALUE "FileVersion", "1.0.0.0"
+      VALUE "FileVersion", "1.0.0.1"
       VALUE "InternalName", "launcher"
       VALUE "LegalCopyright", "Open Source"
       VALUE "OriginalFilename", "launcher.exe"
       VALUE "ProductName", "LLM Fine-tuning Studio"
-      VALUE "ProductVersion", "1.0.0.0"
+      VALUE "ProductVersion", "1.0.0.1"
     END
   END
   BLOCK "VarFileInfo"
