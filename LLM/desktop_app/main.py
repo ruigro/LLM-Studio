@@ -5200,24 +5200,45 @@ respective package directories or official repositories.
 
 
 def main() -> int:
+    # Setup error logging FIRST before anything else
+    logs_dir = get_app_root() / "logs"
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    app_log_path = logs_dir / "app.log"
+    startup_error_log = logs_dir / "startup_error.log"
+    
+    def write_startup_error(error_msg: str, traceback_str: str = ""):
+        """Write startup error to log file"""
+        try:
+            with open(startup_error_log, "a", encoding="utf-8") as f:
+                from datetime import datetime
+                f.write(f"\n{'='*60}\n")
+                f.write(f"[{datetime.now()}] STARTUP ERROR\n")
+                f.write(f"{'='*60}\n")
+                f.write(f"{error_msg}\n")
+                if traceback_str:
+                    f.write(f"\nTraceback:\n{traceback_str}\n")
+                f.write(f"{'='*60}\n\n")
+                f.flush()
+        except:
+            pass
+    
     # Optional startup watchdog (only enabled when explicitly requested)
     # Set environment variable LLM_STARTUP_WATCHDOG=1 to enable.
     try:
         import os
         if os.environ.get("LLM_STARTUP_WATCHDOG") == "1":
             import faulthandler
-            logs_dir = get_app_root() / "logs"
-            logs_dir.mkdir(parents=True, exist_ok=True)
             hang_log_path = logs_dir / "startup_hang.log"
             hang_log = open(hang_log_path, "a", encoding="utf-8", errors="replace")
             hang_log.write("\n==== startup_hang watchdog enabled ====\n")
             hang_log.flush()
             faulthandler.enable(file=hang_log, all_threads=True)
             faulthandler.dump_traceback_later(30, repeat=True, file=hang_log)
-    except Exception:
-        pass
+    except Exception as e:
+        write_startup_error(f"Failed to setup watchdog: {e}")
 
-    app = QApplication(sys.argv)
+    try:
+        app = QApplication(sys.argv)
     # Set base font size for the entire application - INCREASED to 16pt
     app_font = QFont()
     # Keep this modest; very large fonts require scroll areas (added above).
@@ -5303,7 +5324,12 @@ def main() -> int:
             
             return app.exec()
         except Exception as e:
-            print(f"Frame init failed: {e}, using standard window")
+            import traceback
+            error_msg = f"Frame init failed: {e}"
+            traceback_str = traceback.format_exc()
+            print(error_msg)
+            print(traceback_str)
+            write_startup_error(error_msg, traceback_str)
             # Fall through to original path
     
     # Original path (unchanged)
@@ -5314,6 +5340,24 @@ def main() -> int:
     QTimer.singleShot(500, lambda: win._start_background_detection())
     
     return app.exec()
+    except Exception as e:
+        import traceback
+        error_msg = f"Fatal startup error: {e}"
+        traceback_str = traceback.format_exc()
+        print(error_msg)
+        print(traceback_str)
+        write_startup_error(error_msg, traceback_str)
+        # Also write to app.log for launcher to find
+        try:
+            with open(app_log_path, "a", encoding="utf-8") as f:
+                f.write(f"\n{'='*60}\n")
+                f.write(f"FATAL STARTUP ERROR\n")
+                f.write(f"{error_msg}\n")
+                f.write(f"\nTraceback:\n{traceback_str}\n")
+                f.write(f"{'='*60}\n\n")
+        except:
+            pass
+        return 1
 
 
 if __name__ == "__main__":
