@@ -179,7 +179,43 @@ class InstallerV2:
                 
                 if is_version_error and has_wheelhouse:
                     self.log("\n⚠ Detected version mismatch between wheelhouse and installation requirements")
-                    self.log("  This usually means the wheelhouse was built for different hardware")
+                    self.log("  This usually means the wheelhouse was built for different hardware or requirements changed")
+                    
+                    # Check if venv exists - if so, try resume mode first
+                    venv_exists = self.venv.exists()
+                    wheelhouse_valid = False
+                    
+                    if venv_exists:
+                        # Check if wheelhouse validation passes (wheels satisfy current requirements)
+                        self.log("\n🔄 Checking if wheelhouse can be used for resume...")
+                        wheelhouse_mgr = WheelhouseManager(self.manifest_path, self.wheelhouse)
+                        python_version = (sys.version_info.major, sys.version_info.minor)
+                        
+                        # Validate wheelhouse against current requirements
+                        is_valid, error_msg = wheelhouse_mgr._validate_wheelhouse_requirements(package_versions)
+                        wheelhouse_valid = is_valid
+                        
+                        if is_valid:
+                            self.log("  ✓ Wheelhouse validation passed - wheels satisfy current requirements")
+                            self.log("  ✓ Venv exists - will resume installation from where we left off")
+                            self.log("\n🔄 Retrying installation in resume mode...")
+                            self.log("=" * 60)
+                            
+                            # Retry with resume mode (don't clear venv or wheelhouse)
+                            installer = ImmutableInstaller(self.venv, self.wheelhouse, self.manifest_path)
+                            success, error = installer.install(cuda_config)
+                            
+                            if success:
+                                self.log("\n✓ Installation succeeded after resume!")
+                                return True
+                            else:
+                                self.log(f"\n⚠ Resume failed: {error}")
+                                self.log("  Will try full reinstall...")
+                        else:
+                            self.log(f"  ⚠ Wheelhouse validation failed: {error_msg}")
+                            self.log("  Will clear wheelhouse and re-download...")
+                    
+                    # Full retry: Clear wheelhouse and re-download
                     self.log("\n🔄 Auto-fixing: Clearing wheelhouse and re-downloading for your hardware...")
                     
                     # Clear wheelhouse only
@@ -187,10 +223,11 @@ class InstallerV2:
                     shutil.rmtree(self.wheelhouse, ignore_errors=True)
                     self.log("  ✓ Wheelhouse cleared")
                     
-                    # Clear venv
-                    if self.venv.exists():
-                        shutil.rmtree(self.venv, ignore_errors=True)
-                        self.log("  ✓ Venv cleared")
+                    # Only clear venv if resume wasn't attempted or wheelhouse validation failed
+                    if not venv_exists or not wheelhouse_valid:
+                        if self.venv.exists():
+                            shutil.rmtree(self.venv, ignore_errors=True)
+                            self.log("  ✓ Venv cleared")
                     
                     self.log("\n🔄 Retrying installation with fresh downloads for your GPU...")
                     self.log("=" * 60)
