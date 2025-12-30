@@ -1,0 +1,2 @@
+   set USE_HYBRID_FRAME=1
+   python -m desktop_app.main

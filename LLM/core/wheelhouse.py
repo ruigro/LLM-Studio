@@ -232,6 +232,171 @@ class WheelhouseManager:
         
         return True, ""
     
+    def _validate_dependency_compatibility(self, package_versions: dict = None) -> Tuple[bool, str]:
+        """
+        Validate dependency compatibility BEFORE downloading anything.
+        Checks known compatibility rules and ensures versions are compatible.
+        
+        Args:
+            package_versions: Optional dict of {package_name: exact_version} for profile-based mode.
+                            If None, validates against manifest requirements.
+        
+        Returns:
+            Tuple of (is_valid: bool, error_message: str)
+        """
+        compatibility_errors = []
+        
+        # Known compatibility rules (package -> required dependency version)
+        known_requirements = {
+            "transformers": {
+                "4.51.3": {"tokenizers": ">=0.22.0,<=0.23.0"},
+                "4.57.3": {"tokenizers": ">=0.22.0,<=0.23.0"},
+                # Add more as needed
+            }
+        }
+        
+        # Get package versions to check
+        if package_versions:
+            # Profile-based mode: use exact versions from profile
+            versions_to_check = package_versions.copy()
+        else:
+            # Manifest-based mode: extract versions from dependencies.json
+            versions_to_check = {}
+            deps = sorted(self.manifest["core_dependencies"], key=lambda x: x["order"])
+            for dep in deps:
+                if dep["version"] != "FROM_CUDA_CONFIG" and dep.get("critical", False):
+                    # For flexible requirements, we'll check compatibility rules
+                    # but can't validate exact version without downloading
+                    versions_to_check[dep["name"]] = dep["version"]
+        
+        # Check transformers -> tokenizers compatibility
+        # This is the most common compatibility issue
+        if "transformers" in versions_to_check and "tokenizers" in versions_to_check:
+            transformers_spec = versions_to_check["transformers"]
+            tokenizers_spec = versions_to_check["tokenizers"]
+            
+            # Extract minimum transformers version from spec (e.g., ">=4.51.3" -> "4.51.3")
+            min_transformers_ver = None
+            if isinstance(transformers_spec, str):
+                if transformers_spec.startswith(">="):
+                    min_transformers_ver = transformers_spec.split(">=")[1].split(",")[0].strip()
+                elif transformers_spec.startswith("=="):
+                    min_transformers_ver = transformers_spec.split("==")[1].strip()
+            
+            # Check if transformers version requires tokenizers>=0.22.0
+            if min_transformers_ver:
+                # Transformers 4.51.3+ requires tokenizers>=0.22.0,<=0.23.0
+                requires_tokenizers_022 = False
+                if PACKAGING_AVAILABLE:
+                    try:
+                        if pkg_version.parse(min_transformers_ver) >= pkg_version.parse("4.51.3"):
+                            requires_tokenizers_022 = True
+                    except Exception:
+                        # Fallback: string comparison
+                        if "4.51" in min_transformers_ver or "4.57" in min_transformers_ver:
+                            requires_tokenizers_022 = True
+                else:
+                    # Fallback: simple string check
+                    if "4.51" in min_transformers_ver or "4.57" in min_transformers_ver:
+                        requires_tokenizers_022 = True
+                
+                if requires_tokenizers_022:
+                    # Check if tokenizers spec allows 0.22.0+
+                    if isinstance(tokenizers_spec, str):
+                        # Check for common incompatible patterns
+                        if "<0.22" in tokenizers_spec or "0.21" in tokenizers_spec:
+                            compatibility_errors.append(
+                                f"❌ DEPENDENCY CONFLICT DETECTED:\n"
+                                f"   transformers {min_transformers_ver}+ requires tokenizers>=0.22.0,<=0.23.0\n"
+                                f"   but dependencies.json specifies: tokenizers {tokenizers_spec}\n"
+                                f"   This will cause installation to fail when transformers tries to import tokenizers."
+                            )
+                        elif not self._check_version_compatibility("tokenizers", tokenizers_spec, ">=0.22.0,<=0.23.0"):
+                            compatibility_errors.append(
+                                f"❌ DEPENDENCY CONFLICT DETECTED:\n"
+                                f"   transformers {min_transformers_ver}+ requires tokenizers>=0.22.0,<=0.23.0\n"
+                                f"   but dependencies.json specifies: tokenizers {tokenizers_spec}\n"
+                                f"   These version ranges are incompatible."
+                            )
+        
+        # Also check exact version matches in profile mode
+        if package_versions:
+            transformers_ver = package_versions.get("transformers", "")
+            tokenizers_ver = package_versions.get("tokenizers", "")
+            
+            # Check if transformers version requires specific tokenizers version
+            if transformers_ver and tokenizers_ver:
+                # Extract base transformers version (remove +cu124 etc)
+                base_tf_ver = transformers_ver.split("+")[0]
+                
+                # Check known requirements
+                for known_ver, deps in known_requirements.get("transformers", {}).items():
+                    if PACKAGING_AVAILABLE:
+                        try:
+                            if pkg_version.parse(base_tf_ver) >= pkg_version.parse(known_ver):
+                                required_tokenizers = deps.get("tokenizers")
+                                if required_tokenizers:
+                                    # Check if tokenizers version satisfies requirement
+                                    if not self._check_version_compatibility("tokenizers", tokenizers_ver, required_tokenizers):
+                                        compatibility_errors.append(
+                                            f"❌ DEPENDENCY CONFLICT: transformers {base_tf_ver} requires {required_tokenizers}, "
+                                            f"but profile specifies tokenizers {tokenizers_ver}"
+                                        )
+                        except Exception:
+                            pass
+        
+        if compatibility_errors:
+            error_msg = "Dependency compatibility check failed BEFORE installation:\n\n"
+            error_msg += "\n".join(compatibility_errors)
+            error_msg += "\n\nPlease fix dependencies.json or compatibility_matrix.json before proceeding."
+            return False, error_msg
+        
+        return True, ""
+    
+    def _check_version_compatibility(self, package_name: str, version_spec: str, required_spec: str) -> bool:
+        """
+        Check if a version specifier is compatible with a required specifier.
+        
+        Args:
+            package_name: Package name (for logging)
+            version_spec: Version specifier from manifest (e.g., ">=0.21.0,<0.22")
+            required_spec: Required version specifier (e.g., ">=0.22.0,<=0.23.0")
+        
+        Returns:
+            True if compatible, False otherwise
+        """
+        if not PACKAGING_AVAILABLE:
+            # Fallback: simple string checks
+            if "0.21" in version_spec and "0.22" in required_spec:
+                return False
+            return True
+        
+        try:
+            # Parse both specifiers
+            version_set = SpecifierSet(version_spec)
+            required_set = SpecifierSet(required_spec)
+            
+            # Check if there's any overlap between the two specifiers
+            # We need to find a version that satisfies both
+            # This is a simplified check - we'll test a few candidate versions
+            test_versions = ["0.21.0", "0.22.0", "0.22.1", "0.23.0", "0.24.0"]
+            
+            for test_ver in test_versions:
+                try:
+                    parsed_ver = pkg_version.parse(test_ver)
+                    if version_set.contains(parsed_ver) and required_set.contains(parsed_ver):
+                        # Found a version that satisfies both - they're compatible
+                        return True
+                except Exception:
+                    continue
+            
+            # If no overlap found, they're incompatible
+            return False
+        except Exception as e:
+            # If parsing fails, assume incompatible to be safe
+            self.log(f"  ⚠ Could not check compatibility: {e}")
+            return False
+    
     def prepare_wheelhouse(self, cuda_config: str, python_version: Tuple[int, int], package_versions: dict = None, force_redownload: bool = False) -> Tuple[bool, str]:
         """
         Download all wheels to wheelhouse with exact versions.
@@ -249,6 +414,21 @@ class WheelhouseManager:
         """
         try:
             self.log(f"Preparing wheelhouse for {cuda_config}, Python {python_version[0]}.{python_version[1]}")
+            
+            # CRITICAL: Validate dependency compatibility BEFORE downloading anything
+            self.log("Validating dependency compatibility...")
+            is_compatible, error_msg = self._validate_dependency_compatibility(package_versions)
+            if not is_compatible:
+                self.log("")
+                self.log("=" * 60)
+                self.log("✗ DEPENDENCY COMPATIBILITY CHECK FAILED")
+                self.log("=" * 60)
+                self.log("")
+                self.log(error_msg)
+                self.log("")
+                return False, error_msg
+            
+            self.log("✓ Dependency compatibility check passed")
             
             # Check if wheelhouse already has wheels (skip re-download unless forced)
             existing_wheels = list(self.wheelhouse.glob("*.whl"))

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import os
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QProcess, QTimer, QThread, Signal, QProcessEnvironment, QRect, QSize
@@ -10,6 +11,10 @@ from PySide6.QtWidgets import (
     QSpinBox, QDoubleSpinBox, QMessageBox, QListWidget, QListWidgetItem, QSplitter, QToolBar, QScrollArea, QGridLayout, QFrame, QProgressBar, QSizePolicy, QTabBar, QStyleOptionTab, QStyle, QStackedWidget, QGroupBox
 )
 from PySide6.QtGui import QAction, QIcon, QFont, QMouseEvent, QCursor, QPixmap
+
+# Feature flag for hybrid frame wrapper (enabled by default)
+# To disable: set USE_HYBRID_FRAME=0 before running
+USE_HYBRID_FRAME = os.getenv("USE_HYBRID_FRAME", "1") == "1"
 
 from desktop_app.model_card_widget import ModelCard, DownloadedModelCard
 from desktop_app.training_widgets import MetricCard
@@ -5227,6 +5232,66 @@ def main() -> int:
     # Show main window IMMEDIATELY
     splash.update_progress(100, "Ready!", "")
     app.processEvents()
+    
+    # Apply decorative frame wrapper if enabled
+    if USE_HYBRID_FRAME:
+        try:
+            # Import frame module
+            llm_dir = Path(__file__).parent.parent
+            if str(llm_dir) not in sys.path:
+                sys.path.insert(0, str(llm_dir))
+            from ui_frame.hybrid_frame import HybridFrameWindow, FrameAssets
+            
+            # Extract ONLY central widget
+            central = win.takeCentralWidget()
+            if central is None:
+                raise ValueError("No central widget")
+            
+            # CRITICAL: Apply the MainWindow's stylesheet to preserve styling
+            # Get the theme stylesheet from MainWindow (dark mode by default)
+            from desktop_app.main import get_theme_stylesheet
+            theme_stylesheet = get_theme_stylesheet(win.dark_mode, win.color_theme)
+            
+            # Create frame with assets
+            assets_dir = llm_dir / "ui_frame" / "assets"
+            assets = FrameAssets(
+                corner_tl=str(assets_dir / "corner_tl.png") if (assets_dir / "corner_tl.png").exists() else None,
+                corner_tr=str(assets_dir / "corner_tr.png") if (assets_dir / "corner_tr.png").exists() else None,
+                corner_bl=str(assets_dir / "corner_bl.png") if (assets_dir / "corner_bl.png").exists() else None,
+                corner_br=str(assets_dir / "corner_br.png") if (assets_dir / "corner_br.png").exists() else None,
+                top_center=str(assets_dir / "top_center.png") if (assets_dir / "top_center.png").exists() else None,
+            )
+            # Smaller frame decorations
+            frame = HybridFrameWindow(assets, corner_size=40, border_thickness=4, safe_padding=2)
+            
+            # Apply the theme stylesheet to the frame so it matches MainWindow
+            frame.setStyleSheet(theme_stylesheet)
+            
+            # Mount widget and setup
+            frame.set_content_widget(central)
+            
+            # Apply stylesheet to central widget to preserve all styling
+            central.setStyleSheet(theme_stylesheet)
+            
+            frame.setWindowTitle(win.windowTitle())
+            frame.resize(win.size())
+            frame.setMinimumSize(win.minimumSize())
+            
+            # Hide MainWindow, show only frame
+            win.hide()
+            frame.show()
+            splash.finish(frame)
+            
+            # Keep MainWindow alive for methods
+            frame._main_window = win
+            QTimer.singleShot(0, lambda: win._start_background_detection())
+            
+            return app.exec()
+        except Exception as e:
+            print(f"Frame init failed: {e}, using standard window")
+            # Fall through to original path
+    
+    # Original path (unchanged)
     win.show()
     splash.finish(win)
     

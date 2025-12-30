@@ -151,10 +151,10 @@
     },
     {
       "name": "tokenizers",
-      "version": ">=0.21.0,<0.22",
+      "version": ">=0.22.0,<=0.23.0",
       "order": 26,
       "critical": true,
-      "comment": "Must be compatible with transformers version"
+      "comment": "Must be compatible with transformers 4.51.3+ which requires tokenizers>=0.22.0,<=0.23.0"
     },
     {
       "name": "huggingface-hub",

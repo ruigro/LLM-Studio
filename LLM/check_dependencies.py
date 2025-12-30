@@ -95,7 +95,7 @@ def verify_all():
     checks = [
         ("numpy", "<2.0.0"),
         ("transformers", "==4.51.3"),
-        ("tokenizers", ">=0.21,<0.22"),
+        ("tokenizers", ">=0.22.0,<=0.23.0"),
         ("datasets", ">=2.11.0,<4.4.0"),
     ]
     
