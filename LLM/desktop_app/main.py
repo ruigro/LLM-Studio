@@ -5289,8 +5289,9 @@ def main() -> int:
             frame.show()
             splash.finish(frame)
             
-            # Keep MainWindow alive for methods
+            # Keep MainWindow alive for methods and store frame reference for theme updates
             frame._main_window = win
+            win._hybrid_frame = frame  # Store reference so theme updates can update the frame
             QTimer.singleShot(0, lambda: win._start_background_detection())
             
             return app.exec()
