@@ -316,32 +316,37 @@ class HybridFrameWindow(QWidget):
 
             d = self._hit_test_resize(event.pos())
             if d != 0:
-            self._resizing = True
-            self._resize_dir = d
-            # Handle QPointF from globalPosition() safely
-            gp = event.globalPosition()
-            if isinstance(gp, QPointF):
-                self._press_global = QPoint(int(gp.x()), int(gp.y()))
-            else:
-                self._press_global = gp.toPoint() if hasattr(gp, 'toPoint') else gp
-            self._press_geom = self.geometry()
-            event.accept()
-            return
+                self._resizing = True
+                self._resize_dir = d
+                # Handle QPointF from globalPosition() safely
+                gp = event.globalPosition()
+                if isinstance(gp, QPointF):
+                    self._press_global = QPoint(int(gp.x()), int(gp.y()))
+                else:
+                    self._press_global = gp.toPoint() if hasattr(gp, 'toPoint') else gp
+                self._press_geom = self.geometry()
+                event.accept()
+                return
 
-        # Drag only if not clicking inside content (so widgets still work)
-        if self._is_in_content(event.pos()):
-            return
+            # Drag only if not clicking inside content (so widgets still work)
+            if self._is_in_content(event.pos()):
+                return
 
-        self._dragging = True
-        try:
-            # Handle QPointF from globalPosition() safely
-            gp = event.globalPosition()
-            if isinstance(gp, QPointF):
-                global_pos = QPoint(int(gp.x()), int(gp.y()))
-            else:
-                global_pos = gp.toPoint() if hasattr(gp, 'toPoint') else gp
-            self._drag_offset = global_pos - self.frameGeometry().topLeft()
-        except Exception as e:
+            self._dragging = True
+            try:
+                # Handle QPointF from globalPosition() safely
+                gp = event.globalPosition()
+                if isinstance(gp, QPointF):
+                    global_pos = QPoint(int(gp.x()), int(gp.y()))
+                else:
+                    global_pos = gp.toPoint() if hasattr(gp, 'toPoint') else gp
+                # Try geometry() first, fallback to frameGeometry()
+                try:
+                    frame_top_left = self.geometry().topLeft()
+                except:
+                    frame_top_left = self.frameGeometry().topLeft()
+                self._drag_offset = global_pos - frame_top_left
+            except Exception as e:
             import traceback
             error_msg = f"Drag press error: {e}\n{traceback.format_exc()}"
             print(error_msg)
@@ -357,8 +362,8 @@ class HybridFrameWindow(QWidget):
                     f.write(f"\n[{datetime.now()}] DRAG PRESS ERROR:\n{error_msg}\n")
             except Exception as log_err:
                 print(f"Failed to write drag error log: {log_err}")
-                self._dragging = False
-                self._drag_offset = QPoint(0, 0)
+            self._dragging = False
+            self._drag_offset = QPoint(0, 0)
             event.accept()
         except Exception as outer_e:
             # Catch any exception in the entire mousePressEvent
