@@ -317,7 +317,7 @@ class HybridFrameWindow(QWidget):
         if d != 0:
             self._resizing = True
             self._resize_dir = d
-            self._press_global = event.globalPosition().toPoint()
+            self._press_global = event.globalPos()
             self._press_geom = self.geometry()
             event.accept()
             return
@@ -327,17 +327,17 @@ class HybridFrameWindow(QWidget):
             return
 
         self._dragging = True
-        self._drag_offset = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+        self._drag_offset = event.globalPos() - self.pos()
         event.accept()
 
     def mouseMoveEvent(self, event) -> None:
         if self._resizing:
-            self._apply_resize(event.globalPosition().toPoint())
+            self._apply_resize(event.globalPos())
             event.accept()
             return
 
         if self._dragging:
-            self.move(event.globalPosition().toPoint() - self._drag_offset)
+            self.move(event.globalPos() - self._drag_offset)
             event.accept()
             return
 
