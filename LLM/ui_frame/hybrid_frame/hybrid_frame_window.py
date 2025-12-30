@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import Qt, QPoint, QRect, QSize, QEvent
+from PySide6.QtCore import Qt, QPoint, QPointF, QRect, QSize, QEvent
 from PySide6.QtGui import QPainter, QPixmap, QPen, QColor, QLinearGradient, QBrush
 from PySide6.QtWidgets import QWidget, QVBoxLayout
 
@@ -317,7 +317,12 @@ class HybridFrameWindow(QWidget):
         if d != 0:
             self._resizing = True
             self._resize_dir = d
-            self._press_global = event.globalPosition().toPoint()
+            # Handle QPointF from globalPosition() safely
+            gp = event.globalPosition()
+            if isinstance(gp, QPointF):
+                self._press_global = QPoint(int(gp.x()), int(gp.y()))
+            else:
+                self._press_global = gp.toPoint() if hasattr(gp, 'toPoint') else gp
             self._press_geom = self.geometry()
             event.accept()
             return
@@ -327,17 +332,35 @@ class HybridFrameWindow(QWidget):
             return
 
         self._dragging = True
-        self._drag_offset = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+        # Handle QPointF from globalPosition() safely
+        gp = event.globalPosition()
+        if isinstance(gp, QPointF):
+            global_pos = QPoint(int(gp.x()), int(gp.y()))
+        else:
+            global_pos = gp.toPoint() if hasattr(gp, 'toPoint') else gp
+        self._drag_offset = global_pos - self.frameGeometry().topLeft()
         event.accept()
 
     def mouseMoveEvent(self, event) -> None:
         if self._resizing:
-            self._apply_resize(event.globalPosition().toPoint())
+            # Handle QPointF from globalPosition() safely
+            gp = event.globalPosition()
+            if isinstance(gp, QPointF):
+                global_pos = QPoint(int(gp.x()), int(gp.y()))
+            else:
+                global_pos = gp.toPoint() if hasattr(gp, 'toPoint') else gp
+            self._apply_resize(global_pos)
             event.accept()
             return
 
         if self._dragging:
-            self.move(event.globalPosition().toPoint() - self._drag_offset)
+            # Handle QPointF from globalPosition() safely
+            gp = event.globalPosition()
+            if isinstance(gp, QPointF):
+                global_pos = QPoint(int(gp.x()), int(gp.y()))
+            else:
+                global_pos = gp.toPoint() if hasattr(gp, 'toPoint') else gp
+            self.move(global_pos - self._drag_offset)
             event.accept()
             return
 
