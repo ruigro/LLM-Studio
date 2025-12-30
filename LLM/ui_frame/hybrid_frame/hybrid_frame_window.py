@@ -398,8 +398,8 @@ class HybridFrameWindow(QWidget):
                         global_pos = QPoint(int(gp.x()), int(gp.y()))
                     else:
                         global_pos = gp.toPoint() if hasattr(gp, 'toPoint') else gp
-                # Calculate new position
-                new_pos = global_pos - self._drag_offset
+                    # Calculate new position
+                    new_pos = global_pos - self._drag_offset
                 
                 # Validate coordinates are within reasonable screen bounds
                 # Allow some tolerance outside screen for multi-monitor setups
