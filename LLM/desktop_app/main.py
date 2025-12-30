@@ -1949,9 +1949,12 @@ class MainWindow(QMainWindow):
         self._update_themed_widgets(primary, secondary, accent)
         
         # Update HybridFrameWindow content if it exists (when using hybrid frame)
-        # The frame itself is just decorative - update the content widget inside it
+        # The frame itself is just decorative - update the content_container and widget inside it
+        if hasattr(self, '_hybrid_frame_container') and self._hybrid_frame_container is not None:
+            # Apply theme to the content_container (where the widget lives)
+            self._hybrid_frame_container.setStyleSheet(stylesheet)
         if hasattr(self, '_hybrid_frame_content') and self._hybrid_frame_content is not None:
-            # Apply theme directly to the central widget that was moved into the frame
+            # Also apply theme to the central widget itself
             self._hybrid_frame_content.setStyleSheet(stylesheet)
     
     def _update_themed_widgets(self, primary: str, secondary: str, accent: str) -> None:
@@ -5274,11 +5277,15 @@ def main() -> int:
             # Mount widget and setup
             frame.set_content_widget(central)
             
-            # Apply stylesheet to central widget (the actual content) - frame is just decorative
+            # Apply stylesheet to the content_container (where the widget lives) - frame is just decorative
+            frame.content_container.setStyleSheet(theme_stylesheet)
+            
+            # Also apply to central widget itself
             central.setStyleSheet(theme_stylesheet)
             
-            # Store reference to central widget for theme updates
+            # Store references for theme updates
             win._hybrid_frame_content = central
+            win._hybrid_frame_container = frame.content_container
             
             frame.setWindowTitle(win.windowTitle())
             frame.resize(win.size())
