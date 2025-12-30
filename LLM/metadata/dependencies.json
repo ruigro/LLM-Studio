@@ -158,9 +158,10 @@
     },
     {
       "name": "huggingface-hub",
-      "version": ">=0.25.0",
+      "version": ">=0.34.0,<1.0",
       "order": 27,
-      "critical": true
+      "critical": true,
+      "comment": "Must be <1.0 to match transformers requirements (transformers requires >=0.34.0,<1.0)"
     },
     {
       "name": "transformers",

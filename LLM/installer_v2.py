@@ -168,18 +168,32 @@ class InstallerV2:
                 self.log(f"\n✗ Installation failed:")
                 self.log(f"  {error}")
                 
+                # Check if this is a version conflict error (package installed but wrong version)
+                is_version_conflict = any(phrase in error.lower() for phrase in [
+                    "is required",
+                    "but found",
+                    "version",
+                    "importerror",
+                    "package installed but import failed"
+                ])
+                
                 # Check if this is SPECIFICALLY a version mismatch error with the wheelhouse
                 # Only retry if we see package version errors AND wheelhouse exists
                 is_version_error = any(phrase in error for phrase in [
                     "Could not find a version",
                     "No matching distribution found"
-                ])
+                ]) or is_version_conflict
                 
                 has_wheelhouse = self.wheelhouse.exists() and len(list(self.wheelhouse.glob("*.whl"))) > 0
                 
                 if is_version_error and has_wheelhouse:
-                    self.log("\n⚠ Detected version mismatch between wheelhouse and installation requirements")
-                    self.log("  This usually means the wheelhouse was built for different hardware or requirements changed")
+                    if is_version_conflict:
+                        self.log("\n⚠ Detected version conflict - package installed but wrong version")
+                        self.log("  This usually means the wheelhouse has incompatible package versions")
+                        self.log("  The installer will clear the wheelhouse and re-download with correct versions")
+                    else:
+                        self.log("\n⚠ Detected version mismatch between wheelhouse and installation requirements")
+                        self.log("  This usually means the wheelhouse was built for different hardware or requirements changed")
                     
                     # Check if venv exists - if so, try resume mode first
                     venv_exists = self.venv.exists()

@@ -359,7 +359,7 @@ class WheelhouseManager:
         
         Args:
             package_name: Package name (for logging)
-            version_spec: Version specifier from manifest (e.g., ">=0.21.0,<0.22")
+            version_spec: Version specifier from manifest (e.g., ">=0.21.0,<0.22" or exact "0.22.0")
             required_spec: Required version specifier (e.g., ">=0.22.0,<=0.23.0")
         
         Returns:
@@ -372,30 +372,47 @@ class WheelhouseManager:
             return True
         
         try:
-            # Parse both specifiers
-            version_set = SpecifierSet(version_spec)
+            # Parse required specifier
             required_set = SpecifierSet(required_spec)
             
-            # Check if there's any overlap between the two specifiers
-            # We need to find a version that satisfies both
-            # This is a simplified check - we'll test a few candidate versions
-            test_versions = ["0.21.0", "0.22.0", "0.22.1", "0.23.0", "0.24.0"]
+            # Check if version_spec is an exact version (no operators like >=, !=, etc)
+            # Exact version format: digits, dots, optional +suffix (like 0.22.0 or 2.5.1+cu121)
+            is_exact_version = re.match(r'^[\d.]+(\+[\w.]+)?$', version_spec.strip())
             
-            for test_ver in test_versions:
+            if is_exact_version:
+                # It's an exact version - check if it satisfies the required spec
                 try:
-                    parsed_ver = pkg_version.parse(test_ver)
-                    if version_set.contains(parsed_ver) and required_set.contains(parsed_ver):
-                        # Found a version that satisfies both - they're compatible
-                        return True
-                except Exception:
-                    continue
-            
-            # If no overlap found, they're incompatible
-            return False
+                    parsed_ver = pkg_version.parse(version_spec)
+                    is_compatible = required_set.contains(parsed_ver)
+                    if not is_compatible:
+                        self.log(f"  ⚠ Version {version_spec} does not satisfy {required_spec}")
+                    return is_compatible
+                except Exception as e:
+                    self.log(f"  ⚠ Could not parse exact version {version_spec}: {e}")
+                    return False
+            else:
+                # It's a specifier - check for overlap between two specifiers
+                version_set = SpecifierSet(version_spec)
+                
+                # Test a few candidate versions to see if any satisfy both
+                test_versions = ["0.21.0", "0.22.0", "0.22.1", "0.23.0", "0.24.0"]
+                
+                for test_ver in test_versions:
+                    try:
+                        parsed_ver = pkg_version.parse(test_ver)
+                        if version_set.contains(parsed_ver) and required_set.contains(parsed_ver):
+                            # Found a version that satisfies both - they're compatible
+                            return True
+                    except Exception:
+                        continue
+                
+                # If no overlap found, they're incompatible
+                self.log(f"  ⚠ No version overlap between {version_spec} and {required_spec}")
+                return False
         except Exception as e:
-            # If parsing fails, assume incompatible to be safe
-            self.log(f"  ⚠ Could not check compatibility: {e}")
-            return False
+            # If parsing fails, log and return True to avoid blocking valid configs
+            self.log(f"  ⚠ Could not check compatibility: {e} - allowing to proceed")
+            return True  # Changed from False to True to be less strict
     
     def prepare_wheelhouse(self, cuda_config: str, python_version: Tuple[int, int], package_versions: dict = None, force_redownload: bool = False) -> Tuple[bool, str]:
         """

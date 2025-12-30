@@ -5253,7 +5253,7 @@ def main() -> int:
             theme_stylesheet = get_theme_stylesheet(win.dark_mode, win.color_theme)
             
             # Create frame with assets
-            assets_dir = llm_dir / "ui_frame" / "assets"
+            assets_dir = llm_dir / "LLM" / "ui_frame" / "assets"
             assets = FrameAssets(
                 corner_tl=str(assets_dir / "corner_tl.png") if (assets_dir / "corner_tl.png").exists() else None,
                 corner_tr=str(assets_dir / "corner_tr.png") if (assets_dir / "corner_tr.png").exists() else None,

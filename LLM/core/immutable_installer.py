@@ -243,7 +243,48 @@ class ImmutableInstaller:
             error_msg = str(e)
             self.log(f"✗ Installation failed: {error_msg}")
             
-            # Delete corrupted venv
+            # Check if this is a version conflict that might be fixable
+            is_version_conflict = self._is_version_conflict_error(error_msg)
+            
+            if is_version_conflict:
+                self.log("\n⚠ Detected version conflict error")
+                self.log("  Attempting to fix by reinstalling problematic packages...")
+                
+                # Get venv Python if it exists
+                if self.venv_path.exists():
+                    if sys.platform == 'win32':
+                        venv_python = self.venv_path / "Scripts" / "python.exe"
+                    else:
+                        venv_python = self.venv_path / "bin" / "python"
+                    
+                    if venv_python.exists():
+                        # Try to fix version conflicts
+                        fix_success = self._fix_version_conflicts(venv_python, error_msg)
+                        
+                        if fix_success:
+                            self.log("\n🔄 Retrying installation from where we left off...")
+                            # Retry installation in resume mode
+                            try:
+                                self._install_packages(
+                                    cuda_config,
+                                    venv_python,
+                                    skip_installed=True,
+                                    packages_to_install=None  # Install all missing/wrong packages
+                                )
+                                
+                                # Clear cache and verify
+                                self._clear_pycache()
+                                self._verify_installation(venv_python)
+                                
+                                self.log("=" * 60)
+                                self.log("✓ Installation complete (after version conflict fix)")
+                                self.log("=" * 60)
+                                return True, ""
+                            except Exception as retry_error:
+                                self.log(f"  ✗ Retry after fix failed: {retry_error}")
+                                # Fall through to cleanup
+            
+            # Delete corrupted venv only if we can't fix it
             if self.venv_path.exists():
                 self.log("Cleaning up corrupted venv...")
                 try:
@@ -522,7 +563,24 @@ class ImmutableInstaller:
             if dep.get("critical", False) and pkg_name in ["torch", "transformers", "peft"]:
                 success, error = self._verify_package_import(venv_python, pkg_name)
                 if not success:
-                    raise InstallationFailed(f"Package {pkg_name} installed but import failed: {error}")
+                    # Check if this is a version conflict error that we can fix
+                    if self._is_version_conflict_error(error):
+                        self.log(f"  ⚠ Detected version conflict for {pkg_name}: {error[:200]}")
+                        self.log(f"  🔄 Attempting to fix by reinstalling dependencies...")
+                        
+                        # Try to fix version conflicts by reinstalling problematic dependencies
+                        fix_success = self._fix_version_conflicts(venv_python, error)
+                        if fix_success:
+                            # Retry verification
+                            success, error = self._verify_package_import(venv_python, pkg_name)
+                            if success:
+                                self.log(f"  ✓ Version conflict resolved for {pkg_name}")
+                                continue
+                            else:
+                                self.log(f"  ⚠ Fix attempt failed, will continue with original error")
+                    
+                    if not success:
+                        raise InstallationFailed(f"Package {pkg_name} installed but import failed: {error}")
         
         if skipped_count > 0:
             self.log(f"  ✓ Installation complete: {installed_count} installed, {skipped_count} skipped (already installed)")
@@ -718,6 +776,121 @@ except PackageNotFoundError:
                 
         except Exception as e:
             return False, str(e)
+    
+    def _is_version_conflict_error(self, error: str) -> bool:
+        """
+        Check if error is a version conflict that can be fixed.
+        
+        Args:
+            error: Error message from import verification
+        
+        Returns:
+            True if this is a version conflict error
+        """
+        version_conflict_indicators = [
+            "is required",
+            "but found",
+            "version",
+            "ImportError",
+            "required for"
+        ]
+        
+        error_lower = error.lower()
+        # Check if it mentions version requirements
+        has_version_keywords = any(indicator in error_lower for indicator in version_conflict_indicators)
+        
+        # Check if it's specifically about package versions (not other import errors)
+        if has_version_keywords and ("required" in error_lower or "but found" in error_lower):
+            return True
+        
+        return False
+    
+    def _fix_version_conflicts(self, venv_python: Path, error: str) -> bool:
+        """
+        Attempt to fix version conflicts by reinstalling problematic packages.
+        
+        Args:
+            venv_python: Path to venv Python
+            error: Error message that indicates version conflict
+        
+        Returns:
+            True if fix was attempted and succeeded, False otherwise
+        """
+        # Parse error to find which package has wrong version
+        # Example: "huggingface-hub>=0.34.0,<1.0 is required... but found huggingface-hub==1.2.3"
+        
+        import re
+        
+        # Pattern 1: "package>=X,<Y is required... but found package==Z"
+        pattern1 = r'(\w+(?:-\w+)*)\s*(?:>=|==|>|<)[\d.,<>=\s]+is required.*?but found\s+(\w+(?:-\w+)*)==([\d.]+)'
+        match = re.search(pattern1, error, re.IGNORECASE | re.DOTALL)
+        
+        if match:
+            required_pkg = match.group(1)
+            found_pkg = match.group(2)
+            wrong_version = match.group(3)
+            
+            # Use the package name from "but found" as it's more reliable
+            pkg_name = found_pkg if found_pkg else required_pkg
+        else:
+            # Pattern 2: "but found package==version"
+            pattern2 = r'but found\s+(\w+(?:-\w+)*)==([\d.]+)'
+            match = re.search(pattern2, error, re.IGNORECASE)
+            
+            if match:
+                pkg_name = match.group(1)
+                wrong_version = match.group(2)
+            else:
+                # Pattern 3: Extract package name from error context
+                # Look for common package names in the error
+                common_packages = ["huggingface-hub", "transformers", "tokenizers", "peft", "datasets"]
+                pkg_name = None
+                for pkg in common_packages:
+                    if pkg.lower() in error.lower():
+                        pkg_name = pkg
+                        break
+                
+                if not pkg_name:
+                    self.log(f"    ⚠ Could not identify package from error message")
+                    return False
+        
+        # Find correct version from manifest
+        deps = sorted(self.manifest["core_dependencies"], key=lambda x: x["order"])
+        dep_info = None
+        
+        for dep in deps:
+            if dep["name"].lower() == pkg_name.lower().replace("_", "-"):
+                dep_info = dep
+                break
+        
+        if not dep_info:
+            self.log(f"    ⚠ Package {pkg_name} not found in manifest")
+            return False
+        
+        version_spec = dep_info["version"]
+        self.log(f"    Reinstalling {pkg_name} with correct version {version_spec}...")
+        
+        # Uninstall wrong version
+        uninstall_cmd = [str(venv_python), "-m", "pip", "uninstall", "-y", pkg_name]
+        result = subprocess.run(uninstall_cmd, capture_output=True, timeout=60, **self.subprocess_flags)
+        
+        if result.returncode != 0:
+            self.log(f"    ⚠ Uninstall had issues: {result.stderr[:200]}")
+        
+        # Reinstall with correct version from wheelhouse
+        success, install_error = self._install_single_package(
+            venv_python=venv_python,
+            package_name=pkg_name,
+            version_spec=version_spec,
+            install_args=dep_info.get("install_args", [])
+        )
+        
+        if success:
+            self.log(f"    ✓ {pkg_name} reinstalled with correct version")
+            return True
+        else:
+            self.log(f"    ✗ Failed to reinstall {pkg_name}: {install_error[:200]}")
+            return False
     
     def _clear_pycache(self):
         """Clear Python bytecode cache to prevent lazy_loader corruption"""
