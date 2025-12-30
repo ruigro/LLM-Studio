@@ -347,23 +347,23 @@ class HybridFrameWindow(QWidget):
                     frame_top_left = self.frameGeometry().topLeft()
                 self._drag_offset = global_pos - frame_top_left
             except Exception as e:
-            import traceback
-            error_msg = f"Drag press error: {e}\n{traceback.format_exc()}"
-            print(error_msg)
-            # Write to log file
-            try:
-                from pathlib import Path
-                # File is at LLM/ui_frame/hybrid_frame/hybrid_frame_window.py
-                # Go up to LLM/ then to logs/
-                log_file = Path(__file__).parent.parent.parent / "logs" / "drag_error.log"
-                log_file.parent.mkdir(exist_ok=True)
-                with open(log_file, "a", encoding="utf-8") as f:
-                    from datetime import datetime
-                    f.write(f"\n[{datetime.now()}] DRAG PRESS ERROR:\n{error_msg}\n")
-            except Exception as log_err:
-                print(f"Failed to write drag error log: {log_err}")
-            self._dragging = False
-            self._drag_offset = QPoint(0, 0)
+                import traceback
+                error_msg = f"Drag press error: {e}\n{traceback.format_exc()}"
+                print(error_msg)
+                # Write to log file
+                try:
+                    from pathlib import Path
+                    # File is at LLM/ui_frame/hybrid_frame/hybrid_frame_window.py
+                    # Go up to LLM/ then to logs/
+                    log_file = Path(__file__).parent.parent.parent / "logs" / "drag_error.log"
+                    log_file.parent.mkdir(exist_ok=True)
+                    with open(log_file, "a", encoding="utf-8") as f:
+                        from datetime import datetime
+                        f.write(f"\n[{datetime.now()}] DRAG PRESS ERROR:\n{error_msg}\n")
+                except Exception as log_err:
+                    print(f"Failed to write drag error log: {log_err}")
+                self._dragging = False
+                self._drag_offset = QPoint(0, 0)
             event.accept()
         except Exception as outer_e:
             # Catch any exception in the entire mousePressEvent
