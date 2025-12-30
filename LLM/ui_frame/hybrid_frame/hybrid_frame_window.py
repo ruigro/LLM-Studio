@@ -332,13 +332,30 @@ class HybridFrameWindow(QWidget):
             return
 
         self._dragging = True
-        # Handle QPointF from globalPosition() safely
-        gp = event.globalPosition()
-        if isinstance(gp, QPointF):
-            global_pos = QPoint(int(gp.x()), int(gp.y()))
-        else:
-            global_pos = gp.toPoint() if hasattr(gp, 'toPoint') else gp
-        self._drag_offset = global_pos - self.frameGeometry().topLeft()
+        try:
+            # Handle QPointF from globalPosition() safely
+            gp = event.globalPosition()
+            if isinstance(gp, QPointF):
+                global_pos = QPoint(int(gp.x()), int(gp.y()))
+            else:
+                global_pos = gp.toPoint() if hasattr(gp, 'toPoint') else gp
+            self._drag_offset = global_pos - self.frameGeometry().topLeft()
+        except Exception as e:
+            import traceback
+            error_msg = f"Drag press error: {e}\n{traceback.format_exc()}"
+            print(error_msg)
+            # Write to log file
+            try:
+                from pathlib import Path
+                log_file = Path(__file__).parent.parent.parent / "LLM" / "logs" / "drag_error.log"
+                log_file.parent.mkdir(exist_ok=True)
+                with open(log_file, "a", encoding="utf-8") as f:
+                    from datetime import datetime
+                    f.write(f"\n[{datetime.now()}] DRAG PRESS ERROR:\n{error_msg}\n")
+            except:
+                pass
+            self._dragging = False
+            self._drag_offset = QPoint(0, 0)
         event.accept()
 
     def mouseMoveEvent(self, event) -> None:
@@ -354,13 +371,29 @@ class HybridFrameWindow(QWidget):
             return
 
         if self._dragging:
-            # Handle QPointF from globalPosition() safely
-            gp = event.globalPosition()
-            if isinstance(gp, QPointF):
-                global_pos = QPoint(int(gp.x()), int(gp.y()))
-            else:
-                global_pos = gp.toPoint() if hasattr(gp, 'toPoint') else gp
-            self.move(global_pos - self._drag_offset)
+            try:
+                # Handle QPointF from globalPosition() safely
+                gp = event.globalPosition()
+                if isinstance(gp, QPointF):
+                    global_pos = QPoint(int(gp.x()), int(gp.y()))
+                else:
+                    global_pos = gp.toPoint() if hasattr(gp, 'toPoint') else gp
+                self.move(global_pos - self._drag_offset)
+            except Exception as e:
+                import traceback
+                error_msg = f"Drag move error: {e}\n{traceback.format_exc()}"
+                print(error_msg)
+                # Write to log file
+                try:
+                    from pathlib import Path
+                    log_file = Path(__file__).parent.parent.parent / "LLM" / "logs" / "drag_error.log"
+                    log_file.parent.mkdir(exist_ok=True)
+                    with open(log_file, "a", encoding="utf-8") as f:
+                        from datetime import datetime
+                        f.write(f"\n[{datetime.now()}] DRAG MOVE ERROR:\n{error_msg}\n")
+                except:
+                    pass
+                self._dragging = False
             event.accept()
             return
 
