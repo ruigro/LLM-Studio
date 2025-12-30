@@ -347,13 +347,15 @@ class HybridFrameWindow(QWidget):
             # Write to log file
             try:
                 from pathlib import Path
-                log_file = Path(__file__).parent.parent.parent / "LLM" / "logs" / "drag_error.log"
+                # File is at LLM/ui_frame/hybrid_frame/hybrid_frame_window.py
+                # Go up to LLM/ then to logs/
+                log_file = Path(__file__).parent.parent.parent / "logs" / "drag_error.log"
                 log_file.parent.mkdir(exist_ok=True)
                 with open(log_file, "a", encoding="utf-8") as f:
                     from datetime import datetime
                     f.write(f"\n[{datetime.now()}] DRAG PRESS ERROR:\n{error_msg}\n")
-            except:
-                pass
+            except Exception as log_err:
+                print(f"Failed to write drag error log: {log_err}")
             self._dragging = False
             self._drag_offset = QPoint(0, 0)
         event.accept()
@@ -386,13 +388,15 @@ class HybridFrameWindow(QWidget):
                 # Write to log file
                 try:
                     from pathlib import Path
-                    log_file = Path(__file__).parent.parent.parent / "LLM" / "logs" / "drag_error.log"
+                    # File is at LLM/ui_frame/hybrid_frame/hybrid_frame_window.py
+                    # Go up to LLM/ then to logs/
+                    log_file = Path(__file__).parent.parent.parent / "logs" / "drag_error.log"
                     log_file.parent.mkdir(exist_ok=True)
                     with open(log_file, "a", encoding="utf-8") as f:
                         from datetime import datetime
                         f.write(f"\n[{datetime.now()}] DRAG MOVE ERROR:\n{error_msg}\n")
-                except:
-                    pass
+                except Exception as log_err:
+                    print(f"Failed to write drag error log: {log_err}")
                 self._dragging = False
             event.accept()
             return
