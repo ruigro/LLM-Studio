@@ -1107,6 +1107,7 @@ class MainWindow(QMainWindow):
         """)
         close_btn.clicked.connect(self.close)
         header_layout.addWidget(close_btn)
+        self.close_btn = close_btn  # Store reference for frame integration
         
         # Create main layout
         main_widget = QWidget()
@@ -5292,6 +5293,13 @@ def main() -> int:
             # Keep MainWindow alive for methods and store frame reference for theme updates
             frame._main_window = win
             win._hybrid_frame = frame  # Store reference so theme updates can update the frame
+            
+            # Make MainWindow's close button close the frame
+            def close_frame():
+                frame.close()
+            win.close_btn.clicked.disconnect()  # Disconnect existing handler
+            win.close_btn.clicked.connect(close_frame)
+            
             QTimer.singleShot(0, lambda: win._start_background_detection())
             
             return app.exec()
