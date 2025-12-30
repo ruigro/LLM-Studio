@@ -5264,65 +5264,67 @@ def main() -> int:
         # Apply decorative frame wrapper if enabled
         if USE_HYBRID_FRAME:
             try:
-            # Import frame module
-            llm_dir = Path(__file__).parent.parent
-            if str(llm_dir) not in sys.path:
-                sys.path.insert(0, str(llm_dir))
-            from ui_frame.hybrid_frame import HybridFrameWindow, FrameAssets
-            
-            # Extract ONLY central widget
-            central = win.takeCentralWidget()
-            if central is None:
-                raise ValueError("No central widget")
-            
-            # CRITICAL: Apply the MainWindow's stylesheet to preserve styling
-            # Get the theme stylesheet from MainWindow (dark mode by default)
-            from desktop_app.main import get_theme_stylesheet
-            theme_stylesheet = get_theme_stylesheet(win.dark_mode, win.color_theme)
-            
-            # Create frame with assets
-            assets_dir = llm_dir / "LLM" / "ui_frame" / "assets"
-            assets = FrameAssets(
-                corner_tl=str(assets_dir / "corner_tl.png") if (assets_dir / "corner_tl.png").exists() else None,
-                corner_tr=str(assets_dir / "corner_tr.png") if (assets_dir / "corner_tr.png").exists() else None,
-                corner_bl=str(assets_dir / "corner_bl.png") if (assets_dir / "corner_bl.png").exists() else None,
-                corner_br=str(assets_dir / "corner_br.png") if (assets_dir / "corner_br.png").exists() else None,
-                top_center=str(assets_dir / "top_center.png") if (assets_dir / "top_center.png").exists() else None,
-            )
-            # Smaller frame decorations
-            frame = HybridFrameWindow(assets, corner_size=15, border_thickness=4, safe_padding=2)
-            
-            # Mount widget and setup
-            frame.set_content_widget(central)
-            
-            # Apply stylesheet ONLY to the central widget - frame and container are just decorative
-            central.setStyleSheet(theme_stylesheet)
-            
-            # Store reference to central widget for theme updates
-            win._hybrid_frame_content = central
-            
-            frame.setWindowTitle(win.windowTitle())
-            frame.resize(win.size())
-            frame.setMinimumSize(win.minimumSize())
-            
-            # Hide MainWindow, show only frame
-            win.hide()
-            frame.show()
-            splash.finish(frame)
-            
-            # Keep MainWindow alive for methods and store frame reference for theme updates
-            frame._main_window = win
-            win._hybrid_frame = frame  # Store reference so theme updates can update the frame
-            
-            # Make MainWindow's close button close the frame
-            def close_frame():
-                frame.close()
-            win.close_btn.clicked.disconnect()  # Disconnect existing handler
-            win.close_btn.clicked.connect(close_frame)
-            
-            QTimer.singleShot(0, lambda: win._start_background_detection())
-            
-            return app.exec()
+                # Import frame module
+                llm_dir = Path(__file__).parent.parent
+                if str(llm_dir) not in sys.path:
+                    sys.path.insert(0, str(llm_dir))
+                from ui_frame.hybrid_frame import HybridFrameWindow, FrameAssets
+                
+                # Extract ONLY central widget
+                central = win.takeCentralWidget()
+                if central is None:
+                    raise ValueError("No central widget")
+                
+                # CRITICAL: Apply the MainWindow's stylesheet to preserve styling
+                # Get the theme stylesheet from MainWindow (dark mode by default)
+                from desktop_app.main import get_theme_stylesheet
+                theme_stylesheet = get_theme_stylesheet(win.dark_mode, win.color_theme)
+                
+                # Create frame with assets
+                # Assets are in hybrid_frame_module/assets/ (at project root, not in LLM/)
+                root_dir = llm_dir.parent  # Go up from LLM/ to project root
+                assets_dir = root_dir / "hybrid_frame_module" / "assets"
+                assets = FrameAssets(
+                    corner_tl=str(assets_dir / "corner_tl.png") if (assets_dir / "corner_tl.png").exists() else None,
+                    corner_tr=str(assets_dir / "corner_tr.png") if (assets_dir / "corner_tr.png").exists() else None,
+                    corner_bl=str(assets_dir / "corner_bl.png") if (assets_dir / "corner_bl.png").exists() else None,
+                    corner_br=str(assets_dir / "corner_br.png") if (assets_dir / "corner_br.png").exists() else None,
+                    top_center=str(assets_dir / "top_center.png") if (assets_dir / "top_center.png").exists() else None,
+                )
+                # Smaller frame decorations
+                frame = HybridFrameWindow(assets, corner_size=15, border_thickness=4, safe_padding=2)
+                
+                # Mount widget and setup
+                frame.set_content_widget(central)
+                
+                # Apply stylesheet ONLY to the central widget - frame and container are just decorative
+                central.setStyleSheet(theme_stylesheet)
+                
+                # Store reference to central widget for theme updates
+                win._hybrid_frame_content = central
+                
+                frame.setWindowTitle(win.windowTitle())
+                frame.resize(win.size())
+                frame.setMinimumSize(win.minimumSize())
+                
+                # Hide MainWindow, show only frame
+                win.hide()
+                frame.show()
+                splash.finish(frame)
+                
+                # Keep MainWindow alive for methods and store frame reference for theme updates
+                frame._main_window = win
+                win._hybrid_frame = frame  # Store reference so theme updates can update the frame
+                
+                # Make MainWindow's close button close the frame
+                def close_frame():
+                    frame.close()
+                win.close_btn.clicked.disconnect()  # Disconnect existing handler
+                win.close_btn.clicked.connect(close_frame)
+                
+                QTimer.singleShot(0, lambda: win._start_background_detection())
+                
+                return app.exec()
             except Exception as e:
                 import traceback
                 error_msg = f"Frame init failed: {e}"
