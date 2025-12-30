@@ -1948,12 +1948,19 @@ class MainWindow(QMainWindow):
         # Update all themed widgets
         self._update_themed_widgets(primary, secondary, accent)
         
-        # Update HybridFrameWindow if it exists (when using hybrid frame)
+        # Update HybridFrameWindow content if it exists (when using hybrid frame)
+        # The frame itself is just decorative - update the content widget inside it
         if hasattr(self, '_hybrid_frame') and self._hybrid_frame is not None:
-            self._hybrid_frame.setStyleSheet(stylesheet)
-            # Also update the content container
+            # Get the central widget that was moved into the frame
             if hasattr(self._hybrid_frame, 'content_container'):
-                self._hybrid_frame.content_container.setStyleSheet(stylesheet)
+                content = self._hybrid_frame.content_container
+                # Find the actual widget inside the content container
+                layout = content.layout()
+                if layout and layout.count() > 0:
+                    item = layout.itemAt(0)
+                    if item and item.widget():
+                        # Apply theme to the actual content widget
+                        item.widget().setStyleSheet(stylesheet)
     
     def _update_themed_widgets(self, primary: str, secondary: str, accent: str) -> None:
         """Update all stored themed widgets with current colors"""
@@ -5272,13 +5279,10 @@ def main() -> int:
             # Smaller frame decorations
             frame = HybridFrameWindow(assets, corner_size=15, border_thickness=4, safe_padding=2)
             
-            # Apply the theme stylesheet to the frame so it matches MainWindow
-            frame.setStyleSheet(theme_stylesheet)
-            
             # Mount widget and setup
             frame.set_content_widget(central)
             
-            # Apply stylesheet to central widget to preserve all styling
+            # Apply stylesheet to central widget (the actual content) - frame is just decorative
             central.setStyleSheet(theme_stylesheet)
             
             frame.setWindowTitle(win.windowTitle())
