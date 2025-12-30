@@ -380,15 +380,15 @@ class HybridFrameWindow(QWidget):
     def mouseMoveEvent(self, event) -> None:
         try:
             if self._resizing:
-            # Handle QPointF from globalPosition() safely
-            gp = event.globalPosition()
-            if isinstance(gp, QPointF):
-                global_pos = QPoint(int(gp.x()), int(gp.y()))
-            else:
-                global_pos = gp.toPoint() if hasattr(gp, 'toPoint') else gp
-            self._apply_resize(global_pos)
-            event.accept()
-            return
+                # Handle QPointF from globalPosition() safely
+                gp = event.globalPosition()
+                if isinstance(gp, QPointF):
+                    global_pos = QPoint(int(gp.x()), int(gp.y()))
+                else:
+                    global_pos = gp.toPoint() if hasattr(gp, 'toPoint') else gp
+                self._apply_resize(global_pos)
+                event.accept()
+                return
 
         if self._dragging:
             try:
