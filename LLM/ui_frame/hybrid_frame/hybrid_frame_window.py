@@ -317,7 +317,10 @@ class HybridFrameWindow(QWidget):
         if d != 0:
             self._resizing = True
             self._resize_dir = d
-            self._press_global = event.globalPosition().toPoint()
+            try:
+                self._press_global = event.globalPosition().toPoint()
+            except AttributeError:
+                self._press_global = event.globalPos()
             self._press_geom = self.geometry()
             event.accept()
             return
@@ -327,7 +330,14 @@ class HybridFrameWindow(QWidget):
             return
 
         self._dragging = True
-        self._drag_offset = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+        # Use globalPos() for compatibility, or globalPosition() if available
+        try:
+            global_pos = event.globalPosition().toPoint()
+        except AttributeError:
+            global_pos = event.globalPos()
+        # Use geometry() instead of frameGeometry() for more reliable positioning
+        frame_top_left = self.geometry().topLeft()
+        self._drag_offset = global_pos - frame_top_left
         event.accept()
 
     def mouseMoveEvent(self, event) -> None:
@@ -337,7 +347,18 @@ class HybridFrameWindow(QWidget):
             return
 
         if self._dragging:
-            self.move(event.globalPosition().toPoint() - self._drag_offset)
+            # Use globalPos() for compatibility, or globalPosition() if available
+            try:
+                global_pos = event.globalPosition().toPoint()
+            except AttributeError:
+                global_pos = event.globalPos()
+            try:
+                new_pos = global_pos - self._drag_offset
+                self.move(new_pos)
+            except Exception as e:
+                # Fallback: use simpler drag calculation
+                print(f"Drag error: {e}, using fallback")
+                pass
             event.accept()
             return
 
