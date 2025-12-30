@@ -11,9 +11,9 @@ BEGIN
       VALUE "CompanyName", "LLM Fine-tuning Studio"
       VALUE "FileDescription", "LLM Studio Launcher"
       VALUE "FileVersion", "1.0.0.1"
-      VALUE "InternalName", "launcher"
+      VALUE "InternalName", "Launcher"
       VALUE "LegalCopyright", "Open Source"
-      VALUE "OriginalFilename", "launcher.exe"
+      VALUE "OriginalFilename", "Launcher.exe"
       VALUE "ProductName", "LLM Fine-tuning Studio"
       VALUE "ProductVersion", "1.0.0.1"
     END

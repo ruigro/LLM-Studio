@@ -164,11 +164,11 @@
     },
     {
       "name": "transformers",
-      "version": "==4.51.3",
+      "version": ">=4.51.3,!=4.52.*,!=4.53.*,!=4.54.*,!=4.55.*,!=4.57.0,<4.58",
       "order": 30,
       "critical": true,
       "install_args": ["--no-deps"],
-      "comment": "Installed with no-deps after all dependencies are in place"
+      "comment": "Installed with no-deps after all dependencies are in place. Allows 4.51.3 or 4.57.3 (excludes 4.52-4.55 and 4.57.0 per unsloth requirements)"
     },
     {
       "name": "peft",

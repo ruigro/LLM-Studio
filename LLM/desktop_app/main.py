@@ -9,7 +9,7 @@ from PySide6.QtWidgets import (
     QLabel, QLineEdit, QPushButton, QFileDialog, QComboBox, QTextEdit, QPlainTextEdit,
     QSpinBox, QDoubleSpinBox, QMessageBox, QListWidget, QListWidgetItem, QSplitter, QToolBar, QScrollArea, QGridLayout, QFrame, QProgressBar, QSizePolicy, QTabBar, QStyleOptionTab, QStyle, QStackedWidget, QGroupBox
 )
-from PySide6.QtGui import QAction, QIcon, QFont, QMouseEvent, QCursor
+from PySide6.QtGui import QAction, QIcon, QFont, QMouseEvent, QCursor, QPixmap
 
 from desktop_app.model_card_widget import ModelCard, DownloadedModelCard
 from desktop_app.training_widgets import MetricCard
@@ -977,9 +977,38 @@ class MainWindow(QMainWindow):
         theme_layout.addWidget(color_selector)
         header_layout.addWidget(theme_container)
         
-        # Center: App title (transparent background)
-        title_label = QLabel(APP_TITLE)
-        title_label.setAlignment(Qt.AlignCenter)
+        # Center: App title with owl icon (transparent background)
+        title_container = QWidget()
+        title_container.setStyleSheet("background: transparent;")
+        title_layout = QHBoxLayout(title_container)
+        title_layout.setContentsMargins(0, 0, 0, 0)
+        title_layout.setSpacing(12)
+        title_layout.setAlignment(Qt.AlignCenter)
+        
+        # Owl icon - maximum size to fit header (header min height is 80px, use 70px for icon)
+        icon_path = self.root.parent / "icons" / "owl_studio_square.png"
+        if icon_path.exists():
+            icon_pixmap = QPixmap(str(icon_path))
+            # Scale icon to maximum size to fit header (70x70 pixels, leaving some margin)
+            icon_pixmap = icon_pixmap.scaled(70, 70, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            icon_label = QLabel()
+            icon_label.setPixmap(icon_pixmap)
+            icon_label.setAlignment(Qt.AlignCenter)
+            icon_label.setStyleSheet("background: transparent; border: none; padding: 0px;")
+            icon_label.setMinimumSize(70, 70)
+            icon_label.setMaximumSize(70, 70)
+            title_layout.addWidget(icon_label)
+        else:
+            # Fallback to emoji if icon not found
+            icon_label = QLabel("🤖")
+            icon_label.setAlignment(Qt.AlignCenter)
+            icon_label.setStyleSheet("background: transparent; font-size: 32pt; border: none; padding: 0px;")
+            title_layout.addWidget(icon_label)
+        
+        # Title text (without emoji)
+        title_text = APP_TITLE.replace("🤖 ", "").replace("🤖", "")  # Remove robot emoji
+        title_label = QLabel(title_text)
+        title_label.setAlignment(Qt.AlignCenter | Qt.AlignVCenter)
         title_label.setStyleSheet("""
             QLabel {
                 background: transparent;
@@ -990,7 +1019,13 @@ class MainWindow(QMainWindow):
                 padding: 0px;
             }
         """)
-        header_layout.addWidget(title_label, 1)
+        title_layout.addWidget(title_label)
+        
+        # Add stretch on both sides to center the content
+        title_layout.insertStretch(0, 1)
+        title_layout.addStretch(1)
+        
+        header_layout.addWidget(title_container, 1)
         
         # Right: System info (compact)
         sys_info_widget = QWidget()
@@ -1175,21 +1210,37 @@ class MainWindow(QMainWindow):
         self._refresh_locals()
         self._apply_theme()
 
+    def _get_text_color(self) -> str:
+        """Get appropriate text color based on theme"""
+        return "#262730" if not self.dark_mode else "white"
+    
+    def _get_status_color(self, is_ok: bool) -> str:
+        """Get appropriate status color based on theme and status"""
+        if is_ok:
+            return "#555555" if not self.dark_mode else "#4CAF50"  # Dark gray in light mode, green in dark mode
+        else:
+            return "#f44336"  # Red for errors (same in both modes)
+    
     def _create_status_row(self, label: str, is_ok: bool, detail: str) -> QHBoxLayout:
         """Create a status indicator row"""
         row = QHBoxLayout()
         
         status_icon = "✅" if is_ok else "❌"
-        color = "#4CAF50" if is_ok else "#f44336"
+        color = self._get_status_color(is_ok)
         
         main_label = QLabel(f"{status_icon} <b>{label}</b>")
+        main_label.setObjectName(f"homeStatusRow_{label.replace(' ', '_')}")
         main_label.setStyleSheet(f"background: transparent; color: {color};")
+        self.themed_widgets["labels"].append(main_label)
         row.addWidget(main_label)
         
         row.addStretch(1)
         
         detail_label = QLabel(detail)
-        detail_label.setStyleSheet("background: transparent; color: #888; font-size: 10pt;")
+        detail_label.setObjectName(f"homeStatusDetail_{label.replace(' ', '_')}")
+        detail_color = "#666666" if not self.dark_mode else "#888888"
+        detail_label.setStyleSheet(f"background: transparent; color: {detail_color}; font-size: 10pt;")
+        self.themed_widgets["labels"].append(detail_label)
         row.addWidget(detail_label)
         
         return row
@@ -1219,16 +1270,21 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(0, 0, 0, 0)
         
         status_icon = "✅" if is_ok else "❌"
-        color = "#4CAF50" if is_ok else "#f44336"
+        color = self._get_status_color(is_ok)
         
         main_label = QLabel(f"{status_icon} <b>{label}</b>")
+        main_label.setObjectName(f"homeStatusWidget_{label.replace(' ', '_')}")
         main_label.setStyleSheet(f"background: transparent; color: {color};")
+        self.themed_widgets["labels"].append(main_label)
         layout.addWidget(main_label)
         
         layout.addStretch(1)
         
         detail_label = QLabel(detail)
-        detail_label.setStyleSheet("background: transparent; color: #888; font-size: 10pt;")
+        detail_label.setObjectName(f"homeStatusWidgetDetail_{label.replace(' ', '_')}")
+        detail_color = "#666666" if not self.dark_mode else "#888888"
+        detail_label.setStyleSheet(f"background: transparent; color: {detail_color}; font-size: 10pt;")
+        self.themed_widgets["labels"].append(detail_label)
         layout.addWidget(detail_label)
         
         return widget
@@ -1949,6 +2005,8 @@ class MainWindow(QMainWindow):
                 """)
         
         # Update labels
+        text_color = self._get_text_color()
+        status_color_ok = self._get_status_color(True)
         for label in self.themed_widgets["labels"]:
             obj_name = label.objectName()
             if obj_name == "modelAHeader":
@@ -1957,6 +2015,58 @@ class MainWindow(QMainWindow):
                 label.setStyleSheet(f"font-size: 16pt; padding: 10px; background: {self._get_gradient_style(primary, secondary)}; color: white; border-radius: 6px;")
             elif obj_name == "trainModelHeader":
                 label.setStyleSheet(f"font-size: 14pt; color: {primary}; border: none; padding: 0;")
+            # Home tab labels
+            elif obj_name == "homeWelcomeTitle":
+                label.setStyleSheet(f"color: {text_color}; background: transparent; border: none; padding: 0; font-size: 24pt; font-weight: bold; text-decoration: none;")
+            elif obj_name == "homeFeaturesHeader":
+                label.setStyleSheet(f"background: transparent; color: {text_color}; font-size: 18pt; font-weight: bold; text-decoration: none; border: none; border-bottom: none;")
+            elif obj_name == "homeFeaturesText":
+                label.setStyleSheet(f"background: transparent; color: {text_color}; text-decoration: none; border: none; border-bottom: none;")
+            elif obj_name == "homeGuideHeader":
+                label.setStyleSheet(f"background: transparent; color: {text_color}; font-size: 18pt; font-weight: bold; text-decoration: none; border: none; border-bottom: none;")
+            elif obj_name == "homeGuideText":
+                label.setStyleSheet(f"background: transparent; color: {text_color}; text-decoration: none; border: none; border-bottom: none;")
+            elif obj_name == "homeSysStatusHeader":
+                label.setStyleSheet(f"background: transparent; color: {text_color}; font-size: 18pt; font-weight: bold; text-decoration: none; border: none; border-bottom: none;")
+            elif obj_name == "homeGpuStatus":
+                label.setStyleSheet(f"background: transparent; color: {status_color_ok}; font-weight: bold; text-decoration: none; border: none; border-bottom: none;")
+            elif obj_name and obj_name.startswith("homeGpuLabel"):
+                label.setStyleSheet(f"background: transparent; color: {text_color}; text-decoration: none; border: none; border-bottom: none;")
+            elif obj_name and obj_name.startswith("homeGpuMemLabel"):
+                label.setStyleSheet(f"background: transparent; color: {text_color}; text-decoration: none; border: none; border-bottom: none;")
+            elif obj_name == "homeCpuLabel":
+                label.setStyleSheet(f"background: transparent; color: {text_color}; text-decoration: none;")
+            elif obj_name == "homeCpuNameLabel":
+                label.setStyleSheet(f"background: transparent; color: {text_color}; text-decoration: none; border: none; border-bottom: none;")
+            elif obj_name == "homeCpuSpecsLabel":
+                label.setStyleSheet(f"background: transparent; color: {text_color}; text-decoration: none; border: none; border-bottom: none;")
+            elif obj_name == "homeStatusLabel":
+                label.setStyleSheet(f"background: transparent; color: {text_color}; text-decoration: none; border: none; border-bottom: none;")
+            elif obj_name == "homeStatusVal":
+                # Update the HTML color in the label text
+                current_text = label.text()
+                if "Ready" in current_text:
+                    label.setText(f"<span style='font-size: 16pt; font-weight: bold; color: {status_color_ok}; text-decoration: none; border: none; border-bottom: none;'>Ready</span>")
+                label.setStyleSheet("background: transparent; text-decoration: none; border: none; border-bottom: none;")
+            elif obj_name == "homeRequirementsHeader":
+                label.setStyleSheet(f"background: transparent; color: {text_color}; font-size: 18pt; font-weight: bold; text-decoration: none; border: none; border-bottom: none;")
+            elif obj_name and obj_name.startswith("homeStatusRow_"):
+                # Status row labels (software requirements)
+                # Extract is_ok from the label text (✅ or ❌)
+                current_text = label.text()
+                is_ok = "✅" in current_text
+                status_color = self._get_status_color(is_ok)
+                label.setStyleSheet(f"background: transparent; color: {status_color};")
+            elif obj_name and obj_name.startswith("homeStatusWidget_"):
+                # Status widget labels (software requirements)
+                current_text = label.text()
+                is_ok = "✅" in current_text
+                status_color = self._get_status_color(is_ok)
+                label.setStyleSheet(f"background: transparent; color: {status_color};")
+            elif obj_name and obj_name.startswith("homeStatusDetail_") or obj_name and obj_name.startswith("homeStatusWidgetDetail_"):
+                # Detail labels in status rows/widgets
+                detail_color = "#666666" if not self.dark_mode else "#888888"
+                label.setStyleSheet(f"background: transparent; color: {detail_color}; font-size: 10pt;")
         
         # Update chat widgets theme
         if hasattr(self, 'chat_widgets'):
@@ -1997,8 +2107,11 @@ class MainWindow(QMainWindow):
         title_layout = QVBoxLayout(title_frame)
         title_layout.setContentsMargins(0, 12, 0, 12)
         title = QLabel("Welcome to LLM Fine-tuning Studio")
+        title.setObjectName("homeWelcomeTitle")
         title.setAlignment(Qt.AlignCenter)
-        title.setStyleSheet("color: white; background: transparent; border: none; padding: 0; font-size: 24pt; font-weight: bold; text-decoration: none;")
+        text_color = self._get_text_color()
+        title.setStyleSheet(f"color: {text_color}; background: transparent; border: none; padding: 0; font-size: 24pt; font-weight: bold; text-decoration: none;")
+        self.themed_widgets["labels"].append(title)
         title_layout.addWidget(title)
         layout.addWidget(title_frame)
         
@@ -2028,11 +2141,14 @@ class MainWindow(QMainWindow):
         left_layout.setContentsMargins(15, 15, 15, 15)
         
         # Features section
+        text_color = self._get_text_color()
         features_header = QLabel("🚀 Features")
-        features_header.setStyleSheet("background: transparent; color: white; font-size: 18pt; font-weight: bold; text-decoration: none; border: none; border-bottom: none;")
+        features_header.setObjectName("homeFeaturesHeader")
+        features_header.setStyleSheet(f"background: transparent; color: {text_color}; font-size: 18pt; font-weight: bold; text-decoration: none; border: none; border-bottom: none;")
         font = features_header.font()
         font.setUnderline(False)
         features_header.setFont(font)
+        self.themed_widgets["labels"].append(features_header)
         left_layout.addWidget(features_header)
         features_text = QLabel("""
 <p style="text-decoration: none; border: none; border-bottom: none;"><span style="text-decoration: none; border: none; border-bottom: none;">This application provides a beautiful, user-friendly interface to:</span></p>
@@ -2044,20 +2160,26 @@ class MainWindow(QMainWindow):
 <li style="text-decoration: none; border: none; border-bottom: none;"><span style="font-weight: bold; text-decoration: none; border: none; border-bottom: none;">📊 Track History:</span> <span style="text-decoration: none; border: none; border-bottom: none;">View all your trained models and training logs</span></li>
 </ul>
         """)
+        features_text.setObjectName("homeFeaturesText")
         features_text.setWordWrap(True)
         features_text.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-        features_text.setStyleSheet("background: transparent; color: white; text-decoration: none; border: none; border-bottom: none;")
+        features_text.setStyleSheet(f"background: transparent; color: {text_color}; text-decoration: none; border: none; border-bottom: none;")
         font = features_text.font()
         font.setUnderline(False)
         features_text.setFont(font)
+        self.themed_widgets["labels"].append(features_text)
         left_layout.addWidget(features_text)
         
         # Quick Start Guide section
         guide_header = QLabel("📋 Quick Start Guide")
-        guide_header.setStyleSheet("background: transparent; color: white; font-size: 18pt; font-weight: bold; text-decoration: none; border: none; border-bottom: none;")
+        guide_header.setObjectName("homeGuideHeader")
+        guide_header.setStyleSheet(f"background: transparent; color: {text_color}; font-size: 18pt; font-weight: bold; text-decoration: none; border: none; border-bottom: none;")
+        font = guide_header.font()
+        font.setUnderline(False)
         font = guide_header.font()
         font.setUnderline(False)
         guide_header.setFont(font)
+        self.themed_widgets["labels"].append(guide_header)
         left_layout.addWidget(guide_header)
         guide_text = QLabel("""
 <ol style="line-height: 2; text-decoration: none; border: none; border-bottom: none;">
@@ -2072,12 +2194,14 @@ class MainWindow(QMainWindow):
 <li style="text-decoration: none; border: none; border-bottom: none;"><span style="font-weight: bold; text-decoration: none; border: none; border-bottom: none;">Test Your Model:</span> <span style="text-decoration: none; border: none; border-bottom: none;">Use the Test Model tab to try your fine-tuned model</span></li>
 </ol>
         """)
+        guide_text.setObjectName("homeGuideText")
         guide_text.setWordWrap(True)
         guide_text.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-        guide_text.setStyleSheet("background: transparent; color: white; text-decoration: none; border: none; border-bottom: none;")
+        guide_text.setStyleSheet(f"background: transparent; color: {text_color}; text-decoration: none; border: none; border-bottom: none;")
         font = guide_text.font()
         font.setUnderline(False)
         guide_text.setFont(font)
+        self.themed_widgets["labels"].append(guide_text)
         left_layout.addWidget(guide_text)
         
         left_layout.addStretch(1)
@@ -2106,12 +2230,15 @@ class MainWindow(QMainWindow):
         right_layout.setContentsMargins(15, 15, 15, 15)
 
         # System Status section
+        text_color = self._get_text_color()
         sys_status_header_row = QHBoxLayout()
         sys_status_header = QLabel("📊 System Status")
-        sys_status_header.setStyleSheet("background: transparent; color: white; font-size: 18pt; font-weight: bold; text-decoration: none; border: none; border-bottom: none;")
+        sys_status_header.setObjectName("homeSysStatusHeader")
+        sys_status_header.setStyleSheet(f"background: transparent; color: {text_color}; font-size: 18pt; font-weight: bold; text-decoration: none; border: none; border-bottom: none;")
         font = sys_status_header.font()
         font.setUnderline(False)
         sys_status_header.setFont(font)
+        self.themed_widgets["labels"].append(sys_status_header)
         sys_status_header_row.addWidget(sys_status_header)
         sys_status_header_row.addStretch(1)
         
@@ -2156,11 +2283,14 @@ class MainWindow(QMainWindow):
         gpus = cuda_info.get("gpus", [])
         
         if gpus:
+            status_color = self._get_status_color(True)
             gpu_status = QLabel(f"✅ <span style='font-weight: bold; text-decoration: none; border: none; border-bottom: none;'>{len(gpus)} GPU{'s' if len(gpus) > 1 else ''} detected</span>")
-            gpu_status.setStyleSheet("background: transparent; color: #4CAF50; font-weight: bold; text-decoration: none; border: none; border-bottom: none;")
+            gpu_status.setObjectName("homeGpuStatus")
+            gpu_status.setStyleSheet(f"background: transparent; color: {status_color}; font-weight: bold; text-decoration: none; border: none; border-bottom: none;")
             font = gpu_status.font()
             font.setUnderline(False)
             gpu_status.setFont(font)
+            self.themed_widgets["labels"].append(gpu_status)
             sys_layout.addWidget(gpu_status)
             
             # Display each GPU
@@ -2170,28 +2300,35 @@ class MainWindow(QMainWindow):
                 gpu_mem = gpu.get("memory", "Unknown")
                 
                 gpu_label = QLabel(f"<span style='font-weight: bold; text-decoration: none; border: none; border-bottom: none;'>GPU {idx}:</span> <span style='text-decoration: none; border: none; border-bottom: none;'>{gpu_name}</span>")
-                gpu_label.setStyleSheet("background: transparent; color: white; text-decoration: none; border: none; border-bottom: none;")
+                gpu_label.setObjectName(f"homeGpuLabel{idx}")
+                gpu_label.setStyleSheet(f"background: transparent; color: {text_color}; text-decoration: none; border: none; border-bottom: none;")
                 font = gpu_label.font()
                 font.setUnderline(False)
                 gpu_label.setFont(font)
+                self.themed_widgets["labels"].append(gpu_label)
                 gpu_row.addWidget(gpu_label)
                 gpu_row.addStretch(1)
                 gpu_mem_label = QLabel(f"💾 <span style='font-weight: bold; text-decoration: none; border: none; border-bottom: none;'>{gpu_mem}</span>")
-                gpu_mem_label.setStyleSheet("background: transparent; color: white; text-decoration: none; border: none; border-bottom: none;")
+                gpu_mem_label.setObjectName(f"homeGpuMemLabel{idx}")
+                gpu_mem_label.setStyleSheet(f"background: transparent; color: {text_color}; text-decoration: none; border: none; border-bottom: none;")
                 font = gpu_mem_label.font()
                 font.setUnderline(False)
                 gpu_mem_label.setFont(font)
+                self.themed_widgets["labels"].append(gpu_mem_label)
                 gpu_row.addWidget(gpu_mem_label)
                 sys_layout.addLayout(gpu_row)
         else:
             gpu_status = QLabel("⚠️ <span style='font-weight: bold; text-decoration: none; border: none; border-bottom: none;'>No GPUs detected</span>")
+            gpu_status.setObjectName("homeGpuStatus")
             gpu_status.setStyleSheet("background: transparent; color: #FF9800; font-weight: bold; text-decoration: none; border: none; border-bottom: none;")
             font = gpu_status.font()
             font.setUnderline(False)
             gpu_status.setFont(font)
             sys_layout.addWidget(gpu_status)
             cpu_label = QLabel("Training will use CPU (slower)")
-            cpu_label.setStyleSheet("background: transparent; color: white; text-decoration: none;")
+            cpu_label.setObjectName("homeCpuLabel")
+            cpu_label.setStyleSheet(f"background: transparent; color: {text_color}; text-decoration: none;")
+            self.themed_widgets["labels"].append(cpu_label)
             sys_layout.addWidget(cpu_label)
 
         # CPU Information
@@ -2202,10 +2339,12 @@ class MainWindow(QMainWindow):
         
         cpu_row = QHBoxLayout()
         cpu_name_label = QLabel(f"<span style='font-weight: bold; text-decoration: none; border: none; border-bottom: none;'>CPU:</span> <span style='text-decoration: none; border: none; border-bottom: none;'>{cpu_name}</span>")
-        cpu_name_label.setStyleSheet("background: transparent; color: white; text-decoration: none; border: none; border-bottom: none;")
+        cpu_name_label.setObjectName("homeCpuNameLabel")
+        cpu_name_label.setStyleSheet(f"background: transparent; color: {text_color}; text-decoration: none; border: none; border-bottom: none;")
         font = cpu_name_label.font()
         font.setUnderline(False)
         cpu_name_label.setFont(font)
+        self.themed_widgets["labels"].append(cpu_name_label)
         cpu_row.addWidget(cpu_name_label)
         cpu_row.addStretch(1)
         
@@ -2213,26 +2352,33 @@ class MainWindow(QMainWindow):
         if ram_gb:
             cpu_specs_text = f"<span style='font-weight: bold; text-decoration: none; border: none; border-bottom: none;'>{cpu_cores} cores</span> | <span style='font-weight: bold; text-decoration: none; border: none; border-bottom: none;'>💾 {ram_gb} GB RAM</span>"
         cpu_specs_label = QLabel(cpu_specs_text)
-        cpu_specs_label.setStyleSheet("background: transparent; color: white; text-decoration: none; border: none; border-bottom: none;")
+        cpu_specs_label.setObjectName("homeCpuSpecsLabel")
+        cpu_specs_label.setStyleSheet(f"background: transparent; color: {text_color}; text-decoration: none; border: none; border-bottom: none;")
         font = cpu_specs_label.font()
         font.setUnderline(False)
         cpu_specs_label.setFont(font)
+        self.themed_widgets["labels"].append(cpu_specs_label)
         cpu_row.addWidget(cpu_specs_label)
         sys_layout.addLayout(cpu_row)
 
         # Status - compact single line
         status_row = QHBoxLayout()
         status_label = QLabel("<span style='font-weight: bold; text-decoration: none; border: none; border-bottom: none;'>Status:</span>")
-        status_label.setStyleSheet("background: transparent; color: white; text-decoration: none; border: none; border-bottom: none;")
+        status_label.setObjectName("homeStatusLabel")
+        status_label.setStyleSheet(f"background: transparent; color: {text_color}; text-decoration: none; border: none; border-bottom: none;")
         font = status_label.font()
         font.setUnderline(False)
         status_label.setFont(font)
+        self.themed_widgets["labels"].append(status_label)
         status_row.addWidget(status_label)
-        status_val = QLabel("<span style='font-size: 16pt; font-weight: bold; color: #4CAF50; text-decoration: none; border: none; border-bottom: none;'>Ready</span>")
+        status_color = self._get_status_color(True)
+        status_val = QLabel(f"<span style='font-size: 16pt; font-weight: bold; color: {status_color}; text-decoration: none; border: none; border-bottom: none;'>Ready</span>")
+        status_val.setObjectName("homeStatusVal")
         status_val.setStyleSheet("background: transparent; text-decoration: none; border: none; border-bottom: none;")
         font = status_val.font()
         font.setUnderline(False)
         status_val.setFont(font)
+        self.themed_widgets["labels"].append(status_val)
         status_row.addWidget(status_val)
         status_row.addStretch(1)
         sys_layout.addLayout(status_row)
@@ -2241,10 +2387,12 @@ class MainWindow(QMainWindow):
         
         # Software Requirements section
         requirements_header = QLabel("⚙️ Software Requirements & Setup")
-        requirements_header.setStyleSheet("background: transparent; color: white; font-size: 18pt; font-weight: bold; text-decoration: none; border: none; border-bottom: none;")
+        requirements_header.setObjectName("homeRequirementsHeader")
+        requirements_header.setStyleSheet(f"background: transparent; color: {text_color}; font-size: 18pt; font-weight: bold; text-decoration: none; border: none; border-bottom: none;")
         font = requirements_header.font()
         font.setUnderline(False)
         requirements_header.setFont(font)
+        self.themed_widgets["labels"].append(requirements_header)
         right_layout.addWidget(requirements_header)
 
         setup_frame = QWidget()

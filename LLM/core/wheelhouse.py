@@ -12,6 +12,16 @@ from pathlib import Path
 from typing import Dict, List, Tuple, Optional
 import re
 
+# Try to import packaging for version validation
+try:
+    from packaging.specifiers import SpecifierSet
+    from packaging import version as pkg_version
+    PACKAGING_AVAILABLE = True
+except ImportError:
+    PACKAGING_AVAILABLE = False
+    SpecifierSet = None
+    pkg_version = None
+
 
 class BlacklistedPackageError(Exception):
     """Raised when a blacklisted package is found in wheelhouse"""
@@ -53,6 +63,175 @@ class WheelhouseManager:
         """Log message to console"""
         print(f"[WHEELHOUSE] {message}")
     
+    def _extract_version_from_wheel(self, wheel_path: Path) -> Optional[str]:
+        """
+        Extract version from wheel filename.
+        
+        Args:
+            wheel_path: Path to wheel file
+            
+        Returns:
+            Version string or None if parsing fails
+        """
+        # Wheel filename format: package-version-pyver-abi-platform.whl
+        # Example: transformers-4.57.3-cp312-cp312-win_amd64.whl
+        wheel_name_parts = wheel_path.stem.split("-")
+        if len(wheel_name_parts) >= 2:
+            # Version is typically the second part, but may contain + for build tags
+            # Handle cases like: torch-2.5.1+cu124-cp312...
+            version_part = wheel_name_parts[1]
+            # Check if next part is a build tag (starts with + or is a number)
+            if len(wheel_name_parts) >= 3:
+                # Check if third part looks like a build tag (contains + or is part of version)
+                third_part = wheel_name_parts[2]
+                if "+" in third_part or third_part.replace(".", "").isdigit():
+                    # Version might span multiple parts
+                    # Try to reconstruct: version+build
+                    potential_version = f"{version_part}-{third_part}"
+                    # Validate it looks like a version
+                    if re.match(r'^[\d.]+[\+\-]?[\w.]*$', potential_version):
+                        return potential_version.replace("-", "+", 1) if "+" not in potential_version else potential_version
+            
+            # Simple case: version is just the second part
+            if re.match(r'^[\d.]+[\+\-]?[\w.]*$', version_part):
+                return version_part
+        
+        return None
+    
+    def _validate_wheel_against_requirement(self, package_name: str, wheel_version: str, requirement_spec: str) -> bool:
+        """
+        Validate that a wheel version satisfies a requirement specifier.
+        
+        Args:
+            package_name: Package name (for logging)
+            wheel_version: Version extracted from wheel filename
+            requirement_spec: Requirement specifier (e.g., ">=4.51.3,!=4.52.*,!=4.53.*")
+            
+        Returns:
+            True if wheel version satisfies requirement, False otherwise
+        """
+        if not PACKAGING_AVAILABLE:
+            # Fallback: only support exact == matches
+            if requirement_spec.startswith("=="):
+                required = requirement_spec[2:].strip()
+                return wheel_version == required
+            else:
+                # Can't validate complex specifiers without packaging
+                # Assume OK if we can't verify (conservative approach)
+                return True
+        
+        try:
+            # Parse requirement specifier
+            spec = SpecifierSet(requirement_spec)
+            
+            # Parse wheel version (handle build tags like +cu124)
+            # Extract base version before + if present
+            base_version = wheel_version.split("+")[0].split("-")[0]
+            
+            # Check if version satisfies specifier
+            return spec.contains(pkg_version.parse(base_version))
+        except Exception as e:
+            # If parsing fails, log warning and assume invalid
+            self.log(f"  ⚠ Could not validate {package_name} {wheel_version} against {requirement_spec}: {e}")
+            return False
+    
+    def _get_wheel_version(self, package_name: str) -> Optional[str]:
+        """
+        Get version of a package from wheelhouse.
+        
+        Args:
+            package_name: Package name (normalized)
+            
+        Returns:
+            Version string or None if not found
+        """
+        pkg_normalized = package_name.lower().replace("_", "-")
+        
+        for wheel in self.wheelhouse.glob("*.whl"):
+            wheel_name_parts = wheel.stem.split("-")
+            if len(wheel_name_parts) >= 1:
+                wheel_pkg = wheel_name_parts[0].lower().replace("_", "-")
+                if wheel_pkg == pkg_normalized:
+                    return self._extract_version_from_wheel(wheel)
+        
+        return None
+    
+    def _validate_wheelhouse_requirements(self, package_versions: dict = None) -> Tuple[bool, str]:
+        """
+        Validate that existing wheels in wheelhouse satisfy current requirements.
+        
+        Args:
+            package_versions: Optional dict of {package_name: exact_version} for profile-based mode.
+                            If None, validates against manifest requirements.
+        
+        Returns:
+            Tuple of (is_valid: bool, error_message: str)
+        """
+        validation_errors = []
+        
+        if package_versions:
+            # Profile-based mode: validate against exact profile versions
+            # Also check if wheels satisfy flexible requirements from manifest if they exist
+            critical_packages = ["torch", "transformers", "tokenizers", "numpy", "peft", "accelerate"]
+            
+            for pkg_name in critical_packages:
+                if pkg_name in package_versions:
+                    expected_version = package_versions[pkg_name]
+                    wheel_version = self._get_wheel_version(pkg_name)
+                    
+                    if not wheel_version:
+                        validation_errors.append(f"{pkg_name}: wheel not found")
+                        continue
+                    
+                    # Check exact match first (profile requirement)
+                    if wheel_version != expected_version:
+                        # Check if it satisfies flexible requirement from manifest
+                        dep = next((d for d in self.manifest["core_dependencies"] if d["name"] == pkg_name), None)
+                        if dep and dep.get("version") != "FROM_CUDA_CONFIG":
+                            requirement_spec = dep["version"]
+                            # If requirement is flexible (not ==), validate against it
+                            if not requirement_spec.startswith("=="):
+                                if self._validate_wheel_against_requirement(pkg_name, wheel_version, requirement_spec):
+                                    # Wheel satisfies flexible requirement, that's OK
+                                    continue
+                        
+                        validation_errors.append(f"{pkg_name}: wheel version {wheel_version} != expected {expected_version}")
+        else:
+            # Manifest-based mode: validate against requirements from dependencies.json
+            deps = sorted(self.manifest["core_dependencies"], key=lambda x: x["order"])
+            
+            for dep in deps:
+                pkg_name = dep["name"]
+                
+                # Skip CUDA packages (handled separately)
+                if dep["version"] == "FROM_CUDA_CONFIG":
+                    continue
+                
+                # Skip platform-specific packages
+                if "platform" in dep and dep["platform"] != sys.platform:
+                    continue
+                
+                # Only validate critical packages
+                if not dep.get("critical", False):
+                    continue
+                
+                version_spec = dep["version"]
+                wheel_version = self._get_wheel_version(pkg_name)
+                
+                if not wheel_version:
+                    validation_errors.append(f"{pkg_name}: wheel not found")
+                    continue
+                
+                # Validate wheel version against requirement
+                if not self._validate_wheel_against_requirement(pkg_name, wheel_version, version_spec):
+                    validation_errors.append(f"{pkg_name}: wheel version {wheel_version} does not satisfy {version_spec}")
+        
+        if validation_errors:
+            error_msg = "Wheelhouse validation failed:\n  " + "\n  ".join(validation_errors)
+            return False, error_msg
+        
+        return True, ""
+    
     def prepare_wheelhouse(self, cuda_config: str, python_version: Tuple[int, int], package_versions: dict = None, force_redownload: bool = False) -> Tuple[bool, str]:
         """
         Download all wheels to wheelhouse with exact versions.
@@ -74,30 +253,20 @@ class WheelhouseManager:
             # Check if wheelhouse already has wheels (skip re-download unless forced)
             existing_wheels = list(self.wheelhouse.glob("*.whl"))
             if existing_wheels and not force_redownload:
-                # Verify wheelhouse has correct versions (if using profile-based installation)
-                if package_versions:
-                    # Check if critical packages match expected versions
-                    critical_packages = ["torch", "transformers", "tokenizers"]
-                    mismatch = False
-                    for pkg in critical_packages:
-                        if pkg in package_versions:
-                            expected_version = package_versions[pkg]
-                            # Check if wheel with this version exists
-                            matching_wheels = list(self.wheelhouse.glob(f"{pkg}-{expected_version}*.whl"))
-                            if not matching_wheels:
-                                self.log(f"⚠ Version mismatch: {pkg}=={expected_version} not found in wheelhouse")
-                                mismatch = True
-                                break
-                    
-                    if mismatch:
-                        self.log("Wheelhouse contains wrong versions - clearing and re-downloading")
-                        self._clear_wheelhouse()
-                    else:
-                        self.log(f"✓ Wheelhouse already contains {len(existing_wheels)} wheels with correct versions - skipping re-download")
-                        return True, ""
+                # Validate wheelhouse against current requirements
+                self.log("Validating existing wheelhouse against current requirements...")
+                is_valid, error_msg = self._validate_wheelhouse_requirements(package_versions)
+                
+                if not is_valid:
+                    self.log(f"⚠ Wheelhouse validation failed:")
+                    for line in error_msg.split("\n"):
+                        if line.strip():
+                            self.log(f"  {line}")
+                    self.log("Clearing wheelhouse and re-downloading with correct versions...")
+                    self._clear_wheelhouse()
                 else:
-                    self.log(f"Wheelhouse already contains {len(existing_wheels)} wheels - skipping re-download")
-                    self.log("(Delete wheelhouse folder or set force_redownload=True to re-download)")
+                    self.log(f"✓ Wheelhouse validation passed - {len(existing_wheels)} wheels satisfy current requirements")
+                    self.log("Skipping re-download (use force_redownload=True to force)")
                     return True, ""
             
             # Clear existing wheelhouse only if forced or if starting fresh
@@ -253,6 +422,20 @@ class WheelhouseManager:
                     no_deps=False,  # Allow deps for non-torch packages
                     python_version=python_version
                 )
+                
+                # Fallback for transformers: if exact version fails, try flexible specifier
+                if not success and pkg_name == "transformers" and pkg_version == "4.51.3":
+                    self.log(f"  ⚠ Exact version {pkg_version} not available, trying flexible specifier...")
+                    flexible_spec = "transformers>=4.51.3,!=4.52.*,!=4.53.*,!=4.54.*,!=4.55.*,!=4.57.0,<4.58"
+                    success, error = self._download_wheel(
+                        package=flexible_spec,
+                        index_url=None,
+                        no_deps=False,
+                        python_version=python_version
+                    )
+                    if success:
+                        self.log(f"  ✓ Downloaded transformers with flexible version specifier")
+                
                 if not success:
                     # Check if it's critical
                     if pkg_name in critical_order:
@@ -325,6 +508,10 @@ class WheelhouseManager:
                     no_deps=no_deps,
                     python_version=python_version
                 )
+                
+                # Note: version_spec is already flexible for transformers (from dependencies.json update)
+                # So no fallback needed here - pip will automatically select 4.57.3 if 4.51.3 isn't available
+                
                 if not success:
                     if dep.get("critical", False):
                         return False, f"Failed to download critical package {pkg_name}: {error}"
