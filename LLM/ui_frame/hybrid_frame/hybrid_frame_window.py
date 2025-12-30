@@ -390,14 +390,14 @@ class HybridFrameWindow(QWidget):
                 event.accept()
                 return
 
-                if self._dragging:
+            if self._dragging:
                 try:
-                # Handle QPointF from globalPosition() safely
-                gp = event.globalPosition()
-                if isinstance(gp, QPointF):
-                    global_pos = QPoint(int(gp.x()), int(gp.y()))
-                else:
-                    global_pos = gp.toPoint() if hasattr(gp, 'toPoint') else gp
+                    # Handle QPointF from globalPosition() safely
+                    gp = event.globalPosition()
+                    if isinstance(gp, QPointF):
+                        global_pos = QPoint(int(gp.x()), int(gp.y()))
+                    else:
+                        global_pos = gp.toPoint() if hasattr(gp, 'toPoint') else gp
                 # Calculate new position
                 new_pos = global_pos - self._drag_offset
                 
