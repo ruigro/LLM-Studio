@@ -5263,7 +5263,7 @@ def main() -> int:
         
         # Apply decorative frame wrapper if enabled
         if USE_HYBRID_FRAME:
-        try:
+            try:
             # Import frame module
             llm_dir = Path(__file__).parent.parent
             if str(llm_dir) not in sys.path:
