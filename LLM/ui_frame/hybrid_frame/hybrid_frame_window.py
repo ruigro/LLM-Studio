@@ -7,7 +7,7 @@ from typing import Optional
 
 from PySide6.QtCore import Qt, QPoint, QPointF, QRect, QSize, QEvent
 from PySide6.QtGui import QPainter, QPixmap, QPen, QColor, QLinearGradient, QBrush
-from PySide6.QtWidgets import QWidget, QVBoxLayout
+from PySide6.QtWidgets import QWidget, QVBoxLayout, QApplication
 
 
 @dataclass
