@@ -330,29 +330,36 @@ class HybridFrameWindow(QWidget):
             return
 
         self._dragging = True
-        try:
-            # Use globalPos() for compatibility, or globalPosition() if available
+        # Get global position - try multiple methods for compatibility
+        global_pos = None
+        if hasattr(event, 'globalPosition'):
             try:
-                global_pos = event.globalPosition().toPoint()
-            except (AttributeError, TypeError):
-                try:
-                    global_pos = event.globalPos()
-                except AttributeError:
-                    # Fallback to screen position
-                    global_pos = event.screenPos().toPoint()
-            
-            # Use geometry() instead of frameGeometry() for more reliable positioning
+                gp = event.globalPosition()
+                if hasattr(gp, 'toPoint'):
+                    global_pos = gp.toPoint()
+                else:
+                    global_pos = QPoint(int(gp.x()), int(gp.y()))
+            except:
+                pass
+        if global_pos is None and hasattr(event, 'globalPos'):
+            try:
+                global_pos = event.globalPos()
+            except:
+                pass
+        
+        # Get window position - try frameGeometry first, fallback to geometry
+        frame_top_left = None
+        try:
+            frame_top_left = self.frameGeometry().topLeft()
+        except:
             try:
                 frame_top_left = self.geometry().topLeft()
             except:
                 frame_top_left = QPoint(0, 0)
-            
+        
+        if global_pos is not None and frame_top_left is not None:
             self._drag_offset = global_pos - frame_top_left
-        except Exception as e:
-            # If drag setup fails, disable dragging
-            import traceback
-            print(f"Drag setup error: {e}")
-            print(traceback.format_exc())
+        else:
             self._dragging = False
             self._drag_offset = QPoint(0, 0)
         event.accept()
