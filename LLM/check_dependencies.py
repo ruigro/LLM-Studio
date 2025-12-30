@@ -94,7 +94,7 @@ def verify_all():
     """Verify all critical dependencies"""
     checks = [
         ("numpy", "<2.0.0"),
-        ("transformers", "==4.51.3"),
+        ("transformers", ">=4.51.3,!=4.52.*,!=4.53.*,!=4.54.*,!=4.55.*,!=4.57.0,<4.58"),
         ("tokenizers", ">=0.22.0,<=0.23.0"),
         ("datasets", ">=2.11.0,<4.4.0"),
     ]
