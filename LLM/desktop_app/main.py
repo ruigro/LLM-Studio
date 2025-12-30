@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import sys
 import os
@@ -1946,6 +1946,13 @@ class MainWindow(QMainWindow):
         
         # Update all themed widgets
         self._update_themed_widgets(primary, secondary, accent)
+        
+        # Update HybridFrameWindow if it exists (when using hybrid frame)
+        if hasattr(self, '_hybrid_frame') and self._hybrid_frame is not None:
+            self._hybrid_frame.setStyleSheet(stylesheet)
+            # Also update the content container
+            if hasattr(self._hybrid_frame, 'content_container'):
+                self._hybrid_frame.content_container.setStyleSheet(stylesheet)
     
     def _update_themed_widgets(self, primary: str, secondary: str, accent: str) -> None:
         """Update all stored themed widgets with current colors"""
@@ -5262,7 +5269,7 @@ def main() -> int:
                 top_center=str(assets_dir / "top_center.png") if (assets_dir / "top_center.png").exists() else None,
             )
             # Smaller frame decorations
-            frame = HybridFrameWindow(assets, corner_size=9, border_thickness=4, safe_padding=2)
+            frame = HybridFrameWindow(assets, corner_size=15, border_thickness=4, safe_padding=2)
             
             # Apply the theme stylesheet to the frame so it matches MainWindow
             frame.setStyleSheet(theme_stylesheet)

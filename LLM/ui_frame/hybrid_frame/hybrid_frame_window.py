@@ -7,7 +7,7 @@ from typing import Optional
 
 from PySide6.QtCore import Qt, QPoint, QRect, QSize, QEvent
 from PySide6.QtGui import QPainter, QPixmap, QPen, QColor, QLinearGradient, QBrush
-from PySide6.QtWidgets import QWidget, QVBoxLayout
+from PySide6.QtWidgets import QWidget, QVBoxLayout, QPushButton
 
 
 @dataclass
@@ -104,6 +104,9 @@ class HybridFrameWindow(QWidget):
 
         # Keep margins correct if device pixel ratio / style changes
         self.installEventFilter(self)
+        
+        # Add close button in top-right corner
+        self._setup_close_button()
 
     # ----------------------------
     # Public API
