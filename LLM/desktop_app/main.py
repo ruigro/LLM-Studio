@@ -5262,7 +5262,7 @@ def main() -> int:
                 top_center=str(assets_dir / "top_center.png") if (assets_dir / "top_center.png").exists() else None,
             )
             # Smaller frame decorations
-            frame = HybridFrameWindow(assets, corner_size=40, border_thickness=4, safe_padding=2)
+            frame = HybridFrameWindow(assets, corner_size=9, border_thickness=4, safe_padding=2)
             
             # Apply the theme stylesheet to the frame so it matches MainWindow
             frame.setStyleSheet(theme_stylesheet)
