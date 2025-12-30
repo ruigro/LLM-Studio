@@ -5239,30 +5239,30 @@ def main() -> int:
 
     try:
         app = QApplication(sys.argv)
-    # Set base font size for the entire application - INCREASED to 16pt
-    app_font = QFont()
-    # Keep this modest; very large fonts require scroll areas (added above).
-    app_font.setPointSize(14)
-    app.setFont(app_font)
-    
-    # Show splash screen with minimal info
-    splash = SplashScreen()
-    splash.show()
-    splash.update_progress(10, "Starting up", "Initializing LLM Fine-tuning Studio...")
-    app.processEvents()  # Force display
-    
-    # Create main window quickly (NO detection during init - pass None for splash)
-    splash.update_progress(50, "Creating interface", "")
-    app.processEvents()
-    
-    win = MainWindow(splash=None)  # Don't pass splash to skip slow detection
-    
-    # Show main window IMMEDIATELY
-    splash.update_progress(100, "Ready!", "")
-    app.processEvents()
-    
-    # Apply decorative frame wrapper if enabled
-    if USE_HYBRID_FRAME:
+        # Set base font size for the entire application - INCREASED to 16pt
+        app_font = QFont()
+        # Keep this modest; very large fonts require scroll areas (added above).
+        app_font.setPointSize(14)
+        app.setFont(app_font)
+        
+        # Show splash screen with minimal info
+        splash = SplashScreen()
+        splash.show()
+        splash.update_progress(10, "Starting up", "Initializing LLM Fine-tuning Studio...")
+        app.processEvents()  # Force display
+        
+        # Create main window quickly (NO detection during init - pass None for splash)
+        splash.update_progress(50, "Creating interface", "")
+        app.processEvents()
+        
+        win = MainWindow(splash=None)  # Don't pass splash to skip slow detection
+        
+        # Show main window IMMEDIATELY
+        splash.update_progress(100, "Ready!", "")
+        app.processEvents()
+        
+        # Apply decorative frame wrapper if enabled
+        if USE_HYBRID_FRAME:
         try:
             # Import frame module
             llm_dir = Path(__file__).parent.parent
@@ -5323,23 +5323,23 @@ def main() -> int:
             QTimer.singleShot(0, lambda: win._start_background_detection())
             
             return app.exec()
-        except Exception as e:
-            import traceback
-            error_msg = f"Frame init failed: {e}"
-            traceback_str = traceback.format_exc()
-            print(error_msg)
-            print(traceback_str)
-            write_startup_error(error_msg, traceback_str)
-            # Fall through to original path
-    
-    # Original path (unchanged)
-    win.show()
-    splash.finish(win)
-    
-    # Do system detection in background after GUI is shown (threaded; safe if launched via pythonw)
-    QTimer.singleShot(500, lambda: win._start_background_detection())
-    
-    return app.exec()
+            except Exception as e:
+                import traceback
+                error_msg = f"Frame init failed: {e}"
+                traceback_str = traceback.format_exc()
+                print(error_msg)
+                print(traceback_str)
+                write_startup_error(error_msg, traceback_str)
+                # Fall through to original path
+        
+        # Original path (unchanged)
+        win.show()
+        splash.finish(win)
+        
+        # Do system detection in background after GUI is shown (threaded; safe if launched via pythonw)
+        QTimer.singleShot(500, lambda: win._start_background_detection())
+        
+        return app.exec()
     except Exception as e:
         import traceback
         error_msg = f"Fatal startup error: {e}"
