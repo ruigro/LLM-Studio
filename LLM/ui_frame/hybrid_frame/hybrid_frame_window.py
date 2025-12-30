@@ -390,8 +390,8 @@ class HybridFrameWindow(QWidget):
                 event.accept()
                 return
 
-            if self._dragging:
-            try:
+                if self._dragging:
+                try:
                 # Handle QPointF from globalPosition() safely
                 gp = event.globalPosition()
                 if isinstance(gp, QPointF):
