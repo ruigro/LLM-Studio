@@ -310,11 +310,12 @@ class HybridFrameWindow(QWidget):
     # Drag + Resize
     # ----------------------------
     def mousePressEvent(self, event) -> None:
-        if event.button() != Qt.LeftButton:
-            return
+        try:
+            if event.button() != Qt.LeftButton:
+                return
 
-        d = self._hit_test_resize(event.pos())
-        if d != 0:
+            d = self._hit_test_resize(event.pos())
+            if d != 0:
             self._resizing = True
             self._resize_dir = d
             # Handle QPointF from globalPosition() safely
@@ -356,9 +357,23 @@ class HybridFrameWindow(QWidget):
                     f.write(f"\n[{datetime.now()}] DRAG PRESS ERROR:\n{error_msg}\n")
             except Exception as log_err:
                 print(f"Failed to write drag error log: {log_err}")
-            self._dragging = False
-            self._drag_offset = QPoint(0, 0)
-        event.accept()
+                self._dragging = False
+                self._drag_offset = QPoint(0, 0)
+            event.accept()
+        except Exception as outer_e:
+            # Catch any exception in the entire mousePressEvent
+            import traceback
+            error_msg = f"mousePressEvent crash: {outer_e}\n{traceback.format_exc()}"
+            print(error_msg)
+            try:
+                from pathlib import Path
+                log_file = Path(__file__).parent.parent.parent / "logs" / "drag_error.log"
+                log_file.parent.mkdir(exist_ok=True)
+                with open(log_file, "a", encoding="utf-8") as f:
+                    from datetime import datetime
+                    f.write(f"\n[{datetime.now()}] MOUSE PRESS EVENT CRASH:\n{error_msg}\n")
+            except:
+                pass
 
     def mouseMoveEvent(self, event) -> None:
         if self._resizing:
