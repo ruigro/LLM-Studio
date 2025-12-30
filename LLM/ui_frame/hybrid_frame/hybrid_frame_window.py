@@ -340,11 +340,8 @@ class HybridFrameWindow(QWidget):
                     global_pos = QPoint(int(gp.x()), int(gp.y()))
                 else:
                     global_pos = gp.toPoint() if hasattr(gp, 'toPoint') else gp
-                # Try geometry() first, fallback to frameGeometry()
-                try:
-                    frame_top_left = self.geometry().topLeft()
-                except:
-                    frame_top_left = self.frameGeometry().topLeft()
+                # Use pos() - more reliable for frameless windows than frameGeometry()
+                frame_top_left = self.pos()
                 self._drag_offset = global_pos - frame_top_left
             except Exception as e:
                 import traceback
@@ -381,7 +378,8 @@ class HybridFrameWindow(QWidget):
                 pass
 
     def mouseMoveEvent(self, event) -> None:
-        if self._resizing:
+        try:
+            if self._resizing:
             # Handle QPointF from globalPosition() safely
             gp = event.globalPosition()
             if isinstance(gp, QPointF):
@@ -400,7 +398,15 @@ class HybridFrameWindow(QWidget):
                     global_pos = QPoint(int(gp.x()), int(gp.y()))
                 else:
                     global_pos = gp.toPoint() if hasattr(gp, 'toPoint') else gp
-                self.move(global_pos - self._drag_offset)
+                # Calculate new position
+                new_pos = global_pos - self._drag_offset
+                
+                # Validate coordinates are within reasonable screen bounds
+                # Allow some tolerance outside screen for multi-monitor setups
+                screen = QApplication.primaryScreen().geometry()
+                if (-100 <= new_pos.x() <= screen.width() + 100 and
+                    -100 <= new_pos.y() <= screen.height() + 100):
+                    self.move(new_pos)
             except Exception as e:
                 import traceback
                 error_msg = f"Drag move error: {e}\n{traceback.format_exc()}"
@@ -421,8 +427,22 @@ class HybridFrameWindow(QWidget):
             event.accept()
             return
 
-        d = self._hit_test_resize(event.pos())
-        self.setCursor(self._cursor_by_dir.get(d, Qt.ArrowCursor))
+            d = self._hit_test_resize(event.pos())
+            self.setCursor(self._cursor_by_dir.get(d, Qt.ArrowCursor))
+        except Exception as e:
+            # Catch any exception in the entire mouseMoveEvent
+            import traceback
+            error_msg = f"mouseMoveEvent crash: {e}\n{traceback.format_exc()}"
+            print(error_msg)
+            try:
+                from pathlib import Path
+                log_file = Path(__file__).parent.parent.parent / "logs" / "drag_error.log"
+                log_file.parent.mkdir(exist_ok=True)
+                with open(log_file, "a", encoding="utf-8") as f:
+                    from datetime import datetime
+                    f.write(f"\n[{datetime.now()}] MOUSE MOVE EVENT CRASH:\n{error_msg}\n")
+            except:
+                pass
 
     def mouseReleaseEvent(self, event) -> None:
         if event.button() == Qt.LeftButton:
