@@ -7,7 +7,7 @@ from typing import Optional
 
 from PySide6.QtCore import Qt, QPoint, QRect, QSize, QEvent
 from PySide6.QtGui import QPainter, QPixmap, QPen, QColor, QLinearGradient, QBrush
-from PySide6.QtWidgets import QWidget, QVBoxLayout, QPushButton
+from PySide6.QtWidgets import QWidget, QVBoxLayout
 
 
 @dataclass
@@ -104,9 +104,6 @@ class HybridFrameWindow(QWidget):
 
         # Keep margins correct if device pixel ratio / style changes
         self.installEventFilter(self)
-        
-        # Add close button in top-right corner
-        self._setup_close_button()
 
     # ----------------------------
     # Public API
@@ -177,46 +174,11 @@ class HybridFrameWindow(QWidget):
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
         self._apply_content_margins()
-        # Reposition close button on resize
-        if hasattr(self, '_close_button'):
-            self._position_close_button()
 
     def eventFilter(self, obj, event) -> bool:
         if obj is self and event.type() in (QEvent.Polish, QEvent.StyleChange):
             self._apply_content_margins()
         return super().eventFilter(obj, event)
-    
-    def _setup_close_button(self) -> None:
-        """Add a close button in the top-right corner"""
-        self._close_button = QPushButton("❌", self)
-        self._close_button.setFixedSize(30, 30)
-        self._close_button.setStyleSheet("""
-            QPushButton {
-                background: transparent;
-                color: #f44336;
-                border: none;
-                font-size: 16pt;
-                font-weight: bold;
-                padding: 0px;
-            }
-            QPushButton:hover {
-                background: rgba(244, 67, 54, 0.2);
-                border-radius: 4px;
-            }
-            QPushButton:pressed {
-                background: rgba(244, 67, 54, 0.3);
-            }
-        """)
-        self._close_button.clicked.connect(self.close)
-        self._close_button.raise_()  # Ensure it's on top
-        self._position_close_button()
-    
-    def _position_close_button(self) -> None:
-        """Position close button in top-right corner"""
-        if hasattr(self, '_close_button'):
-            cs = self.corner_size
-            padding = 5
-            self._close_button.move(self.width() - cs - padding, padding)
 
     # ----------------------------
     # Painting
