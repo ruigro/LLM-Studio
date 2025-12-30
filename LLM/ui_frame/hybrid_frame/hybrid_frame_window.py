@@ -342,7 +342,11 @@ class HybridFrameWindow(QWidget):
 
     def mouseMoveEvent(self, event) -> None:
         if self._resizing:
-            self._apply_resize(event.globalPosition().toPoint())
+            try:
+                global_pos = event.globalPosition().toPoint()
+            except AttributeError:
+                global_pos = event.globalPos()
+            self._apply_resize(global_pos)
             event.accept()
             return
 
