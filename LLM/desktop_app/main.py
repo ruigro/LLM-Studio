@@ -1950,17 +1950,9 @@ class MainWindow(QMainWindow):
         
         # Update HybridFrameWindow content if it exists (when using hybrid frame)
         # The frame itself is just decorative - update the content widget inside it
-        if hasattr(self, '_hybrid_frame') and self._hybrid_frame is not None:
-            # Get the central widget that was moved into the frame
-            if hasattr(self._hybrid_frame, 'content_container'):
-                content = self._hybrid_frame.content_container
-                # Find the actual widget inside the content container
-                layout = content.layout()
-                if layout and layout.count() > 0:
-                    item = layout.itemAt(0)
-                    if item and item.widget():
-                        # Apply theme to the actual content widget
-                        item.widget().setStyleSheet(stylesheet)
+        if hasattr(self, '_hybrid_frame_content') and self._hybrid_frame_content is not None:
+            # Apply theme directly to the central widget that was moved into the frame
+            self._hybrid_frame_content.setStyleSheet(stylesheet)
     
     def _update_themed_widgets(self, primary: str, secondary: str, accent: str) -> None:
         """Update all stored themed widgets with current colors"""
@@ -5284,6 +5276,9 @@ def main() -> int:
             
             # Apply stylesheet to central widget (the actual content) - frame is just decorative
             central.setStyleSheet(theme_stylesheet)
+            
+            # Store reference to central widget for theme updates
+            win._hybrid_frame_content = central
             
             frame.setWindowTitle(win.windowTitle())
             frame.resize(win.size())
