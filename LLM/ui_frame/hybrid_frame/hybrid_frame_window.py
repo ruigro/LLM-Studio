@@ -330,14 +330,31 @@ class HybridFrameWindow(QWidget):
             return
 
         self._dragging = True
-        # Use globalPos() for compatibility, or globalPosition() if available
         try:
-            global_pos = event.globalPosition().toPoint()
-        except AttributeError:
-            global_pos = event.globalPos()
-        # Use geometry() instead of frameGeometry() for more reliable positioning
-        frame_top_left = self.geometry().topLeft()
-        self._drag_offset = global_pos - frame_top_left
+            # Use globalPos() for compatibility, or globalPosition() if available
+            try:
+                global_pos = event.globalPosition().toPoint()
+            except (AttributeError, TypeError):
+                try:
+                    global_pos = event.globalPos()
+                except AttributeError:
+                    # Fallback to screen position
+                    global_pos = event.screenPos().toPoint()
+            
+            # Use geometry() instead of frameGeometry() for more reliable positioning
+            try:
+                frame_top_left = self.geometry().topLeft()
+            except:
+                frame_top_left = QPoint(0, 0)
+            
+            self._drag_offset = global_pos - frame_top_left
+        except Exception as e:
+            # If drag setup fails, disable dragging
+            import traceback
+            print(f"Drag setup error: {e}")
+            print(traceback.format_exc())
+            self._dragging = False
+            self._drag_offset = QPoint(0, 0)
         event.accept()
 
     def mouseMoveEvent(self, event) -> None:
@@ -351,18 +368,35 @@ class HybridFrameWindow(QWidget):
             return
 
         if self._dragging:
-            # Use globalPos() for compatibility, or globalPosition() if available
-            try:
-                global_pos = event.globalPosition().toPoint()
-            except AttributeError:
-                global_pos = event.globalPos()
+            # Get global position - try multiple methods for compatibility
+            global_pos = None
+            if hasattr(event, 'globalPosition'):
+                try:
+                    global_pos = event.globalPosition().toPoint()
+                except:
+                    pass
+            if global_pos is None and hasattr(event, 'globalPos'):
+                try:
+                    global_pos = event.globalPos()
+                except:
+                    pass
+            if global_pos is None:
+                # Last resort: use screen position
+                try:
+                    global_pos = event.screenPos().toPoint()
+                except:
+                    return  # Can't drag without valid position
+            
+            # Calculate new position
             try:
                 new_pos = global_pos - self._drag_offset
-                self.move(new_pos)
+                # Validate coordinates are reasonable
+                if -50000 < new_pos.x() < 50000 and -50000 < new_pos.y() < 50000:
+                    self.move(new_pos)
             except Exception as e:
-                # Fallback: use simpler drag calculation
-                print(f"Drag error: {e}, using fallback")
-                pass
+                # Log error but don't crash - just stop dragging
+                print(f"Drag move error: {e}")
+                self._dragging = False
             event.accept()
             return
 
