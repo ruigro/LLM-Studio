@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import Qt, QPoint, QRect, QSize, QEvent
+from PySide6.QtCore import Qt, QPoint, QPointF, QRect, QSize, QEvent
 from PySide6.QtGui import QPainter, QPixmap, QPen, QColor, QLinearGradient, QBrush
 from PySide6.QtWidgets import QWidget, QVBoxLayout
 
@@ -375,24 +375,34 @@ class HybridFrameWindow(QWidget):
             return
 
         if self._dragging:
-            # Get global position - try multiple methods for compatibility
+            # Get global position - handle QPointF properly
             global_pos = None
             if hasattr(event, 'globalPosition'):
                 try:
-                    global_pos = event.globalPosition().toPoint()
-                except:
+                    gp = event.globalPosition()
+                    # Handle both QPointF and QPoint
+                    if isinstance(gp, QPointF):
+                        global_pos = QPoint(int(gp.x()), int(gp.y()))
+                    elif isinstance(gp, QPoint):
+                        global_pos = gp
+                    elif hasattr(gp, 'toPoint'):
+                        global_pos = gp.toPoint()
+                    else:
+                        global_pos = QPoint(int(gp.x()), int(gp.y()))
+                except Exception as e:
+                    print(f"Error getting globalPosition: {e}")
                     pass
             if global_pos is None and hasattr(event, 'globalPos'):
                 try:
                     global_pos = event.globalPos()
                 except:
                     pass
+            
             if global_pos is None:
-                # Last resort: use screen position
-                try:
-                    global_pos = event.screenPos().toPoint()
-                except:
-                    return  # Can't drag without valid position
+                # Can't drag without valid position
+                self._dragging = False
+                event.accept()
+                return
             
             # Calculate new position
             try:
@@ -400,9 +410,14 @@ class HybridFrameWindow(QWidget):
                 # Validate coordinates are reasonable
                 if -50000 < new_pos.x() < 50000 and -50000 < new_pos.y() < 50000:
                     self.move(new_pos)
+                else:
+                    print(f"Invalid drag position: {new_pos}")
+                    self._dragging = False
             except Exception as e:
                 # Log error but don't crash - just stop dragging
+                import traceback
                 print(f"Drag move error: {e}")
+                print(traceback.format_exc())
                 self._dragging = False
             event.accept()
             return
