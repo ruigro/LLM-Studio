@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import Qt, QPoint, QPointF, QRect, QSize, QEvent
+from PySide6.QtCore import Qt, QPoint, QRect, QSize, QEvent
 from PySide6.QtGui import QPainter, QPixmap, QPen, QColor, QLinearGradient, QBrush
 from PySide6.QtWidgets import QWidget, QVBoxLayout
 
@@ -317,10 +317,7 @@ class HybridFrameWindow(QWidget):
         if d != 0:
             self._resizing = True
             self._resize_dir = d
-            try:
-                self._press_global = event.globalPosition().toPoint()
-            except AttributeError:
-                self._press_global = event.globalPos()
+            self._press_global = event.globalPosition().toPoint()
             self._press_geom = self.geometry()
             event.accept()
             return
@@ -330,95 +327,17 @@ class HybridFrameWindow(QWidget):
             return
 
         self._dragging = True
-        # Get global position - try multiple methods for compatibility
-        global_pos = None
-        if hasattr(event, 'globalPosition'):
-            try:
-                gp = event.globalPosition()
-                if hasattr(gp, 'toPoint'):
-                    global_pos = gp.toPoint()
-                else:
-                    global_pos = QPoint(int(gp.x()), int(gp.y()))
-            except:
-                pass
-        if global_pos is None and hasattr(event, 'globalPos'):
-            try:
-                global_pos = event.globalPos()
-            except:
-                pass
-        
-        # Get window position - try frameGeometry first, fallback to geometry
-        frame_top_left = None
-        try:
-            frame_top_left = self.frameGeometry().topLeft()
-        except:
-            try:
-                frame_top_left = self.geometry().topLeft()
-            except:
-                frame_top_left = QPoint(0, 0)
-        
-        if global_pos is not None and frame_top_left is not None:
-            self._drag_offset = global_pos - frame_top_left
-        else:
-            self._dragging = False
-            self._drag_offset = QPoint(0, 0)
+        self._drag_offset = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
         event.accept()
 
     def mouseMoveEvent(self, event) -> None:
         if self._resizing:
-            try:
-                global_pos = event.globalPosition().toPoint()
-            except AttributeError:
-                global_pos = event.globalPos()
-            self._apply_resize(global_pos)
+            self._apply_resize(event.globalPosition().toPoint())
             event.accept()
             return
 
         if self._dragging:
-            # Get global position - handle QPointF properly
-            global_pos = None
-            if hasattr(event, 'globalPosition'):
-                try:
-                    gp = event.globalPosition()
-                    # Handle both QPointF and QPoint
-                    if isinstance(gp, QPointF):
-                        global_pos = QPoint(int(gp.x()), int(gp.y()))
-                    elif isinstance(gp, QPoint):
-                        global_pos = gp
-                    elif hasattr(gp, 'toPoint'):
-                        global_pos = gp.toPoint()
-                    else:
-                        global_pos = QPoint(int(gp.x()), int(gp.y()))
-                except Exception as e:
-                    print(f"Error getting globalPosition: {e}")
-                    pass
-            if global_pos is None and hasattr(event, 'globalPos'):
-                try:
-                    global_pos = event.globalPos()
-                except:
-                    pass
-            
-            if global_pos is None:
-                # Can't drag without valid position
-                self._dragging = False
-                event.accept()
-                return
-            
-            # Calculate new position
-            try:
-                new_pos = global_pos - self._drag_offset
-                # Validate coordinates are reasonable
-                if -50000 < new_pos.x() < 50000 and -50000 < new_pos.y() < 50000:
-                    self.move(new_pos)
-                else:
-                    print(f"Invalid drag position: {new_pos}")
-                    self._dragging = False
-            except Exception as e:
-                # Log error but don't crash - just stop dragging
-                import traceback
-                print(f"Drag move error: {e}")
-                print(traceback.format_exc())
-                self._dragging = False
+            self.move(event.globalPosition().toPoint() - self._drag_offset)
             event.accept()
             return
 
