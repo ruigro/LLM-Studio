@@ -244,8 +244,9 @@ class HybridFrameWindow(QWidget):
 
         # STEP 7: Top-center badge image with glow
         if self.top_center and not self.top_center.isNull():
-            badge_h = int(cs * 0.65)
-            badge_w = int(cs * 1.6)
+            badge_h = 300  # Fixed 300px height as requested
+            aspect_ratio = self.top_center.width() / self.top_center.height()
+            badge_w = int(badge_h * aspect_ratio)
             x = (w - badge_w) // 2
             y = max(0, t // 2)
             target = QRect(x, y, badge_w, badge_h)
