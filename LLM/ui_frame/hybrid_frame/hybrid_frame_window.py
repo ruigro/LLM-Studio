@@ -310,6 +310,7 @@ class HybridFrameWindow(QWidget):
     # Drag + Resize
     # ----------------------------
     def mousePressEvent(self, event) -> None:
+        print(f"[DRAG] mousePressEvent started")
         if event.button() != Qt.LeftButton:
             return
 
@@ -324,10 +325,13 @@ class HybridFrameWindow(QWidget):
 
         # Drag only if not clicking inside content (so widgets still work)
         if self._is_in_content(event.pos()):
+            print(f"[DRAG] Click inside content, not dragging")
             return
 
+        print(f"[DRAG] Starting drag, globalPos={event.globalPos()}, pos={self.pos()}")
         self._dragging = True
         self._drag_offset = event.globalPos() - self.pos()
+        print(f"[DRAG] Drag offset calculated: {self._drag_offset}")
         event.accept()
 
     def mouseMoveEvent(self, event) -> None:
@@ -337,7 +341,11 @@ class HybridFrameWindow(QWidget):
             return
 
         if self._dragging:
-            self.move(event.globalPos() - self._drag_offset)
+            print(f"[DRAG] Moving: globalPos={event.globalPos()}, offset={self._drag_offset}")
+            new_pos = event.globalPos() - self._drag_offset
+            print(f"[DRAG] New position will be: {new_pos}")
+            self.move(new_pos)
+            print(f"[DRAG] Move completed")
             event.accept()
             return
 
