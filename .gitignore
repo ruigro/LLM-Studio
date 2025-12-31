@@ -114,3 +114,5 @@ wandb/
 mlruns/
 tensorboard/
 runs/
+allfiles.txt
+sizes.tmp
