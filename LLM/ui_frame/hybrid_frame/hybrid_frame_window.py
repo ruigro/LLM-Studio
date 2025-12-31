@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import Qt, QPoint, QRect, QSize, QEvent
+from PySide6.QtCore import Qt, QPoint, QRect, QSize, QEvent, QTimer
 from PySide6.QtGui import QPainter, QPixmap, QPen, QColor
 from PySide6.QtWidgets import QWidget, QVBoxLayout
 
@@ -43,19 +43,18 @@ class HybridFrameWindow(QWidget):
     ) -> None:
         super().__init__()
 
+        # Store reference to parent window
+        self.parent_window = parent_window
+        
         self.setWindowFlags(
-            Qt.Window
+            Qt.Tool  # Tool window stays on top of parent but not all windows
             | Qt.FramelessWindowHint
-            | Qt.WindowStaysOnTopHint  # Stay on top of parent
         )
         # Need transparency to show main window through center
         self.setAttribute(Qt.WA_TranslucentBackground, True)
         self.setAttribute(Qt.WA_TransparentForMouseEvents, False)  # We'll handle mouse events selectively
         self.setMouseTracking(True)
         self.setMinimumSize(min_size)
-        
-        # Store reference to parent window
-        self.parent_window = parent_window
 
         self.corner_size = int(corner_size)
         self.border_thickness = int(border_thickness)
@@ -96,6 +95,10 @@ class HybridFrameWindow(QWidget):
         # Connect to parent window events to sync position/size
         if self.parent_window:
             self.parent_window.installEventFilter(self)
+            # Timer to periodically check if parent is active and raise frame
+            self._raise_timer = QTimer()
+            self._raise_timer.timeout.connect(self._check_and_raise)
+            self._raise_timer.start(100)  # Check every 100ms
 
     # ----------------------------
     # Public API
@@ -162,8 +165,17 @@ class HybridFrameWindow(QWidget):
                 # Parent closing - close overlay too
                 self.close()
                 return False
+            elif event.type() == QEvent.FocusIn:
+                # Parent window focused - raise frame to stay on top
+                self.raise_()
+                return False
         
         return super().eventFilter(obj, event)
+    
+    def _check_and_raise(self) -> None:
+        """Check if parent window is active and raise frame to stay on top."""
+        if self.parent_window and self.parent_window.isActiveWindow():
+            self.raise_()
 
     # ----------------------------
     # Painting

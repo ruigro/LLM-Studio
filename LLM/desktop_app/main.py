@@ -5455,8 +5455,8 @@ def main() -> int:
                 # Create frame as overlay
                 frame = HybridFrameWindow(
                     assets, 
-                    corner_size=9, 
-                    border_thickness=9, 
+                    corner_size=18, 
+                    border_thickness=18, 
                     safe_padding=2,
                     parent_window=win  # Pass MainWindow as parent
                 )
