@@ -119,3 +119,11 @@ sizes.tmp
 all_objects.txt
 big_files.txt
 $null
+LLM/wheelhouse/
+LLM/models/
+LLM/models_trained/
+LLM/test_output/
+*.whl
+*.exe
+*.zip
+*.7z
