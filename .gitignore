@@ -116,3 +116,6 @@ tensorboard/
 runs/
 allfiles.txt
 sizes.tmp
+all_objects.txt
+big_files.txt
+$null
