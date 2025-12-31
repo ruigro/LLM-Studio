@@ -757,6 +757,7 @@ class MainWindow(QMainWindow):
         self.edge_margin = 8  # Pixels from edge to trigger resize (increased for easier detection)
         self.cursor_override_active = False  # Track if we have an override cursor active
         self.current_cursor_shape = None  # Track current cursor shape to avoid unnecessary changes
+        self._drag_disabled = False  # Flag to disable drag when wrapped in HybridFrameWindow
         
         # Model integrity checker
         if splash:
@@ -982,7 +983,7 @@ class MainWindow(QMainWindow):
         theme_layout.addWidget(color_selector)
         header_layout.addWidget(theme_container)
         
-        # Center: App title with owl icon (transparent background)
+        # Center: App title (transparent background)
         title_container = QWidget()
         title_container.setStyleSheet("background: transparent;")
         title_layout = QHBoxLayout(title_container)
@@ -990,27 +991,7 @@ class MainWindow(QMainWindow):
         title_layout.setSpacing(12)
         title_layout.setAlignment(Qt.AlignCenter)
         
-        # Owl icon - maximum size to fit header (header min height is 80px, use 70px for icon)
-        icon_path = self.root.parent / "icons" / "owl_studio_square.png"
-        if icon_path.exists():
-            icon_pixmap = QPixmap(str(icon_path))
-            # Scale icon to maximum size to fit header (70x70 pixels, leaving some margin)
-            icon_pixmap = icon_pixmap.scaled(70, 70, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-            icon_label = QLabel()
-            icon_label.setPixmap(icon_pixmap)
-            icon_label.setAlignment(Qt.AlignCenter)
-            icon_label.setStyleSheet("background: transparent; border: none; padding: 0px;")
-            icon_label.setMinimumSize(70, 70)
-            icon_label.setMaximumSize(70, 70)
-            title_layout.addWidget(icon_label)
-        else:
-            # Fallback to emoji if icon not found
-            icon_label = QLabel("🤖")
-            icon_label.setAlignment(Qt.AlignCenter)
-            icon_label.setStyleSheet("background: transparent; font-size: 32pt; border: none; padding: 0px;")
-            title_layout.addWidget(icon_label)
-        
-        # Title text (without emoji)
+        # Title text only (without emoji or icon)
         title_text = APP_TITLE.replace("🤖 ", "").replace("🤖", "")  # Remove robot emoji
         title_label = QLabel(title_text)
         title_label.setAlignment(Qt.AlignCenter | Qt.AlignVCenter)
@@ -1420,129 +1401,120 @@ class MainWindow(QMainWindow):
     
     def mousePressEvent(self, event: QMouseEvent) -> None:
         """Handle mouse press for window resizing"""
-        if event.button() == Qt.LeftButton:
-            edge = self._get_resize_edge(event.position().toPoint())
-            if edge:
-                self.resize_edge = edge
-                self.resize_start_pos = event.globalPosition().toPoint()
-                self.resize_start_geometry = self.geometry()
-                event.accept()
-                return
+        if event is None or self._drag_disabled:
+            if self._drag_disabled:
+                return super().mousePressEvent(event)
+            return
+        
+        try:
+            if event.button() == Qt.LeftButton:
+                try:
+                    pos = event.position().toPoint()
+                    global_pos = event.globalPosition().toPoint()
+                except (RuntimeError, AttributeError) as e:
+                    print(f"Error getting positions in mousePressEvent: {e}")
+                    super().mousePressEvent(event)
+                    return
+                
+                edge = self._get_resize_edge(pos)
+                if edge:
+                    try:
+                        geom = self.geometry()
+                        if not geom.isValid():
+                            super().mousePressEvent(event)
+                            return
+                        
+                        self.resize_edge = edge
+                        self.resize_start_pos = global_pos
+                        self.resize_start_geometry = geom
+                        event.accept()
+                        return
+                    except (RuntimeError, AttributeError) as e:
+                        print(f"Error setting resize state in mousePressEvent: {e}")
+                        super().mousePressEvent(event)
+                        return
+        except Exception as e:
+            print(f"Unexpected error in mousePressEvent: {e}")
+        
         super().mousePressEvent(event)
     
     def mouseMoveEvent(self, event: QMouseEvent) -> None:
         """Handle mouse move for window resizing and cursor changes"""
-        pos = event.position().toPoint()
-        global_pos = event.globalPosition().toPoint()
+        if event is None or self._drag_disabled:
+            if self._drag_disabled:
+                return super().mouseMoveEvent(event)
+            return
         
-        # If resizing, handle resize using global coordinates
-        if self.resize_edge and event.buttons() == Qt.LeftButton:
-            if self.resize_start_pos and self.resize_start_geometry:
-                # Use global position delta for accurate resize
-                delta = global_pos - self.resize_start_pos
-                geom = QRect(self.resize_start_geometry)
-                
-                if "left" in self.resize_edge:
-                    new_x = geom.x() + delta.x()
-                    new_width = geom.width() - delta.x()
-                    if new_width >= self.minimumWidth():
-                        geom.setX(new_x)
-                        geom.setWidth(new_width)
-                if "right" in self.resize_edge:
-                    new_width = geom.width() + delta.x()
-                    if new_width >= self.minimumWidth():
-                        geom.setWidth(new_width)
-                if "top" in self.resize_edge:
-                    new_y = geom.y() + delta.y()
-                    new_height = geom.height() - delta.y()
-                    if new_height >= self.minimumHeight():
-                        geom.setY(new_y)
-                        geom.setHeight(new_height)
-                if "bottom" in self.resize_edge:
-                    new_height = geom.height() + delta.y()
-                    if new_height >= self.minimumHeight():
-                        geom.setHeight(new_height)
-                
-                self.setGeometry(geom)
-                # Update start position for next move to prevent accumulation
-                self.resize_start_pos = global_pos
-                self.resize_start_geometry = geom
-                event.accept()
+        try:
+            try:
+                pos = event.position().toPoint()
+                global_pos = event.globalPosition().toPoint()
+            except (RuntimeError, AttributeError) as e:
+                print(f"Error getting positions in mouseMoveEvent: {e}")
+                super().mouseMoveEvent(event)
                 return
-        
-        # Always check cursor on mouse move (even when not resizing)
-        edge = self._get_resize_edge(pos)
-        if edge:
-            cursor_shape = None
-            if edge in ["top-left", "bottom-right"]:
-                cursor_shape = Qt.SizeFDiagCursor
-            elif edge in ["top-right", "bottom-left"]:
-                cursor_shape = Qt.SizeBDiagCursor
-            elif edge in ["left", "right"]:
-                cursor_shape = Qt.SizeHorCursor
-            elif edge in ["top", "bottom"]:
-                cursor_shape = Qt.SizeVerCursor
             
-            # Only change cursor if it's different from current
-            if cursor_shape and cursor_shape != self.current_cursor_shape:
-                if self.cursor_override_active:
-                    # Change existing override instead of restoring and setting new one
-                    QApplication.changeOverrideCursor(QCursor(cursor_shape))
-                else:
-                    # Set new override
-                    QApplication.setOverrideCursor(QCursor(cursor_shape))
-                # Also set on widget as fallback
-                self.setCursor(QCursor(cursor_shape))
-                self.cursor_override_active = True
-                self.current_cursor_shape = cursor_shape
-        else:
-            # Not on edge - restore normal cursor
-            if self.cursor_override_active:
-                QApplication.restoreOverrideCursor()
-                self.cursor_override_active = False
-                self.current_cursor_shape = None
-            # Also restore widget cursor
-            self.unsetCursor()
-        
-        super().mouseMoveEvent(event)
-    
-    def mouseReleaseEvent(self, event: QMouseEvent) -> None:
-        """Handle mouse release to stop resizing"""
-        if event.button() == Qt.LeftButton:
-            self.resize_edge = None
-            self.resize_start_pos = None
-            self.resize_start_geometry = None
-            if self.cursor_override_active:
-                QApplication.restoreOverrideCursor()
-                self.cursor_override_active = False
-        super().mouseReleaseEvent(event)
-    
-    def eventFilter(self, obj, event) -> bool:
-        """Event filter to catch mouse events for window resizing from child widgets"""
-        if isinstance(event, QMouseEvent):
-            # Always use global position for accurate calculations
-            global_pos = event.globalPosition().toPoint()
-            # Convert to window coordinates for edge detection
-            window_pos = self.mapFromGlobal(global_pos)
-            
-            # Handle mouse enter to ensure cursor updates
-            if event.type() == QMouseEvent.Type.Enter:
-                # When mouse enters a child widget, check if we're near an edge
-                if not self.resize_edge:
-                    edge = self._get_resize_edge(window_pos)
-                    if edge:
-                        cursor_shape = None
-                        if edge in ["top-left", "bottom-right"]:
-                            cursor_shape = Qt.SizeFDiagCursor
-                        elif edge in ["top-right", "bottom-left"]:
-                            cursor_shape = Qt.SizeBDiagCursor
-                        elif edge in ["left", "right"]:
-                            cursor_shape = Qt.SizeHorCursor
-                        elif edge in ["top", "bottom"]:
-                            cursor_shape = Qt.SizeVerCursor
+            # If resizing, handle resize using global coordinates
+            if self.resize_edge and event.buttons() == Qt.LeftButton:
+                if self.resize_start_pos and self.resize_start_geometry:
+                    try:
+                        # Use global position delta for accurate resize
+                        delta = global_pos - self.resize_start_pos
+                        geom = QRect(self.resize_start_geometry)
                         
-                        # Only change cursor if it's different from current
-                        if cursor_shape and cursor_shape != self.current_cursor_shape:
+                        if "left" in self.resize_edge:
+                            new_x = geom.x() + delta.x()
+                            new_width = geom.width() - delta.x()
+                            if new_width >= self.minimumWidth():
+                                geom.setX(new_x)
+                                geom.setWidth(new_width)
+                        if "right" in self.resize_edge:
+                            new_width = geom.width() + delta.x()
+                            if new_width >= self.minimumWidth():
+                                geom.setWidth(new_width)
+                        if "top" in self.resize_edge:
+                            new_y = geom.y() + delta.y()
+                            new_height = geom.height() - delta.y()
+                            if new_height >= self.minimumHeight():
+                                geom.setY(new_y)
+                                geom.setHeight(new_height)
+                        if "bottom" in self.resize_edge:
+                            new_height = geom.height() + delta.y()
+                            if new_height >= self.minimumHeight():
+                                geom.setHeight(new_height)
+                        
+                        # Validate geometry before setting
+                        if geom.isValid() and geom.width() >= self.minimumWidth() and geom.height() >= self.minimumHeight():
+                            self.setGeometry(geom)
+                            # Update start position for next move to prevent accumulation
+                            self.resize_start_pos = global_pos
+                            self.resize_start_geometry = geom
+                            event.accept()
+                            return
+                    except (RuntimeError, AttributeError) as e:
+                        print(f"Error during resize in mouseMoveEvent: {e}")
+                        # Cancel resize on error
+                        self.resize_edge = None
+                        self.resize_start_pos = None
+                        self.resize_start_geometry = None
+            
+            # Always check cursor on mouse move (even when not resizing)
+            try:
+                edge = self._get_resize_edge(pos)
+                if edge:
+                    cursor_shape = None
+                    if edge in ["top-left", "bottom-right"]:
+                        cursor_shape = Qt.SizeFDiagCursor
+                    elif edge in ["top-right", "bottom-left"]:
+                        cursor_shape = Qt.SizeBDiagCursor
+                    elif edge in ["left", "right"]:
+                        cursor_shape = Qt.SizeHorCursor
+                    elif edge in ["top", "bottom"]:
+                        cursor_shape = Qt.SizeVerCursor
+                    
+                    # Only change cursor if it's different from current
+                    if cursor_shape and cursor_shape != self.current_cursor_shape:
+                        try:
                             if self.cursor_override_active:
                                 # Change existing override instead of restoring and setting new one
                                 QApplication.changeOverrideCursor(QCursor(cursor_shape))
@@ -1553,14 +1525,122 @@ class MainWindow(QMainWindow):
                             self.setCursor(QCursor(cursor_shape))
                             self.cursor_override_active = True
                             self.current_cursor_shape = cursor_shape
+                        except Exception as e:
+                            print(f"Error setting cursor in mouseMoveEvent: {e}")
+                else:
+                    # Not on edge - restore normal cursor
+                    if self.cursor_override_active:
+                        try:
+                            QApplication.restoreOverrideCursor()
+                            self.cursor_override_active = False
+                            self.current_cursor_shape = None
+                        except Exception as e:
+                            print(f"Error restoring cursor in mouseMoveEvent: {e}")
+                            self.cursor_override_active = False
+                            self.current_cursor_shape = None
+                    # Also restore widget cursor
+                    try:
+                        self.unsetCursor()
+                    except Exception:
+                        pass
+            except Exception as e:
+                print(f"Error checking cursor in mouseMoveEvent: {e}")
+        except Exception as e:
+            print(f"Unexpected error in mouseMoveEvent: {e}")
+        
+        super().mouseMoveEvent(event)
+    
+    def mouseReleaseEvent(self, event: QMouseEvent) -> None:
+        """Handle mouse release to stop resizing"""
+        if event is None or self._drag_disabled:
+            if self._drag_disabled:
+                return super().mouseReleaseEvent(event)
+            return
+        
+        try:
+            if event.button() == Qt.LeftButton:
+                self.resize_edge = None
+                self.resize_start_pos = None
+                self.resize_start_geometry = None
+                if self.cursor_override_active:
+                    try:
+                        QApplication.restoreOverrideCursor()
+                        self.cursor_override_active = False
+                        self.current_cursor_shape = None
+                    except Exception as e:
+                        print(f"Error restoring cursor in mouseReleaseEvent: {e}")
+                        self.cursor_override_active = False
+                        self.current_cursor_shape = None
+        except Exception as e:
+            print(f"Unexpected error in mouseReleaseEvent: {e}")
+        
+        super().mouseReleaseEvent(event)
+    
+    def eventFilter(self, obj, event) -> bool:
+        """Event filter to catch mouse events for window resizing from child widgets"""
+        if self._drag_disabled:
+            return super().eventFilter(obj, event)
+        
+        if not isinstance(event, QMouseEvent):
+            return super().eventFilter(obj, event)
+        
+        try:
+            # Always use global position for accurate calculations
+            try:
+                global_pos = event.globalPosition().toPoint()
+                # Convert to window coordinates for edge detection
+                window_pos = self.mapFromGlobal(global_pos)
+            except (RuntimeError, AttributeError) as e:
+                print(f"Error getting positions in eventFilter: {e}")
+                return super().eventFilter(obj, event)
+            
+            # Handle mouse enter to ensure cursor updates
+            if event.type() == QMouseEvent.Type.Enter:
+                # When mouse enters a child widget, check if we're near an edge
+                if not self.resize_edge:
+                    try:
+                        edge = self._get_resize_edge(window_pos)
+                        if edge:
+                            cursor_shape = None
+                            if edge in ["top-left", "bottom-right"]:
+                                cursor_shape = Qt.SizeFDiagCursor
+                            elif edge in ["top-right", "bottom-left"]:
+                                cursor_shape = Qt.SizeBDiagCursor
+                            elif edge in ["left", "right"]:
+                                cursor_shape = Qt.SizeHorCursor
+                            elif edge in ["top", "bottom"]:
+                                cursor_shape = Qt.SizeVerCursor
+                            
+                            # Only change cursor if it's different from current
+                            if cursor_shape and cursor_shape != self.current_cursor_shape:
+                                try:
+                                    if self.cursor_override_active:
+                                        # Change existing override instead of restoring and setting new one
+                                        QApplication.changeOverrideCursor(QCursor(cursor_shape))
+                                    else:
+                                        # Set new override
+                                        QApplication.setOverrideCursor(QCursor(cursor_shape))
+                                    # Also set on widget as fallback
+                                    self.setCursor(QCursor(cursor_shape))
+                                    self.cursor_override_active = True
+                                    self.current_cursor_shape = cursor_shape
+                                except Exception as e:
+                                    print(f"Error setting cursor in eventFilter Enter: {e}")
+                    except Exception as e:
+                        print(f"Error checking edge in eventFilter Enter: {e}")
                 return False  # Let event propagate
             
             # Handle mouse leave to restore cursor
             if event.type() == QMouseEvent.Type.Leave:
                 if self.cursor_override_active and not self.resize_edge:
-                    QApplication.restoreOverrideCursor()
-                    self.cursor_override_active = False
-                    self.current_cursor_shape = None
+                    try:
+                        QApplication.restoreOverrideCursor()
+                        self.cursor_override_active = False
+                        self.current_cursor_shape = None
+                    except Exception as e:
+                        print(f"Error restoring cursor in eventFilter Leave: {e}")
+                        self.cursor_override_active = False
+                        self.current_cursor_shape = None
                 return False  # Let event propagate
             
             # Handle mouse move for cursor changes and resizing
@@ -1593,63 +1673,24 @@ class MainWindow(QMainWindow):
                             if new_height >= self.minimumHeight():
                                 geom.setHeight(new_height)
                         
-                        self.setGeometry(geom)
-                        # Update start position for next move to prevent accumulation
-                        self.resize_start_pos = global_pos
-                        self.resize_start_geometry = geom
-                        return True  # Consume event
+                        # Validate geometry before setting
+                        if geom.isValid() and geom.width() >= self.minimumWidth() and geom.height() >= self.minimumHeight():
+                            try:
+                                self.setGeometry(geom)
+                                # Update start position for next move to prevent accumulation
+                                self.resize_start_pos = global_pos
+                                self.resize_start_geometry = geom
+                                return True  # Consume event
+                            except (RuntimeError, AttributeError) as e:
+                                print(f"Error setting geometry in eventFilter: {e}")
+                                # Cancel resize on error
+                                self.resize_edge = None
+                                self.resize_start_pos = None
+                                self.resize_start_geometry = None
+                                return True
                 
                 # Always check cursor on mouse move (even when not resizing)
-                edge = self._get_resize_edge(window_pos)
-                if edge:
-                    cursor_shape = None
-                    if edge in ["top-left", "bottom-right"]:
-                        cursor_shape = Qt.SizeFDiagCursor
-                    elif edge in ["top-right", "bottom-left"]:
-                        cursor_shape = Qt.SizeBDiagCursor
-                    elif edge in ["left", "right"]:
-                        cursor_shape = Qt.SizeHorCursor
-                    elif edge in ["top", "bottom"]:
-                        cursor_shape = Qt.SizeVerCursor
-                    
-                    # Only change cursor if it's different from current
-                    if cursor_shape and cursor_shape != self.current_cursor_shape:
-                        if self.cursor_override_active:
-                            # Change existing override instead of restoring and setting new one
-                            QApplication.changeOverrideCursor(QCursor(cursor_shape))
-                        else:
-                            # Set new override
-                            QApplication.setOverrideCursor(QCursor(cursor_shape))
-                        # Also set on widget as fallback
-                        self.setCursor(QCursor(cursor_shape))
-                        self.cursor_override_active = True
-                        self.current_cursor_shape = cursor_shape
-                    # Return False to let event propagate, but cursor is set
-                else:
-                    # Restore cursor when not on edge
-                    if self.cursor_override_active:
-                        QApplication.restoreOverrideCursor()
-                        self.cursor_override_active = False
-                        self.current_cursor_shape = None
-                    # Also restore widget cursor
-                    self.unsetCursor()
-            
-            # Handle mouse press for resize start
-            elif event.type() == QMouseEvent.Type.MouseButtonPress and event.button() == Qt.LeftButton:
-                edge = self._get_resize_edge(window_pos)
-                if edge:
-                    self.resize_edge = edge
-                    self.resize_start_pos = global_pos
-                    self.resize_start_geometry = self.geometry()
-                    return True  # Consume event to start resize
-            
-            # Handle mouse release
-            elif event.type() == QMouseEvent.Type.MouseButtonRelease and event.button() == Qt.LeftButton:
-                if self.resize_edge:
-                    self.resize_edge = None
-                    self.resize_start_pos = None
-                    self.resize_start_geometry = None
-                    # Check current position and set cursor accordingly
+                try:
                     edge = self._get_resize_edge(window_pos)
                     if edge:
                         cursor_shape = None
@@ -1662,46 +1703,162 @@ class MainWindow(QMainWindow):
                         elif edge in ["top", "bottom"]:
                             cursor_shape = Qt.SizeVerCursor
                         
+                        # Only change cursor if it's different from current
                         if cursor_shape and cursor_shape != self.current_cursor_shape:
-                            if self.cursor_override_active:
-                                QApplication.restoreOverrideCursor()
-                            QApplication.setOverrideCursor(QCursor(cursor_shape))
-                            self.cursor_override_active = True
-                            self.current_cursor_shape = cursor_shape
+                            try:
+                                if self.cursor_override_active:
+                                    # Change existing override instead of restoring and setting new one
+                                    QApplication.changeOverrideCursor(QCursor(cursor_shape))
+                                else:
+                                    # Set new override
+                                    QApplication.setOverrideCursor(QCursor(cursor_shape))
+                                # Also set on widget as fallback
+                                self.setCursor(QCursor(cursor_shape))
+                                self.cursor_override_active = True
+                                self.current_cursor_shape = cursor_shape
+                            except Exception as e:
+                                print(f"Error setting cursor in eventFilter: {e}")
+                        # Return False to let event propagate, but cursor is set
                     else:
+                        # Restore cursor when not on edge
                         if self.cursor_override_active:
-                            QApplication.restoreOverrideCursor()
-                            self.cursor_override_active = False
-                            self.current_cursor_shape = None
-                    return True  # Consume event
+                            try:
+                                QApplication.restoreOverrideCursor()
+                                self.cursor_override_active = False
+                                self.current_cursor_shape = None
+                            except Exception as e:
+                                print(f"Error restoring cursor in eventFilter: {e}")
+                                self.cursor_override_active = False
+                                self.current_cursor_shape = None
+                        # Also restore widget cursor
+                        try:
+                            self.unsetCursor()
+                        except Exception:
+                            pass
+                except Exception as e:
+                    print(f"Error checking cursor in eventFilter: {e}")
+            
+            # Handle mouse press for resize start
+            elif event.type() == QMouseEvent.Type.MouseButtonPress and event.button() == Qt.LeftButton:
+                try:
+                    edge = self._get_resize_edge(window_pos)
+                    if edge:
+                        geom = self.geometry()
+                        if geom.isValid():
+                            self.resize_edge = edge
+                            self.resize_start_pos = global_pos
+                            self.resize_start_geometry = geom
+                            return True  # Consume event to start resize
+                except (RuntimeError, AttributeError) as e:
+                    print(f"Error in eventFilter mouse press: {e}")
+                    return super().eventFilter(obj, event)
+            
+            # Handle mouse release
+            elif event.type() == QMouseEvent.Type.MouseButtonRelease and event.button() == Qt.LeftButton:
+                try:
+                    if self.resize_edge:
+                        self.resize_edge = None
+                        self.resize_start_pos = None
+                        self.resize_start_geometry = None
+                        # Check current position and set cursor accordingly
+                        try:
+                            edge = self._get_resize_edge(window_pos)
+                            if edge:
+                                cursor_shape = None
+                                if edge in ["top-left", "bottom-right"]:
+                                    cursor_shape = Qt.SizeFDiagCursor
+                                elif edge in ["top-right", "bottom-left"]:
+                                    cursor_shape = Qt.SizeBDiagCursor
+                                elif edge in ["left", "right"]:
+                                    cursor_shape = Qt.SizeHorCursor
+                                elif edge in ["top", "bottom"]:
+                                    cursor_shape = Qt.SizeVerCursor
+                                
+                                if cursor_shape and cursor_shape != self.current_cursor_shape:
+                                    try:
+                                        if self.cursor_override_active:
+                                            QApplication.restoreOverrideCursor()
+                                        QApplication.setOverrideCursor(QCursor(cursor_shape))
+                                        self.cursor_override_active = True
+                                        self.current_cursor_shape = cursor_shape
+                                    except Exception as e:
+                                        print(f"Error setting cursor in eventFilter release: {e}")
+                            else:
+                                if self.cursor_override_active:
+                                    try:
+                                        QApplication.restoreOverrideCursor()
+                                        self.cursor_override_active = False
+                                        self.current_cursor_shape = None
+                                    except Exception as e:
+                                        print(f"Error restoring cursor in eventFilter release: {e}")
+                                        self.cursor_override_active = False
+                                        self.current_cursor_shape = None
+                        except Exception as e:
+                            print(f"Error checking edge in eventFilter release: {e}")
+                        return True  # Consume event
+                except Exception as e:
+                    print(f"Unexpected error in eventFilter mouse release: {e}")
+                    return super().eventFilter(obj, event)
+        
+        except Exception as e:
+            print(f"Unexpected error in eventFilter: {e}")
+            return super().eventFilter(obj, event)
         
         return super().eventFilter(obj, event)
     
     def _header_mouse_press(self, event: QMouseEvent) -> None:
         """Handle mouse press on header for window dragging"""
-        if event.button() == Qt.LeftButton:
-            # Check for top edge FIRST before allowing drag (to prioritize resize)
-            # Convert header widget position to window coordinates
-            header_pos = self.header_widget.mapTo(self, event.position().toPoint())
-            edge = self._get_resize_edge(header_pos)
-            # If on top edge (or any edge), don't set drag_position - let resize handler take over
-            if not edge:
-                self.drag_position = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
-                event.accept()
-            # If on edge, don't accept event - let event filter handle resize
+        if event is None or self.header_widget is None or self._drag_disabled:
+            return
+        
+        try:
+            if event.button() == Qt.LeftButton:
+                try:
+                    # Check for top edge FIRST before allowing drag (to prioritize resize)
+                    # Convert header widget position to window coordinates
+                    header_pos = self.header_widget.mapTo(self, event.position().toPoint())
+                    edge = self._get_resize_edge(header_pos)
+                    # If on top edge (or any edge), don't set drag_position - let resize handler take over
+                    if not edge:
+                        global_pos = event.globalPosition().toPoint()
+                        frame_geom = self.frameGeometry()
+                        if frame_geom.isValid():
+                            self.drag_position = global_pos - frame_geom.topLeft()
+                            event.accept()
+                    # If on edge, don't accept event - let event filter handle resize
+                except (RuntimeError, AttributeError) as e:
+                    print(f"Error in _header_mouse_press: {e}")
+        except Exception as e:
+            print(f"Unexpected error in _header_mouse_press: {e}")
     
     def _header_mouse_move(self, event: QMouseEvent) -> None:
         """Handle mouse move on header for window dragging"""
-        if event.buttons() == Qt.LeftButton and self.drag_position is not None:
-            # Check if we're currently resizing FIRST - if so, don't handle drag
-            if not self.resize_edge:
-                # Also check if we're on an edge now (might have moved to edge)
-                header_pos = self.header_widget.mapTo(self, event.position().toPoint())
-                edge = self._get_resize_edge(header_pos)
-                if not edge:
-                    self.move(event.globalPosition().toPoint() - self.drag_position)
-                    event.accept()
-            # If resizing, don't handle drag - let resize take precedence
+        if event is None or self.header_widget is None or self._drag_disabled:
+            return
+        
+        try:
+            if event.buttons() == Qt.LeftButton and self.drag_position is not None:
+                # Check if we're currently resizing FIRST - if so, don't handle drag
+                if not self.resize_edge:
+                    try:
+                        # Also check if we're on an edge now (might have moved to edge)
+                        header_pos = self.header_widget.mapTo(self, event.position().toPoint())
+                        edge = self._get_resize_edge(header_pos)
+                        if not edge:
+                            global_pos = event.globalPosition().toPoint()
+                            new_pos = global_pos - self.drag_position
+                            # Validate position before moving (reasonable bounds)
+                            if new_pos.x() >= -10000 and new_pos.y() >= -10000:
+                                self.move(new_pos)
+                                event.accept()
+                    except (RuntimeError, AttributeError) as e:
+                        print(f"Error in _header_mouse_move: {e}")
+                        # Cancel drag on error
+                        self.drag_position = None
+                # If resizing, don't handle drag - let resize take precedence
+        except Exception as e:
+            print(f"Unexpected error in _header_mouse_move: {e}")
+            self.drag_position = None
     
     def _switch_tab(self, tab_widget: QTabWidget, index: int):
         """Switch to a tab and update button states"""
@@ -1953,6 +2110,19 @@ class MainWindow(QMainWindow):
         if hasattr(self, '_hybrid_frame_content') and self._hybrid_frame_content is not None:
             # Apply theme ONLY to the central widget - frame and container don't need it
             self._hybrid_frame_content.setStyleSheet(stylesheet)
+        
+        # Update frame colors if frame overlay exists
+        if hasattr(self, '_hybrid_frame') and self._hybrid_frame is not None:
+            # Convert hex colors to QColor with alpha for frame
+            from PySide6.QtGui import QColor
+            frame_color = QColor(primary)
+            frame_color.setAlpha(220)  # Semi-transparent
+            frame_accent = QColor(accent)
+            frame_accent.setAlpha(200)  # Semi-transparent
+            # Background color - darker version of primary for solid fill
+            bg_color = QColor(primary)
+            bg_color = bg_color.darker(300)  # Much darker for background
+            self._hybrid_frame.set_frame_colors(frame_color, frame_accent, bg_color)
     
     def _update_themed_widgets(self, primary: str, secondary: str, accent: str) -> None:
         """Update all stored themed widgets with current colors"""
@@ -5261,7 +5431,7 @@ def main() -> int:
         splash.update_progress(100, "Ready!", "")
         app.processEvents()
         
-        # Apply decorative frame wrapper if enabled
+        # Apply decorative frame overlay if enabled
         if USE_HYBRID_FRAME:
             try:
                 # Import frame module
@@ -5269,16 +5439,6 @@ def main() -> int:
                 if str(llm_dir) not in sys.path:
                     sys.path.insert(0, str(llm_dir))
                 from ui_frame.hybrid_frame import HybridFrameWindow, FrameAssets
-                
-                # Extract ONLY central widget
-                central = win.takeCentralWidget()
-                if central is None:
-                    raise ValueError("No central widget")
-                
-                # CRITICAL: Apply the MainWindow's stylesheet to preserve styling
-                # Get the theme stylesheet from MainWindow (dark mode by default)
-                from desktop_app.main import get_theme_stylesheet
-                theme_stylesheet = get_theme_stylesheet(win.dark_mode, win.color_theme)
                 
                 # Create frame with assets
                 # Assets are in hybrid_frame_module/assets/ (at project root, not in LLM/)
@@ -5291,40 +5451,46 @@ def main() -> int:
                     corner_br=str(assets_dir / "corner_br.png") if (assets_dir / "corner_br.png").exists() else None,
                     top_center=str(assets_dir / "top_center.png") if (assets_dir / "top_center.png").exists() else None,
                 )
-                # Smaller frame decorations
-                frame = HybridFrameWindow(assets, corner_size=15, border_thickness=4, safe_padding=2)
                 
-                # Mount widget and setup
-                frame.set_content_widget(central)
+                # Create frame as overlay
+                frame = HybridFrameWindow(
+                    assets, 
+                    corner_size=9, 
+                    border_thickness=9, 
+                    safe_padding=2,
+                    parent_window=win  # Pass MainWindow as parent
+                )
                 
-                # Apply stylesheet ONLY to the central widget - frame and container are just decorative
-                central.setStyleSheet(theme_stylesheet)
+                # Store reference to frame for cleanup and theme updates
+                win._hybrid_frame = frame
                 
-                # Store reference to central widget for theme updates
-                win._hybrid_frame_content = central
+                # Apply initial theme colors to frame
+                colors = win._get_theme_colors()
+                from PySide6.QtGui import QColor
+                frame_color = QColor(colors["primary"])
+                frame_color.setAlpha(220)
+                frame_accent = QColor(colors["accent"])
+                frame_accent.setAlpha(200)
+                # Background color - darker version of primary for solid fill
+                bg_color = QColor(colors["primary"])
+                bg_color = bg_color.darker(300)  # Much darker for background
+                frame.set_frame_colors(frame_color, frame_accent, bg_color)
                 
-                frame.setWindowTitle(win.windowTitle())
-                frame.resize(win.size())
-                frame.setMinimumSize(win.minimumSize())
+                # Position frame to match MainWindow (with extra space above for center image)
+                badge_h = int(90 * 0.65)  # Height of center image
+                extra_top = badge_h // 2
+                frame_geom = win.geometry()
+                frame_geom.setY(frame_geom.y() - extra_top)
+                frame_geom.setHeight(frame_geom.height() + extra_top)
+                frame.setGeometry(frame_geom)
                 
-                # Hide MainWindow, show only frame
-                win.hide()
+                # Show MainWindow first (underneath)
+                win.show()
+                splash.finish(win)
+                
+                # Then show frame overlay on top
                 frame.show()
-                splash.finish(frame)
                 
-                # Keep MainWindow alive for methods and store frame reference for theme updates
-                frame._main_window = win
-                win._hybrid_frame = frame  # Store reference so theme updates can update the frame
-                
-                # Make MainWindow's close button close the frame
-                def close_frame():
-                    frame.close()
-                win.close_btn.clicked.disconnect()  # Disconnect existing handler
-                win.close_btn.clicked.connect(close_frame)
-                
-                QTimer.singleShot(0, lambda: win._start_background_detection())
-                
-                return app.exec()
             except Exception as e:
                 import traceback
                 error_msg = f"Frame init failed: {e}"
@@ -5332,11 +5498,13 @@ def main() -> int:
                 print(error_msg)
                 print(traceback_str)
                 write_startup_error(error_msg, traceback_str)
-                # Fall through to original path
-        
-        # Original path (unchanged)
-        win.show()
-        splash.finish(win)
+                # Fall through to show window without frame
+                win.show()
+                splash.finish(win)
+        else:
+            # No frame - show window normally
+            win.show()
+            splash.finish(win)
         
         # Do system detection in background after GUI is shown (threaded; safe if launched via pythonw)
         QTimer.singleShot(500, lambda: win._start_background_detection())
