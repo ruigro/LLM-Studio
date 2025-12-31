@@ -1161,6 +1161,9 @@ class MainWindow(QMainWindow):
         self.requirements_btn.clicked.connect(lambda: self._switch_tab(tabs, 5))
         self.info_btn.clicked.connect(lambda: self._switch_tab(tabs, 6))
         
+        # Also connect to tab widget's currentChanged signal to handle programmatic changes
+        tabs.currentChanged.connect(self._update_frame_corner_br)
+        
         # Set Home as default
         self.home_btn.setChecked(True)
         tabs.setCurrentIndex(0)
@@ -1868,6 +1871,31 @@ class MainWindow(QMainWindow):
         buttons = [self.home_btn, self.train_btn, self.download_btn, self.test_btn, self.logs_btn, self.requirements_btn, self.info_btn]
         for i, btn in enumerate(buttons):
             btn.setChecked(i == index)
+        
+        # Update corner_br image based on current tab
+        self._update_frame_corner_br(index)
+    
+    def _update_frame_corner_br(self, tab_index: int) -> None:
+        """Update the frame's corner_br image based on the current tab."""
+        if not hasattr(self, '_hybrid_frame') or self._hybrid_frame is None:
+            return
+        if not hasattr(self, '_get_frame_asset_path'):
+            return
+        
+        # Map tab indices to corner_br image names
+        tab_to_image = {
+            0: "corner_br_owl_coding",      # Home
+            1: "corner_br_owl_training",     # Train
+            2: "corner_br_owl_models",       # Download
+            3: "corner_br_owl_chat",        # Test
+            4: "corner_br_owl_logs",         # Logs
+            5: "corner_br_owl_tools",        # Requirements (using tools as fallback)
+            6: "corner_br_owl_thanks",       # Info
+        }
+        
+        image_name = tab_to_image.get(tab_index, "corner_br")  # Default to corner_br if not found
+        image_path = self._get_frame_asset_path(image_name)
+        self._hybrid_frame.set_corner_br(image_path)
     
     def _install_pytorch(self):
         """Install PyTorch with CUDA"""
@@ -5444,12 +5472,23 @@ def main() -> int:
                 # Assets are in hybrid_frame_module/assets/ (at project root, not in LLM/)
                 root_dir = llm_dir.parent  # Go up from LLM/ to project root
                 assets_dir = root_dir / "hybrid_frame_module" / "assets"
+                
+                # Helper function to prefer WebP, fallback to PNG
+                def get_asset_path(name: str) -> str | None:
+                    webp_path = assets_dir / f"{name}.webp"
+                    png_path = assets_dir / f"{name}.png"
+                    if webp_path.exists():
+                        return str(webp_path)
+                    elif png_path.exists():
+                        return str(png_path)
+                    return None
+                
                 assets = FrameAssets(
-                    corner_tl=str(assets_dir / "corner_tl.png") if (assets_dir / "corner_tl.png").exists() else None,
-                    corner_tr=str(assets_dir / "corner_tr.png") if (assets_dir / "corner_tr.png").exists() else None,
-                    corner_bl=str(assets_dir / "corner_bl.png") if (assets_dir / "corner_bl.png").exists() else None,
-                    corner_br=str(assets_dir / "corner_br.png") if (assets_dir / "corner_br.png").exists() else None,
-                    top_center=str(assets_dir / "top_center.png") if (assets_dir / "top_center.png").exists() else None,
+                    corner_tl=get_asset_path("corner_tl"),
+                    corner_tr=get_asset_path("corner_tr"),
+                    corner_bl=get_asset_path("corner_bl"),
+                    corner_br=get_asset_path("corner_br"),
+                    top_center=get_asset_path("top_center_owl"),
                 )
                 
                 # Create frame as overlay
@@ -5463,6 +5502,14 @@ def main() -> int:
                 
                 # Store reference to frame for cleanup and theme updates
                 win._hybrid_frame = frame
+                # Store assets_dir and get_asset_path for dynamic corner_br updates
+                win._frame_assets_dir = assets_dir
+                win._get_frame_asset_path = get_asset_path
+                
+                # Set initial corner_br image for home page (tab index 0)
+                initial_corner_br = get_asset_path("corner_br_owl_coding")
+                if initial_corner_br:
+                    frame.set_corner_br(initial_corner_br)
                 
                 # Apply initial theme colors to frame
                 colors = win._get_theme_colors()
@@ -5476,12 +5523,17 @@ def main() -> int:
                 bg_color = bg_color.darker(300)  # Much darker for background
                 frame.set_frame_colors(frame_color, frame_accent, bg_color)
                 
-                # Position frame to match MainWindow (with extra space above for center image)
+                # Position frame to match MainWindow (with extra space above for center image and right for corner_tr)
+                # Also shift outside by half border thickness
                 badge_h = int(90 * 0.65)  # Height of center image
                 extra_top = badge_h // 2
+                extra_right = 60  # Extend right for corner_tr (120px wide, centered at edge = 60px extension)
+                shift_out = 18 // 2  # Shift outside by half border thickness (9 pixels)
                 frame_geom = win.geometry()
-                frame_geom.setY(frame_geom.y() - extra_top)
-                frame_geom.setHeight(frame_geom.height() + extra_top)
+                frame_geom.setX(frame_geom.x() - shift_out)
+                frame_geom.setY(frame_geom.y() - extra_top - shift_out)
+                frame_geom.setHeight(frame_geom.height() + extra_top + 2 * shift_out)
+                frame_geom.setWidth(frame_geom.width() + extra_right + 2 * shift_out)
                 frame.setGeometry(frame_geom)
                 
                 # Show MainWindow first (underneath)
