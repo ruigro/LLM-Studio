@@ -5,9 +5,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import Qt, QPoint, QPointF, QRect, QSize, QEvent
-from PySide6.QtGui import QPainter, QPixmap, QPen, QColor, QLinearGradient, QBrush
-from PySide6.QtWidgets import QWidget, QVBoxLayout, QApplication
+from PySide6.QtCore import Qt, QPoint, QRect, QSize, QEvent
+from PySide6.QtGui import QPainter, QPixmap, QPen, QColor
+from PySide6.QtWidgets import QWidget, QVBoxLayout
 
 
 @dataclass
@@ -36,8 +36,8 @@ class HybridFrameWindow(QWidget):
         resize_margin: int = 10,
         safe_padding: int = 8,
         min_size: QSize = QSize(520, 360),
-        frame_color: QColor = QColor(120, 80, 160, 200),
-        frame_accent: QColor = QColor(100, 180, 255, 220),
+        frame_color: QColor = QColor(200, 240, 255, 220),
+        frame_accent: QColor = QColor(120, 220, 255, 200),
     ) -> None:
         super().__init__()
 
@@ -193,72 +193,33 @@ class HybridFrameWindow(QWidget):
 
         outer = QRect(0, 0, w, h)
         inner = QRect(t, t, w - 2 * t, h - 2 * t)
-        
-        # STEP 1: Draw solid dark background FIRST (fixes transparency issue)
-        bg_color = QColor(14, 17, 23, 245)  # Dark background with high opacity
-        p.fillRect(outer, bg_color)
-        
-        # STEP 2: Draw futuristic border gradient overlay
-        border_gradient = QLinearGradient(0, 0, w, 0)
-        border_gradient.setColorAt(0, QColor(80, 60, 120, 100))
-        border_gradient.setColorAt(0.5, QColor(60, 40, 100, 100))
-        border_gradient.setColorAt(1, QColor(80, 60, 120, 100))
-        
-        # Draw border region (outer frame area)
-        p.setBrush(QBrush(border_gradient))
-        p.setPen(Qt.NoPen)
-        border_path_outer = outer.adjusted(0, 0, 0, 0)
-        border_path_inner = inner.adjusted(0, 0, 0, 0)
-        # Draw just the border frame (not filling the entire window)
-        for edge_thickness in range(t):
-            edge_rect = outer.adjusted(edge_thickness, edge_thickness, -edge_thickness, -edge_thickness)
-            p.setOpacity(0.3 * (1 - edge_thickness / t))
-            p.drawRoundedRect(edge_rect, 14, 14)
-        p.setOpacity(1.0)
 
-        # STEP 3: Base outline with glow effect
-        p.setPen(QPen(self.frame_color, 2))
-        p.drawRoundedRect(outer.adjusted(1, 1, -2, -2), 14, 14)
-        
-        # Add subtle glow
+        # Base outline
         p.setPen(QPen(self.frame_color, 1))
-        p.setOpacity(0.5)
-        p.drawRoundedRect(outer.adjusted(0, 0, -1, -1), 14, 14)
-        p.drawRoundedRect(outer.adjusted(2, 2, -3, -3), 14, 14)
-        p.setOpacity(1.0)
+        p.drawRoundedRect(outer.adjusted(1, 1, -2, -2), 14, 14)
 
-        # STEP 4: Inner outline (accent) with enhanced visibility
-        p.setPen(QPen(self.frame_accent, 2))
+        # Inner outline (accent)
+        p.setPen(QPen(self.frame_accent, 1))
         p.drawRoundedRect(inner, 10, 10)
 
-        # STEP 5: Futuristic brackets and ticks with thicker strokes
-        p.setPen(QPen(self.frame_accent, 2))
-        self._draw_corner_brackets(p, outer, length=40, inset=12)
-        self._draw_edge_ticks(p, outer, tick_len=24, inset=8)
+        # Futuristic brackets and ticks
+        p.setPen(QPen(self.frame_accent, 1))
+        self._draw_corner_brackets(p, outer, length=36, inset=14)
+        self._draw_edge_ticks(p, outer, tick_len=18, inset=10)
 
-        # STEP 6: Corner images with proper blending
+        # Corner images
         self._draw_corner_pix(p, self.corner_tl, QRect(0, 0, cs, cs))
         self._draw_corner_pix(p, self.corner_tr, QRect(w - cs, 0, cs, cs))
         self._draw_corner_pix(p, self.corner_bl, QRect(0, h - cs, cs, cs))
         self._draw_corner_pix(p, self.corner_br, QRect(w - cs, h - cs, cs, cs))
 
-        # STEP 7: Top-center badge image with glow
+        # Top-center badge image
         if self.top_center and not self.top_center.isNull():
-            badge_h = 300  # Fixed 300px height as requested
-            aspect_ratio = self.top_center.width() / self.top_center.height()
-            badge_w = int(badge_h * aspect_ratio)
+            badge_h = int(cs * 0.65)
+            badge_w = int(cs * 1.6)
             x = (w - badge_w) // 2
             y = max(0, t // 2)
             target = QRect(x, y, badge_w, badge_h)
-            
-            # Draw glow behind badge
-            p.setPen(QPen(self.frame_accent, 3))
-            p.setOpacity(0.4)
-            glow_rect = target.adjusted(-3, -3, 3, 3)
-            p.drawRoundedRect(glow_rect, 6, 6)
-            p.setOpacity(1.0)
-            
-            # Draw badge
             self._draw_scaled(p, self.top_center, target)
 
     def _draw_corner_brackets(self, p: QPainter, r: QRect, *, length: int, inset: int) -> None:
@@ -293,12 +254,7 @@ class HybridFrameWindow(QWidget):
     def _draw_corner_pix(self, p: QPainter, pix: Optional[QPixmap], target: QRect) -> None:
         if pix is None or pix.isNull():
             return
-        # Set composition mode for better visibility over background
-        p.setCompositionMode(QPainter.CompositionMode_SourceOver)
-        p.setOpacity(0.9)  # Slightly transparent for futuristic effect
         self._draw_scaled(p, pix, target)
-        p.setOpacity(1.0)  # Reset opacity
-        p.setCompositionMode(QPainter.CompositionMode_SourceOver)  # Reset to default
 
     def _draw_scaled(self, p: QPainter, pix: QPixmap, target: QRect) -> None:
         scaled = pix.scaled(target.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
@@ -310,7 +266,6 @@ class HybridFrameWindow(QWidget):
     # Drag + Resize
     # ----------------------------
     def mousePressEvent(self, event) -> None:
-        print(f"[DRAG] mousePressEvent started")
         if event.button() != Qt.LeftButton:
             return
 
@@ -318,34 +273,27 @@ class HybridFrameWindow(QWidget):
         if d != 0:
             self._resizing = True
             self._resize_dir = d
-            self._press_global = event.globalPos()
+            self._press_global = event.globalPosition().toPoint()
             self._press_geom = self.geometry()
             event.accept()
             return
 
         # Drag only if not clicking inside content (so widgets still work)
         if self._is_in_content(event.pos()):
-            print(f"[DRAG] Click inside content, not dragging")
             return
 
-        print(f"[DRAG] Starting drag, globalPos={event.globalPos()}, pos={self.pos()}")
         self._dragging = True
-        self._drag_offset = event.globalPos() - self.pos()
-        print(f"[DRAG] Drag offset calculated: {self._drag_offset}")
+        self._drag_offset = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
         event.accept()
 
     def mouseMoveEvent(self, event) -> None:
         if self._resizing:
-            self._apply_resize(event.globalPos())
+            self._apply_resize(event.globalPosition().toPoint())
             event.accept()
             return
 
         if self._dragging:
-            print(f"[DRAG] Moving: globalPos={event.globalPos()}, offset={self._drag_offset}")
-            new_pos = event.globalPos() - self._drag_offset
-            print(f"[DRAG] New position will be: {new_pos}")
-            self.move(new_pos)
-            print(f"[DRAG] Move completed")
+            self.move(event.globalPosition().toPoint() - self._drag_offset)
             event.accept()
             return
 
