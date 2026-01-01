@@ -857,8 +857,9 @@ class MainWindow(QMainWindow):
         header_widget.installEventFilter(self)
         
         header_layout = QHBoxLayout(header_widget)
-        header_layout.setContentsMargins(20, 10, 20, 10)
-        header_layout.setSpacing(15)
+        # Increased right margin to 50px to account for frame extension (75px) + padding
+        header_layout.setContentsMargins(20, 10, 50, 10)
+        header_layout.setSpacing(6)
         
         # Left: Theme controls container
         theme_container = QWidget()
@@ -1065,6 +1066,30 @@ class MainWindow(QMainWindow):
         self.header_ram_label = ram_label
         
         header_layout.addWidget(sys_info_widget)
+        
+        # Fullscreen button (⛶) in top right
+        fullscreen_btn = QPushButton("⛶")
+        fullscreen_btn.setFixedSize(30, 30)
+        fullscreen_btn.setStyleSheet("""
+            QPushButton {
+                background: transparent;
+                color: #ffffff;
+                border: none;
+                font-size: 20pt;
+                font-weight: bold;
+                padding: 0px;
+            }
+            QPushButton:hover {
+                background: rgba(255, 255, 255, 0.2);
+                border-radius: 4px;
+            }
+            QPushButton:pressed {
+                background: rgba(255, 255, 255, 0.3);
+            }
+        """)
+        fullscreen_btn.clicked.connect(self._toggle_fullscreen)
+        header_layout.addWidget(fullscreen_btn)
+        self.fullscreen_btn = fullscreen_btn
         
         # Close button (X) in top right
         close_btn = QPushButton("❌")
@@ -1862,6 +1887,13 @@ class MainWindow(QMainWindow):
         except Exception as e:
             print(f"Unexpected error in _header_mouse_move: {e}")
             self.drag_position = None
+    
+    def _toggle_fullscreen(self) -> None:
+        """Toggle window between fullscreen and normal mode"""
+        if self.isFullScreen():
+            self.showNormal()
+        else:
+            self.showFullScreen()
     
     def _switch_tab(self, tab_widget: QTabWidget, index: int):
         """Switch to a tab and update button states"""
@@ -5527,7 +5559,7 @@ def main() -> int:
                 # Also shift outside by half border thickness
                 badge_h = int(90 * 0.65)  # Height of center image
                 extra_top = badge_h // 2
-                extra_right = 60  # Extend right for corner_tr (120px wide, centered at edge = 60px extension)
+                extra_right = 75  # Extend right for corner_tr (150px wide, centered at edge = 75px extension)
                 shift_out = 18 // 2  # Shift outside by half border thickness (9 pixels)
                 frame_geom = win.geometry()
                 frame_geom.setX(frame_geom.x() - shift_out)

@@ -205,7 +205,7 @@ class HybridFrameWindow(QWidget):
         # Calculate offset for top image (widget is extended above)
         badge_h = int(90 * 0.65) if self.top_center and not self.top_center.isNull() else 0
         extra_top = badge_h // 2  # Half the image extends above
-        extra_right = 60  # Extended width for corner_tr (120px wide, centered at edge = 60px extension)
+        extra_right = 75  # Extended width for corner_tr (150px wide, centered at edge = 75px extension)
         shift_out = t // 2  # Shift frame outside by half the border thickness
 
         # Parent window position within frame window coordinate system
@@ -215,44 +215,38 @@ class HybridFrameWindow(QWidget):
         parent_h = h - extra_top - 2 * shift_out  # Parent window height (frame height minus extensions)
 
         # Frame rectangles: outer extends beyond parent by shift_out on each side
-        # The outer frame should only surround the parent window, not extend into extra_right area
         # Top extends up, right extends right, bottom extends down, left extends left
         outer = QRect(
             parent_x - shift_out,  # Left extends left (0)
             parent_y - shift_out,  # Top extends up (extra_top)
-            parent_w + 2 * shift_out,  # Width includes both left and right extensions
+            parent_w + 2 * shift_out + t//2,  # Width includes both left and right extensions
             parent_h + 2 * shift_out   # Height includes both top and bottom extensions
         )
-        # Verify outer right edge: parent_x - shift_out + (parent_w + 2*shift_out) = parent_x + parent_w + shift_out = w - extra_right
-        # Verify outer bottom edge: parent_y - shift_out + (parent_h + 2*shift_out) = parent_y + parent_h + shift_out = h - shift_out + shift_out = h
+        # Outer right edge: parent_x - shift_out + (parent_w + 2*shift_out) = parent_x + parent_w + shift_out = w - extra_right
+        # Outer bottom edge: parent_y - shift_out + (parent_h + 2*shift_out) = parent_y + parent_h + shift_out = h
         inner = QRect(
             parent_x - shift_out + t,  # Inner left edge
             parent_y - shift_out + t,  # Inner top edge
-            parent_w + 2 * shift_out - 2 * t,  # Inner width
+            parent_w + 2 * shift_out - 2 * t + t//2,  # Inner width
             parent_h + 2 * shift_out - 2 * t   # Inner height
         )
 
         # Fill only the border areas with solid background (frame borders only, not center)
-        # Each border extends outward from parent window edge by shift_out pixels
-        # Border thickness is t (18px), extension is shift_out (9px)
-        # The border's outer edge is shift_out pixels beyond parent, inner edge is t pixels inward
+        # The frame extends shift_out (9px) beyond the parent window on each side
+        # The border thickness is t (18px), but the visible border area is only shift_out (9px) beyond parent
         
-        # Top border - outer edge at (parent_y - shift_out), extends upward by t
+        # Top border - extends upward from parent top edge by shift_out (9px), thickness t (18px)
         p.fillRect(parent_x - shift_out, parent_y - shift_out, parent_w + 2 * shift_out, t, self.frame_bg_color)
         
-        # Bottom border - outer edge at (parent_y + parent_h), extends downward by shift_out (to frame bottom)
-        # Frame bottom is at h, parent bottom is at (parent_y + parent_h) = h - shift_out
-        # So border should extend from h - shift_out to h, which is shift_out pixels
-        p.fillRect(parent_x - shift_out, parent_y + parent_h, parent_w + 2 * shift_out, shift_out, self.frame_bg_color)
+        # Bottom border - extends downward from parent bottom edge by t (18px), same as top
+        p.fillRect(parent_x - shift_out, parent_y + parent_h -t//2, parent_w + 2 * shift_out, t, self.frame_bg_color)
         
-        # Left border - outer edge at (parent_x - shift_out), extends leftward by t
+        # Left border - extends leftward from parent left edge by t (18px)
         p.fillRect(parent_x - shift_out, parent_y - shift_out, t, parent_h + 2 * shift_out, self.frame_bg_color)
         
-        # Right border - outer edge at (parent_x + parent_w), extends rightward by shift_out (to frame visual right)
-        # Frame visual right is at (w - extra_right), parent right is at (parent_x + parent_w) = w - extra_right - shift_out
-        # So border should extend from w - extra_right - shift_out to w - extra_right, which is shift_out pixels
-        right_border_x = parent_x + parent_w  # = w - extra_right - shift_out
-        p.fillRect(right_border_x, parent_y - shift_out, shift_out, parent_h + 2 * shift_out, self.frame_bg_color)
+        # Right border - extends rightward from parent right edge by t (18px), same as left
+        right_border_x = parent_x + parent_w # = w - extra_right - shift_out
+        p.fillRect(right_border_x, parent_y - shift_out, t, parent_h + 2 * shift_out, self.frame_bg_color)
 
         # Base outline
         p.setPen(QPen(self.frame_color, 1))
@@ -267,36 +261,52 @@ class HybridFrameWindow(QWidget):
         self._draw_corner_brackets(p, outer, length=36, inset=14)
         self._draw_edge_ticks(p, outer, tick_len=18, inset=10)
 
-        # Corner images positioned at parent window corners, extending outward
-        # Corner TL - at top-left, extends up and left
-        self._draw_corner_pix(p, self.corner_tl, QRect(parent_x - shift_out, parent_y - shift_out, cs, cs))
+        # Corner images - all 150 pixels width, positioned within frame boundaries
+        corner_width = 150
         
-        # Corner TR: 120 pixels width (height calculated from image aspect ratio)
-        # Positioned so center of image is at the right edge of the main window
-        corner_tr_width = 120
-        if self.corner_tr and not self.corner_tr.isNull():
-            # Calculate height to maintain aspect ratio
-            aspect_ratio = self.corner_tr.height() / self.corner_tr.width() if self.corner_tr.width() > 0 else 1.0
-            corner_tr_height = int(corner_tr_width * aspect_ratio)
-        else:
-            corner_tr_height = corner_tr_width
-        # Center the image at the parent window's right edge, extends right
-        corner_tr_x = parent_x + parent_w - corner_tr_width // 2
-        self._draw_corner_pix(p, self.corner_tr, QRect(corner_tr_x, parent_y - shift_out, corner_tr_width, corner_tr_height))
+        # Helper function to calculate corner height from aspect ratio
+        def get_corner_height(pixmap):
+            if pixmap and not pixmap.isNull():
+                aspect_ratio = pixmap.height() / pixmap.width() if pixmap.width() > 0 else 1.0
+                return int(corner_width * aspect_ratio)
+            return corner_width
         
-        # Corner BL - at bottom-left, extends down and left
-        self._draw_corner_pix(p, self.corner_bl, QRect(parent_x - shift_out, parent_y + parent_h - cs + shift_out, cs, cs))
+        # Corner TL - at top-left corner of outer frame, contained within frame
+        corner_tl_height = get_corner_height(self.corner_tl)
+        self._draw_corner_pix(p, self.corner_tl, QRect(
+            outer.left(),  # Frame left edge
+            outer.top(),   # Frame top edge
+            corner_width,
+            corner_tl_height
+        ))
         
-        # Corner BR: 96 pixels width (height calculated from image aspect ratio)
-        corner_br_width = 96
-        if self.corner_br and not self.corner_br.isNull():
-            # Calculate height to maintain aspect ratio
-            aspect_ratio = self.corner_br.height() / self.corner_br.width() if self.corner_br.width() > 0 else 1.0
-            corner_br_height = int(corner_br_width * aspect_ratio)
-        else:
-            corner_br_height = corner_br_width
-        # At bottom-right, extends down and right
-        self._draw_corner_pix(p, self.corner_br, QRect(parent_x + parent_w - corner_br_width + shift_out, parent_y + parent_h - corner_br_height + shift_out, corner_br_width, corner_br_height))
+        # Corner TR - at top-right corner of outer frame, contained within frame
+        corner_tr_height = get_corner_height(self.corner_tr)
+        corner_tr_rect = QRect(
+            outer.right() - corner_width + 1,  # Frame right edge minus width
+            outer.top(),   # Frame top edge
+            corner_width,
+            corner_tr_height
+        )
+        self._draw_corner_pix(p, self.corner_tr, corner_tr_rect)
+        
+        # Corner BL - at bottom-left corner of outer frame, contained within frame
+        corner_bl_height = get_corner_height(self.corner_bl)
+        self._draw_corner_pix(p, self.corner_bl, QRect(
+            outer.left(),  # Frame left edge
+            outer.bottom() - corner_bl_height + 1,  # Frame bottom edge minus height
+            corner_width,
+            corner_bl_height
+        ))
+        
+        # Corner BR - at bottom-right corner of outer frame, contained within frame
+        corner_br_height = get_corner_height(self.corner_br)
+        self._draw_corner_pix(p, self.corner_br, QRect(
+            outer.right() - corner_width + 1,  # Frame right edge minus width
+            outer.bottom() - corner_br_height + 1,  # Frame bottom edge minus height
+            corner_width,
+            corner_br_height
+        ))
 
         # Top-center badge image - now has space to extend above frame
         if self.top_center and not self.top_center.isNull():
