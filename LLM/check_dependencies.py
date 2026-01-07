@@ -95,7 +95,7 @@ def verify_all():
     checks = [
         ("numpy", "<2.0.0"),
         ("transformers", ">=4.51.3,!=4.52.*,!=4.53.*,!=4.54.*,!=4.55.*,!=4.57.0,<4.58"),
-        ("tokenizers", ">=0.22.0,<=0.23.0"),
+        ("tokenizers", ">=0.21,<0.22"),  # Updated to match transformers 4.51.3 requirement
         ("datasets", ">=2.11.0,<4.4.0"),
     ]
     
@@ -121,4 +121,3 @@ def verify_all():
 
 if __name__ == "__main__":
     sys.exit(verify_all())
-

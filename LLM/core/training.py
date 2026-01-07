@@ -29,8 +29,14 @@ class TrainingConfig:
 
 
 def build_finetune_cmd(cfg: TrainingConfig) -> List[str]:
+    # Use python.exe instead of pythonw.exe for training to get real-time output
+    # pythonw.exe buffers output even with -u flag when there's no TTY
+    python_exe = sys.executable
+    if python_exe.endswith("pythonw.exe"):
+        python_exe = python_exe.replace("pythonw.exe", "python.exe")
+    
     cmd = [
-        sys.executable, "-u", "finetune.py",
+        python_exe, "-u", "finetune.py",
         "--model-name", cfg.base_model,  # finetune.py uses --model-name, not --base-model
         "--data-path", str(cfg.data_path),
         "--output-dir", str(cfg.output_dir),
@@ -47,8 +53,9 @@ def build_finetune_cmd(cfg: TrainingConfig) -> List[str]:
 
 
 def default_output_dir() -> Path:
+    """Return base fine_tuned directory - no timestamped subdirectories"""
     root = get_app_root()
-    out = root / "fine_tuned_adapter" / datetime.now().strftime("Run_%Y%m%d_%H%M%S")
+    out = root / "fine_tuned"
     out.mkdir(parents=True, exist_ok=True)
     return out
 

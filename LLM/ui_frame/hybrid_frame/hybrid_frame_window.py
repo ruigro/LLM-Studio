@@ -15,7 +15,7 @@ class FrameAssets:
     corner_tl: Optional[str] = None
     corner_tr: Optional[str] = None
     corner_bl: Optional[str] = None
-    corner_br: Optional[str] = None
+    corner_br: Optional[str] = None  # Background layer (corner_br.webp) - drawn under owl images
     top_center: Optional[str] = None
 
 
@@ -71,7 +71,9 @@ class HybridFrameWindow(QWidget):
         self.corner_tl = self._load_pixmap(self._assets.corner_tl)
         self.corner_tr = self._load_pixmap(self._assets.corner_tr)
         self.corner_bl = self._load_pixmap(self._assets.corner_bl)
-        self.corner_br = self._load_pixmap(self._assets.corner_br)
+        # Store original corner_br as background, owl images will be set via set_corner_br()
+        self.corner_br_bg = self._load_pixmap(self._assets.corner_br)  # Background layer (original corner_br.webp)
+        self.corner_br = None  # Owl image (set dynamically via set_corner_br())
         self.top_center = self._load_pixmap(self._assets.top_center)
 
         # --- resize state ---
@@ -108,7 +110,11 @@ class HybridFrameWindow(QWidget):
         self.corner_tl = self._load_pixmap(self._assets.corner_tl)
         self.corner_tr = self._load_pixmap(self._assets.corner_tr)
         self.corner_bl = self._load_pixmap(self._assets.corner_bl)
-        self.corner_br = self._load_pixmap(self._assets.corner_br)
+        # Store original corner_br as background
+        self.corner_br_bg = self._load_pixmap(self._assets.corner_br)
+        # Keep existing owl image if already set, otherwise None
+        if not hasattr(self, 'corner_br') or self.corner_br is None:
+            self.corner_br = None
         self.top_center = self._load_pixmap(self._assets.top_center)
         self.update()
     
@@ -271,6 +277,28 @@ class HybridFrameWindow(QWidget):
                 return int(corner_width * aspect_ratio)
             return corner_width
         
+        # Corner BR background (corner_br.webp) - draw AFTER frame elements
+        # This appears above the main window but below the owl image
+        if self.corner_br_bg and not self.corner_br_bg.isNull():
+            corner_br_bg_height = get_corner_height(self.corner_br_bg)
+            self._draw_corner_pix(p, self.corner_br_bg, QRect(
+                outer.right() - corner_width + 1,  # Frame right edge minus width
+                outer.bottom() - corner_br_bg_height + 1,  # Frame bottom edge minus height
+                corner_width,
+                corner_br_bg_height
+            ))
+        
+        # Corner BR owl image - draw AFTER background, so it appears on top
+        if self.corner_br and not self.corner_br.isNull():
+            corner_br_height = get_corner_height(self.corner_br)
+            self._draw_corner_pix(p, self.corner_br, QRect(
+                outer.right() - corner_width + 1,  # Frame right edge minus width
+                outer.bottom() - corner_br_height + 1,  # Frame bottom edge minus height
+                corner_width,
+                corner_br_height
+            ))
+        
+        # Other corner images (TL, TR, BL) - draw LAST so they appear on top
         # Corner TL - at top-left corner of outer frame, contained within frame
         corner_tl_height = get_corner_height(self.corner_tl)
         self._draw_corner_pix(p, self.corner_tl, QRect(
@@ -297,15 +325,6 @@ class HybridFrameWindow(QWidget):
             outer.bottom() - corner_bl_height + 1,  # Frame bottom edge minus height
             corner_width,
             corner_bl_height
-        ))
-        
-        # Corner BR - at bottom-right corner of outer frame, contained within frame
-        corner_br_height = get_corner_height(self.corner_br)
-        self._draw_corner_pix(p, self.corner_br, QRect(
-            outer.right() - corner_width + 1,  # Frame right edge minus width
-            outer.bottom() - corner_br_height + 1,  # Frame bottom edge minus height
-            corner_width,
-            corner_br_height
         ))
 
         # Top-center badge image - now has space to extend above frame

@@ -106,6 +106,7 @@ class ChatWidget(QWidget):
         super().__init__(parent)
         self.is_dark = True
         self.bubbles = []
+        self.user_message_containers = []  # Store user message containers for height sync
         
         main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(0, 0, 0, 0)
@@ -139,6 +140,8 @@ class ChatWidget(QWidget):
             # User messages on the right
             container_layout.addStretch(1)
             container_layout.addWidget(bubble)
+            # Store user message container for height synchronization
+            self.user_message_containers.append(container)
         else:
             # AI messages on the left
             container_layout.addWidget(bubble)
@@ -148,8 +151,24 @@ class ChatWidget(QWidget):
         self.messages_layout.insertWidget(self.messages_layout.count() - 1, container)
         self.bubbles.append(bubble)
         
-        # Scroll to bottom
-        self.scroll.verticalScrollBar().setValue(self.scroll.verticalScrollBar().maximum())
+        # Scroll to bottom (only if scroll area exists)
+        if hasattr(self, 'scroll') and self.scroll:
+            self.scroll.verticalScrollBar().setValue(self.scroll.verticalScrollBar().maximum())
+        
+        return container if is_user else None
+    
+    def get_last_user_container(self):
+        """Get the last user message container for height synchronization"""
+        if self.user_message_containers:
+            return self.user_message_containers[-1]
+        return None
+    
+    def sync_user_message_height(self, target_height: int):
+        """Set the height of the last user message container to match target"""
+        last_container = self.get_last_user_container()
+        if last_container:
+            last_container.setMinimumHeight(target_height)
+            last_container.setMaximumHeight(target_height)
     
     def clear(self):
         """Clear all messages"""
@@ -158,6 +177,7 @@ class ChatWidget(QWidget):
             if item.widget():
                 item.widget().deleteLater()
         self.bubbles.clear()
+        self.user_message_containers.clear()
     
     def set_theme(self, dark_mode: bool):
         """Update theme for all bubbles"""
@@ -171,7 +191,8 @@ class ChatWidget(QWidget):
         for bubble in reversed(self.bubbles):
             if not bubble.is_user:
                 bubble.update_text(new_text)
-                # Auto-scroll to bottom to show new content
-                self.scroll.verticalScrollBar().setValue(self.scroll.verticalScrollBar().maximum())
+                # Auto-scroll to bottom to show new content (only if scroll area exists)
+                if hasattr(self, 'scroll') and self.scroll:
+                    self.scroll.verticalScrollBar().setValue(self.scroll.verticalScrollBar().maximum())
                 return
 

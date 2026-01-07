@@ -52,33 +52,28 @@ class ModelIntegrityChecker:
         if models_dir is None:
             models_dir = Path(__file__).parent / "models"
         self.models_dir = Path(models_dir)
-        
-        # Also check hf_models directory
-        self.hf_models_dir = Path(__file__).parent / "hf_models"
     
     def check_all_models(self) -> List[ModelStatus]:
-        """Check all models in the models directories
+        """Check all models in the models directory
         
         Returns:
             List of ModelStatus objects for each model
         """
         statuses = []
         
-        # Check both directories
-        for base_dir in [self.models_dir, self.hf_models_dir]:
-            if not base_dir.exists():
+        if not self.models_dir.exists():
+            return statuses
+        
+        for model_dir in self.models_dir.iterdir():
+            if not model_dir.is_dir():
                 continue
             
-            for model_dir in base_dir.iterdir():
-                if not model_dir.is_dir():
-                    continue
-                
-                # Skip hidden directories and cache directories
-                if model_dir.name.startswith('.') or model_dir.name == '__pycache__':
-                    continue
-                
-                status = self.check_model(model_dir)
-                statuses.append(status)
+            # Skip hidden directories and cache directories
+            if model_dir.name.startswith('.') or model_dir.name == '__pycache__':
+                continue
+            
+            status = self.check_model(model_dir)
+            statuses.append(status)
         
         return statuses
     
@@ -235,7 +230,7 @@ class ModelIntegrityChecker:
         instructions = []
         instructions.append(f"Model: {status.model_name}")
         instructions.append(f"Location: {status.model_path}")
-        instructions.append(f"Status: {'✓ Complete' if status.is_complete else '✗ Incomplete'}")
+        instructions.append(f"Status: {'? Complete' if status.is_complete else '? Incomplete'}")
         
         if not status.is_complete:
             instructions.append(f"\nMissing files:")
@@ -286,7 +281,7 @@ class ModelIntegrityChecker:
         lines.append("")
         
         if complete_models:
-            lines.append("## ✓ Complete Models")
+            lines.append("## ? Complete Models")
             lines.append("")
             for model in sorted(complete_models, key=lambda m: m.model_name):
                 size_str = f"{model.estimated_size_mb:.1f} MB" if model.estimated_size_mb else "Unknown size"
@@ -295,11 +290,11 @@ class ModelIntegrityChecker:
                     lines.append(f"- **Model ID:** `{model.model_id}`")
                 lines.append(f"- **Location:** `{model.model_path.relative_to(self.models_dir.parent)}`")
                 lines.append(f"- **Size:** {size_str}")
-                lines.append(f"- **Status:** ✓ Ready to use")
+                lines.append(f"- **Status:** ? Ready to use")
                 lines.append("")
         
         if incomplete_models:
-            lines.append("## ✗ Incomplete Models (Need Download)")
+            lines.append("## ? Incomplete Models (Need Download)")
             lines.append("")
             lines.append("These models have directory structures but are missing the actual model weights.")
             lines.append("They need to be downloaded before use.")
@@ -403,16 +398,16 @@ def main():
     if args.generate_readme:
         print("Generating model README...")
         content = checker.create_models_readme()
-        print(f"\n✓ README generated successfully")
+        print(f"\n? README generated successfully")
         return
     
     # Check models
-    print("🔍 Checking model installations...\n")
+    print("?? Checking model installations...\n")
     
     if args.check_incomplete:
         models = checker.get_incomplete_models()
         if not models:
-            print("✓ All models are complete!")
+            print("? All models are complete!")
             return
         print(f"Found {len(models)} incomplete models:\n")
     else:
@@ -421,7 +416,7 @@ def main():
     
     # Display results
     for status in sorted(models, key=lambda m: (not m.is_complete, m.model_name)):
-        icon = "✓" if status.is_complete else "✗"
+        icon = "?" if status.is_complete else "?"
         size_str = f" ({status.estimated_size_mb:.1f} MB)" if status.estimated_size_mb else ""
         print(f"{icon} {status.model_name}{size_str}")
         
@@ -439,7 +434,7 @@ def main():
     print(f"Summary: {complete} complete, {incomplete} incomplete")
     
     if incomplete > 0:
-        print(f"\n💡 Tip: Run with --generate-readme to create download instructions")
+        print(f"\n?? Tip: Run with --generate-readme to create download instructions")
         print(f"   Or use the GUI Models tab to download missing models")
 
 

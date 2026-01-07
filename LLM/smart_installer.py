@@ -70,7 +70,29 @@ class SmartInstaller:
     
     def log(self, message: str):
         """Log installation message"""
-        print(f"[INSTALL] {message}")
+        msg = f"[INSTALL] {message}"
+        try:
+            print(msg)
+        except (UnicodeEncodeError, UnicodeError):
+            # Windows consoles can be cp1252; strip/replace common unicode symbols
+            safe = (
+                msg.replace("✓", "[OK]")
+                .replace("✗", "[FAIL]")
+                .replace("⚠", "[WARN]")
+                .replace("ℹ", "[INFO]")
+                .replace("→", "->")
+            )
+            try:
+                # Last-resort: ensure printable bytes
+                enc = getattr(sys.stdout, "encoding", None) or "utf-8"
+                safe = safe.encode(enc, errors="replace").decode(enc, errors="replace")
+            except Exception:
+                pass
+            try:
+                print(safe)
+            except Exception:
+                # Give up on console printing, but still keep internal log
+                pass
         self.installation_log.append(message)
     
     def _detect_hardware_platform(self, python_executable: Optional[str] = None) -> Dict:
@@ -2014,27 +2036,58 @@ print(device_name)
         self.log("Installing application dependencies...")
         
         try:
-            # First install core dependencies from requirements.txt (excluding problematic ones)
-            requirements_file = Path(__file__).parent / "requirements.txt"
-            
-            if requirements_file.exists():
-                self.log("Installing base requirements...")
-                cmd = [
-                    python_executable, "-m", "pip", "install",
-                    "-r", str(requirements_file)
-                ]
+            # PROFILE IS THE ONLY SOURCE OF TRUTH - NO requirements.txt
+            # Load packages from hardware profile
+            self.log("Loading package versions from hardware profile...")
+            try:
+                from core.system_detector import SystemDetector
+                from core.profile_selector import ProfileSelector
                 
-                self.log(f"Running: {' '.join(cmd)}")
-                result = subprocess.run(
-                    cmd,
-                    capture_output=True,
-                    text=True,
-                    timeout=1800,  # 30 minutes timeout
-                    **self.subprocess_flags
-                )
+                detector = SystemDetector()
+                hw_profile = detector.get_hardware_profile()
                 
-                if result.returncode != 0:
-                    self.log(f"Warning: Some packages failed: {result.stderr[:500]}")
+                compat_matrix_path = Path(__file__).parent / "metadata" / "compatibility_matrix.json"
+                if not compat_matrix_path.exists():
+                    raise FileNotFoundError(f"compatibility_matrix.json not found at {compat_matrix_path}")
+                
+                selector = ProfileSelector(compat_matrix_path)
+                profile_name, package_versions, warnings = selector.select_profile(hw_profile)
+                
+                self.log(f"Selected profile: {profile_name}")
+                for warning in warnings:
+                    self.log(f"  ⚠ {warning}")
+                
+                # Install packages from profile
+                self.log("Installing packages from profile...")
+                packages_to_install = []
+                for pkg_name, pkg_version in package_versions.items():
+                    packages_to_install.append(f"{pkg_name}=={pkg_version}")
+                
+                if packages_to_install:
+                    cmd = [
+                        python_executable, "-m", "pip", "install"
+                    ] + packages_to_install
+                    
+                    self.log(f"Running: {' '.join(cmd[:5])}... ({len(packages_to_install)} packages)")
+                    result = subprocess.run(
+                        cmd,
+                        capture_output=True,
+                        text=True,
+                        timeout=1800,  # 30 minutes timeout
+                    )
+                    
+                    if result.returncode != 0:
+                        self.log(f"ERROR: Package installation failed")
+                        self.log(result.stderr)
+                        raise RuntimeError(f"Failed to install packages from profile")
+                    
+                    self.log("✓ Packages installed from profile")
+                else:
+                    raise RuntimeError("No packages found in profile")
+                    
+            except Exception as e:
+                self.log(f"ERROR: Failed to load/install from profile: {e}")
+                raise RuntimeError(f"Profile-based installation failed. Profiles are the ONLY source of truth. Error: {e}")
             
             # Install unsloth separately with careful version control.
             # IMPORTANT: use --no-deps so pip cannot swap torch/triton versions underneath us.
@@ -2537,112 +2590,108 @@ if errorlevel 1 (
                     "status_text": "✗ Not Installed"
                 })
         
-        # Read requirements.txt for other packages
-        requirements_file = Path(__file__).parent / "requirements.txt"
-        if requirements_file.exists():
-            with open(requirements_file, 'r', encoding='utf-8') as f:
-                for line in f:
-                    line = line.strip()
-                    if not line or line.startswith('#'):
-                        continue
-                    
-                    # Sanitize: remove inline comments
-                    line = self._sanitize_requirement(line)
-                    if not line:
-                        continue
-                    
-                    # Parse package name and version
-                    parts = line.split(';')
-                    pkg_line = parts[0].strip()
-                    
-                    # Extract package name
-                    import re
-                    match = re.match(r'^([a-zA-Z0-9_-]+(?:\[[^\]]+\])?)(.*)$', pkg_line)
-                    if match:
-                        pkg_name = match.group(1).split('[')[0]
-                        version_spec = match.group(2).strip() if match.group(2) else "any"
-                        # Sanitize version_spec to remove any remaining comments
-                        version_spec = self._sanitize_requirement(version_spec) if version_spec != "any" else "any"
+        # PROFILE IS THE ONLY SOURCE OF TRUTH - Load packages from profile
+        try:
+            from core.system_detector import SystemDetector
+            from core.profile_selector import ProfileSelector
+            
+            detector = SystemDetector()
+            hw_profile = detector.get_hardware_profile()
+            
+            compat_matrix_path = Path(__file__).parent / "metadata" / "compatibility_matrix.json"
+            if not compat_matrix_path.exists():
+                raise FileNotFoundError(f"compatibility_matrix.json not found at {compat_matrix_path}")
+            
+            selector = ProfileSelector(compat_matrix_path)
+            profile_name, package_versions, warnings = selector.select_profile(hw_profile)
+            
+            # Add packages from profile
+            for pkg_name, pkg_version in package_versions.items():
+                version_spec = f"=={pkg_version}"  # Exact version from profile
+                
+                # Skip PyTorch and PySide6 packages (already added)
+                if pkg_name.lower() in ['torch', 'torchvision', 'torchaudio', 'triton', 'pyside6']:
+                    continue
+                if 'pyside6' in pkg_name.lower() or 'shiboken6' in pkg_name.lower():
+                    continue
+                
+                # Check if installed using correct Python
+                # Use import test for transformers, datasets, huggingface_hub (GUI status rule)
+                if pkg_name.lower() in ["transformers", "datasets", "huggingface-hub", "huggingface_hub"]:
+                    # Use import verification (no metadata inspection)
+                    installed_ver = None
+                    if self._verify_import(check_python, pkg_name):
+                        # Get version via import
+                        try:
+                            result = subprocess.run(
+                                [check_python, "-c", f"import {pkg_name.replace('-', '_')}; print({pkg_name.replace('-', '_')}.__version__)"],
+                                capture_output=True,
+                                text=True,
+                                timeout=10,
+                                **self.subprocess_flags
+                            )
+                            if result.returncode == 0:
+                                installed_ver = result.stdout.strip()
+                        except:
+                            pass
                         
-                        # Skip PyTorch and PySide6 packages (already added)
-                        if pkg_name.lower() in ['torch', 'torchvision', 'torchaudio', 'triton', 'pyside6']:
-                            continue
-                        if 'pyside6' in pkg_name.lower() or 'shiboken6' in pkg_name.lower():
-                            continue
+                        status = "installed"
+                        status_text = f"✓ Installed ({installed_ver})" if installed_ver else "✓ Installed"
+                        checklist.append({
+                            "component": pkg_name,
+                            "version": version_spec,
+                            "installed_version": installed_ver,
+                            "status": status,
+                            "status_text": status_text
+                        })
+                    else:
+                        checklist.append({
+                            "component": pkg_name,
+                            "version": version_spec,
+                            "installed_version": None,
+                            "status": "missing",
+                            "status_text": "✗ Not Installed"
+                        })
+                else:
+                    # Use import-based verification for all other packages
+                    module_name = pkg_name.replace("-", "_")
+                    installed_ver = None
+                    if self._verify_import(check_python, pkg_name):
+                        # Get version via import
+                        try:
+                            result = subprocess.run(
+                                [check_python, "-c", f"import {module_name}; print({module_name}.__version__)"],
+                                capture_output=True,
+                                text=True,
+                                timeout=10,
+                                **self.subprocess_flags
+                            )
+                            if result.returncode == 0:
+                                installed_ver = result.stdout.strip()
+                        except:
+                            pass
                         
-                        # Check if installed using correct Python
-                        # Use import test for transformers, datasets, huggingface_hub (GUI status rule)
-                        if pkg_name.lower() in ["transformers", "datasets", "huggingface-hub", "huggingface_hub"]:
-                            # Use import verification (no metadata inspection)
-                            installed_ver = None
-                            if self._verify_import(check_python, pkg_name):
-                                # Get version via import
-                                try:
-                                    result = subprocess.run(
-                                        [check_python, "-c", f"import {pkg_name.replace('-', '_')}; print({pkg_name.replace('-', '_')}.__version__)"],
-                                        capture_output=True,
-                                        text=True,
-                                        timeout=10,
-                                        **self.subprocess_flags
-                                    )
-                                    if result.returncode == 0:
-                                        installed_ver = result.stdout.strip()
-                                except:
-                                    pass
-                                
-                                status = "installed"
-                                status_text = f"✓ Installed ({installed_ver})" if installed_ver else "✓ Installed"
-                                checklist.append({
-                                    "component": pkg_name,
-                                    "version": version_spec,
-                                    "installed_version": installed_ver,
-                                    "status": status,
-                                    "status_text": status_text
-                                })
-                            else:
-                                checklist.append({
-                                    "component": pkg_name,
-                                    "version": version_spec,
-                                    "installed_version": None,
-                                    "status": "missing",
-                                    "status_text": "✗ Not Installed"
-                                })
-                        else:
-                            # Use import-based verification for all other packages
-                            module_name = pkg_name.replace("-", "_")
-                            installed_ver = None
-                            if self._verify_import(check_python, pkg_name):
-                                # Get version via import
-                                try:
-                                    result = subprocess.run(
-                                        [check_python, "-c", f"import {module_name}; print({module_name}.__version__)"],
-                                        capture_output=True,
-                                        text=True,
-                                        timeout=10,
-                                        **self.subprocess_flags
-                                    )
-                                    if result.returncode == 0:
-                                        installed_ver = result.stdout.strip()
-                                except:
-                                    pass
-                                
-                                status = "installed"
-                                status_text = f"✓ Installed ({installed_ver})" if installed_ver else "✓ Installed"
-                                checklist.append({
-                                    "component": pkg_name,
-                                    "version": version_spec,
-                                    "installed_version": installed_ver,
-                                    "status": status,
-                                    "status_text": status_text
-                                })
-                            else:
-                                checklist.append({
-                                    "component": pkg_name,
-                                    "version": version_spec,
-                                    "installed_version": None,
-                                    "status": "missing",
-                                    "status_text": "✗ Not Installed"
-                                })
+                        status = "installed"
+                        status_text = f"✓ Installed ({installed_ver})" if installed_ver else "✓ Installed"
+                        checklist.append({
+                            "component": pkg_name,
+                            "version": version_spec,
+                            "installed_version": installed_ver,
+                            "status": status,
+                            "status_text": status_text
+                        })
+                    else:
+                        checklist.append({
+                            "component": pkg_name,
+                            "version": version_spec,
+                            "installed_version": None,
+                            "status": "missing",
+                            "status_text": "✗ Not Installed"
+                        })
+        except Exception as e:
+            self.log(f"ERROR: Failed to load packages from profile: {e}")
+            # Cannot proceed without profile - this is an error
+            raise RuntimeError(f"Profile-based checklist generation failed. Profiles are the ONLY source of truth. Error: {e}")
         
         return checklist
     
@@ -3269,6 +3318,55 @@ if errorlevel 1 (
         except Exception as e:
             return False, f"Error installing {component_name}: {str(e)}"
     
+    def uninstall_all(self, python_executable: Optional[str] = None) -> bool:
+        """Uninstall all managed packages from the environment"""
+        if not python_executable:
+            python_executable = sys.executable
+            
+        self.log("=" * 60)
+        self.log("UNINSTALL PHASE: Removing all managed packages")
+        self.log("=" * 60)
+        
+        # Get list of all packages from requirements and common ones
+        packages = ["torch", "torchvision", "torchaudio", "xformers", "triton", "triton-windows", "unsloth", "unsloth_zoo"]
+        
+        # PROFILE IS THE ONLY SOURCE OF TRUTH - Load packages from profile
+        try:
+            from core.system_detector import SystemDetector
+            from core.profile_selector import ProfileSelector
+            
+            detector = SystemDetector()
+            hw_profile = detector.get_hardware_profile()
+            
+            compat_matrix_path = Path(__file__).parent / "metadata" / "compatibility_matrix.json"
+            if compat_matrix_path.exists():
+                selector = ProfileSelector(compat_matrix_path)
+                profile_name, package_versions, warnings = selector.select_profile(hw_profile)
+                
+                # Add all packages from profile
+                for pkg_name in package_versions.keys():
+                    if pkg_name not in packages:
+                        packages.append(pkg_name)
+        except Exception as e:
+            self.log(f"Warning: Could not load packages from profile: {e}")
+            # Cannot proceed without profile - this is an error
+        
+        success_count = 0
+        for pkg in packages:
+            self.log(f"Uninstalling {pkg}...")
+            uninstall_cmd = [python_executable, "-m", "pip", "uninstall", "-y", pkg]
+            result = subprocess.run(uninstall_cmd, capture_output=True, text=True, timeout=60, **self.subprocess_flags)
+            if result.returncode == 0:
+                success_count += 1
+                self.log(f"✓ {pkg} uninstalled")
+            else:
+                self.log(f"Note: {pkg} was not installed or uninstall failed")
+                
+        self.log("=" * 60)
+        self.log(f"Uninstall complete. {success_count} packages removed.")
+        self.log("=" * 60)
+        return True
+
     def repair_all(self, python_executable: Optional[str] = None) -> bool:
         """
         Deterministic state machine for environment repair.

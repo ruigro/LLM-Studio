@@ -34,7 +34,9 @@ temp/
 # Model artifacts and checkpoints (large/generated files)
 outputs/
 checkpoints/
+fine_tuned/
 fine_tuned_adapter/
+cache/
 *.ckpt
 *.pt
 *.pth
@@ -48,17 +50,10 @@ LLM/models/**/*.safetensors
 LLM/models/**/*.bin
 LLM/models/**/*.pth
 LLM/models/**/*.pt
-LLM/hf_models/**/*.safetensors
-LLM/hf_models/**/*.bin
-LLM/hf_models/**/*.pth
-LLM/hf_models/**/*.pt
 # But allow config files
 !LLM/models/**/config.json
 !LLM/models/**/tokenizer*.json
 !LLM/models/**/*.md
-!LLM/hf_models/**/config.json
-!LLM/hf_models/**/tokenizer*.json
-!LLM/hf_models/**/*.md
 
 # Auto-generated model status (regenerate after clone)
 LLM/MODELS_README.md

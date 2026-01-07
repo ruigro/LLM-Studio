@@ -79,15 +79,24 @@ def download_hf_model(model_id: str, target_dir: Path) -> Path:
 
 def list_local_adapters(adapter_root: Optional[Path] = None) -> List[str]:
     if adapter_root is None:
-        adapter_root = get_app_root() / "fine_tuned_adapter"
+        adapter_root = get_app_root() / "fine_tuned"
     if not adapter_root.exists():
         return []
-    return sorted([p.name for p in adapter_root.iterdir() if p.is_dir()])
+    # Only return directories that have adapter files (valid adapters)
+    valid_adapters = []
+    for p in adapter_root.iterdir():
+        if p.is_dir():
+            # Check if it's a valid adapter (has adapter_config.json and adapter weights)
+            has_config = (p / "adapter_config.json").exists()
+            has_weights = (p / "adapter_model.safetensors").exists() or (p / "adapter_model.bin").exists()
+            if has_config and has_weights:
+                valid_adapters.append(p.name)
+    return sorted(valid_adapters)
 
 
 def list_local_downloads(download_root: Optional[Path] = None) -> List[str]:
     if download_root is None:
-        download_root = get_app_root() / "hf_models"
+        download_root = get_app_root() / "models"
     if not download_root.exists():
         return []
     return sorted([p.name for p in download_root.iterdir() if p.is_dir()])

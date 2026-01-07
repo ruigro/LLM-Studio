@@ -344,10 +344,26 @@ class InstallerGUI:
         results = self.detector.detection_results
         info_lines = []
         
+        # Target app venv (THIS is what we install/repair)
+        llm_dir = Path(__file__).parent
+        venv_path = llm_dir / ".venv"
+        if sys.platform == "win32":
+            target_python = venv_path / "Scripts" / "python.exe"
+            target_pythonw = venv_path / "Scripts" / "pythonw.exe"
+        else:
+            target_python = venv_path / "bin" / "python"
+            target_pythonw = venv_path / "bin" / "python"
+        
+        if target_python.exists():
+            info_lines.append(f"✓ Target venv: {target_python}")
+        else:
+            info_lines.append(f"✗ Target venv Python missing: {target_python}")
+        
         # Python
         python_info = results.get("python", {})
         if python_info.get("found"):
-            info_lines.append(f"✓ Python {python_info.get('version', 'Unknown')} at {python_info.get('executable', 'Unknown')}")
+            # This is the bootstrap Python running the installer UI
+            info_lines.append(f"ℹ Installer Python {python_info.get('version', 'Unknown')} at {python_info.get('executable', 'Unknown')}")
         else:
             info_lines.append("✗ Python: Not found")
         
@@ -402,7 +418,14 @@ class InstallerGUI:
                     if venv_python.exists():
                         check_python = str(venv_python)
                 
+                if not check_python:
+                    # Make it explicit in the UI log so it doesn't look like "everything is missing"
+                    self._log("WARNING: Target venv Python not found; checklist will reflect installer (bootstrap) environment.")
                 checklist = self.installer.get_installation_checklist(python_executable=check_python)
+                
+                # Filter out triton-windows since it doesn't exist in wheelhouse and is optional
+                checklist = [item for item in checklist if item.get("component") != "Triton (Windows)"]
+                
             except Exception as e:
                 import traceback
                 self._log(f"Error getting checklist: {str(e)}")
@@ -581,13 +604,40 @@ class InstallerGUI:
             builtins.print = gui_print
             
             try:
-                write_log("Calling InstallerV2.install()...")
-                self._safe_after(self._log, "Starting immutable installation...")
+                # Check if venv exists to determine if we should repair or install
+                venv_path = Path(__file__).parent / ".venv"
+                venv_exists = venv_path.exists()
                 
-                # Run installation
-                success = installer_v2.install()
-                
-                write_log(f"InstallerV2.install() returned: {success}")
+                if venv_exists:
+                    # Check if venv Python exists and is valid
+                    if sys.platform == 'win32':
+                        venv_python = venv_path / "Scripts" / "python.exe"
+                    else:
+                        venv_python = venv_path / "bin" / "python"
+                    
+                    if venv_python.exists():
+                        write_log("Venv exists - using repair mode (only fix broken packages)")
+                        self._safe_after(self._log, "Starting repair (fixing broken packages only)...")
+                        
+                        # Use repair mode - only fixes broken/missing packages
+                        success = installer_v2.repair()
+                        
+                        write_log(f"InstallerV2.repair() returned: {success}")
+                    else:
+                        # Venv directory exists but Python is missing - do full install
+                        write_log("Venv directory exists but Python missing - using full install")
+                        self._safe_after(self._log, "Starting full installation...")
+                        success = installer_v2.install()
+                        write_log(f"InstallerV2.install() returned: {success}")
+                else:
+                    # No venv - do full installation
+                    write_log("No venv found - using full installation")
+                    self._safe_after(self._log, "Starting full installation...")
+                    
+                    # Run installation
+                    success = installer_v2.install()
+                    
+                    write_log(f"InstallerV2.install() returned: {success}")
             finally:
                 # Restore original print
                 builtins.print = original_print
@@ -672,11 +722,26 @@ class InstallerGUI:
         try:
             import subprocess
             script_dir = Path(__file__).parent
-            python_exe = sys.executable
+            # Always launch using the TARGET venv (not bootstrap)
+            venv_path = script_dir / ".venv"
+            if sys.platform == "win32":
+                python_exe = venv_path / "Scripts" / "pythonw.exe"
+                if not python_exe.exists():
+                    python_exe = venv_path / "Scripts" / "python.exe"
+            else:
+                python_exe = venv_path / "bin" / "python"
+            
+            if not python_exe.exists():
+                messagebox.showerror(
+                    "Cannot Launch",
+                    "Target virtual environment is missing or broken.\n\n"
+                    "Please run Install/Repair first."
+                )
+                return
             
             # Launch main app
             subprocess.Popen(
-                [python_exe, "-m", "desktop_app.main"],
+                [str(python_exe), "-m", "desktop_app.main"],
                 cwd=script_dir,
                 creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
             )

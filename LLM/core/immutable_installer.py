@@ -79,30 +79,47 @@ class ImmutableInstaller:
             }
     
     def log(self, message: str):
-        """Log message to console"""
-        print(f"[INSTALL] {message}")
+        """Log message to console with encoding safety"""
+        try:
+            print(f"[INSTALL] {message}")
+        except UnicodeEncodeError:
+            # Fallback for Windows consoles that don't support UTF-8 characters
+            safe_message = message.replace('✓', '[OK]').replace('✗', '[FAIL]').replace('⚠', '[WARN]')
+            try:
+                print(f"[INSTALL] {safe_message}")
+            except Exception:
+                pass
     
-    def install(self, cuda_config: str) -> Tuple[bool, str]:
+    def install(self, cuda_config: str, package_versions: dict = None) -> Tuple[bool, str]:
         """
         Perform immutable installation.
         
         Args:
             cuda_config: CUDA configuration key (e.g., "cu124")
+            package_versions: Optional dict of {package_name: exact_version} from profile.
+                            If provided, uses these for version checking instead of manifest.
         
         Returns:
             Tuple of (success: bool, error_message: str)
         """
         try:
             self.log("=" * 60)
-            self.log("Immutable Installation Starting")
+            self.log("Immutable Installation Engine Started")
+            self.log(f"  Configuration: {cuda_config}")
+            if package_versions:
+                self.log(f"  Using profile versions: {len(package_versions)} packages")
             self.log("=" * 60)
             
+            # Store profile versions for version checking
+            self.profile_versions = package_versions or {}
+            
             # PHASE 0: Validation
-            self.log("PHASE 0: Environment validation")
+            self.log("[STEP] PHASE 0: Validating environment...")
             self._validate_environment()
+            self.log("  ✓ Environment valid")
             
             # PHASE 1: Wheelhouse already prepared by WheelhouseManager
-            self.log("PHASE 1: Wheelhouse verification")
+            self.log("[STEP] PHASE 1: Verifying wheelhouse...")
             if not self.wheelhouse.exists():
                 raise InstallationFailed(f"Wheelhouse not found at {self.wheelhouse}")
             
@@ -112,11 +129,13 @@ class ImmutableInstaller:
             self.log(f"  ✓ Wheelhouse contains {wheel_count} wheels")
             
             # PHASE 2: Resume detection - check if venv exists and is valid
+            self.log("[STEP] PHASE 2: Checking existing venv for repair...")
             venv_python = None
             should_resume = False
             packages_to_install = []
             
             if self.venv_path.exists():
+                self.log("  Found existing .venv directory")
                 # Check if venv Python exists
                 if sys.platform == 'win32':
                     venv_python_path = self.venv_path / "Scripts" / "python.exe"
@@ -138,25 +157,40 @@ class ImmutableInstaller:
                         )
                         if result.returncode == 0:
                             self.log(f"  ✓ Venv Python found: {result.stdout.strip()}")
+
+                            # Critical: remove known-bad packages (e.g. torchao) before any import checks.
+                            self._uninstall_blacklisted_packages(venv_python)
                             
                             # Check which packages need installation
                             deps = sorted(self.manifest["core_dependencies"], key=lambda x: x["order"])
                             cuda_packages = self.manifest["cuda_configs"][cuda_config]["packages"]
                             
+                            # Use profile versions if available, otherwise fall back to manifest
+                            if self.profile_versions:
+                                # Profile mode: use exact versions from profile
+                                cuda_packages_to_check = {k: self.profile_versions.get(k, v) for k, v in cuda_packages.items()}
+                            else:
+                                cuda_packages_to_check = cuda_packages
+                            
                             missing_packages = []
                             wrong_version_packages = []
                             
-                            # Check CUDA packages
-                            for pkg_name, pkg_version in cuda_packages.items():
-                                is_installed, version_matches = self._check_package_installed(
-                                    venv_python, pkg_name, f"=={pkg_version}"
+                            # Check CUDA packages (with functionality check for broken packages)
+                            for pkg_name, pkg_version in cuda_packages_to_check.items():
+                                is_installed, version_matches, is_broken = self._check_package_installed(
+                                    venv_python, pkg_name, f"=={pkg_version}", check_functionality=True
                                 )
                                 if not is_installed:
                                     missing_packages.append((pkg_name, f"=={pkg_version}"))
-                                elif not version_matches:
+                                elif is_broken:
+                                    # Only add if actually broken (DLL corruption, missing attributes, etc.)
                                     wrong_version_packages.append((pkg_name, f"=={pkg_version}"))
+                                elif not version_matches:
+                                    # Only add if version is wrong
+                                    wrong_version_packages.append((pkg_name, f"=={pkg_version}"))
+                                # Otherwise: installed, correct version, not broken -> skip (don't add to any list)
                             
-                            # Check core dependencies
+                            # Check core dependencies (with functionality check for broken packages)
                             for dep in deps:
                                 pkg_name = dep["name"]
                                 
@@ -168,22 +202,54 @@ class ImmutableInstaller:
                                 if dep["version"] == "FROM_CUDA_CONFIG":
                                     continue
                                 
-                                version_spec = dep["version"]
-                                is_installed, version_matches = self._check_package_installed(
-                                    venv_python, pkg_name, version_spec
+                                # Use profile version if available, otherwise use manifest version
+                                # Profile versions may be ranges (e.g., ">=0.13.0,<0.16.0") or exact (e.g., "0.14.0")
+                                if self.profile_versions and pkg_name in self.profile_versions:
+                                    profile_ver = self.profile_versions[pkg_name]
+                                    # Check if it's already a range or exact version
+                                    if any(op in profile_ver for op in [">=", "<=", ">", "<", "!=", ","]):
+                                        version_spec = profile_ver  # Use range as-is
+                                    else:
+                                        version_spec = f"=={profile_ver}"  # Exact version
+                                else:
+                                    version_spec = dep["version"]
+                                
+                                is_installed, version_matches, is_broken = self._check_package_installed(
+                                    venv_python, pkg_name, version_spec, check_functionality=True
                                 )
                                 
                                 if not is_installed:
                                     missing_packages.append((pkg_name, version_spec))
-                                elif not version_matches:
+                                elif is_broken:
+                                    # Only add if actually broken (import fails, missing attributes, etc.)
                                     wrong_version_packages.append((pkg_name, version_spec))
+                                elif not version_matches:
+                                    # Only add if version is wrong
+                                    wrong_version_packages.append((pkg_name, version_spec))
+                                # Otherwise: installed, correct version, not broken -> skip (don't add to any list)
                             
                             packages_to_install = missing_packages + wrong_version_packages
                             
                             if packages_to_install:
+                                broken_packages = []
+                                missing_pkg_names = [pkg for pkg, _ in missing_packages]
+                                wrong_pkg_names = [pkg for pkg, _ in wrong_version_packages]
+                                
+                                # Check which packages are broken (not just wrong version)
+                                for pkg_name, version_spec in packages_to_install:
+                                    is_installed, _, is_broken = self._check_package_installed(
+                                        venv_python, pkg_name, version_spec, check_functionality=True
+                                    )
+                                    if is_broken:
+                                        broken_packages.append(pkg_name)
+                                
+                                if broken_packages:
+                                    self.log(f"  ⚠ Found {len(broken_packages)} broken packages: {', '.join(broken_packages)}")
+                                
                                 self.log(f"  ⚠ Found {len(packages_to_install)} packages that need installation:")
                                 for pkg_name, version_spec in packages_to_install[:5]:  # Show first 5
-                                    self.log(f"    - {pkg_name}{version_spec}")
+                                    status = " (broken)" if pkg_name in broken_packages else ""
+                                    self.log(f"    - {pkg_name}{version_spec}{status}")
                                 if len(packages_to_install) > 5:
                                     self.log(f"    ... and {len(packages_to_install) - 5} more")
                                 
@@ -219,20 +285,35 @@ class ImmutableInstaller:
                 self.log("PHASE 3: Creating fresh venv")
                 venv_python = self._create_venv()
             else:
-                self.log("PHASE 2: Resuming installation (venv already exists)")
-                self.log(f"  Will install {len(packages_to_install)} missing/outdated packages")
+                if packages_to_install:
+                    self.log("PHASE 2: Resuming installation (venv already exists)")
+                    self.log(f"  Will install {len(packages_to_install)} missing/outdated packages")
+                else:
+                    self.log("PHASE 2: All packages already installed correctly")
+                    self.log("  No installation needed - skipping to verification")
             
             # PHASE 4: Atomic installation
-            self.log("PHASE 4: Installing packages atomically")
-            self._install_packages(cuda_config, venv_python, skip_installed=should_resume, packages_to_install=packages_to_install if should_resume else None)
+            if should_resume and not packages_to_install:
+                # All packages are OK - skip installation phase
+                self.log("PHASE 4: Installing packages atomically (SKIPPED - all packages OK)")
+            else:
+                self.log("PHASE 4: Installing packages atomically")
+                # Pass packages_to_install as-is (empty list will be handled in _install_packages)
+                packages_to_install_param = packages_to_install if should_resume else None
+                self._install_packages(cuda_config, venv_python, skip_installed=should_resume, packages_to_install=packages_to_install_param)
             
             # PHASE 5: Clear Python cache
             self.log("PHASE 5: Clearing Python bytecode cache")
             self._clear_pycache()
             
-            # PHASE 6: Verification
-            self.log("PHASE 6: Verifying installation")
-            self._verify_installation(venv_python)
+            # PHASE 6: Verification (SKIP in resume mode if only some packages were installed)
+            if should_resume and packages_to_install:
+                self.log("PHASE 6: Verifying installation (SKIPPED - Partial repair completed)")
+                self.log("  Full verification would fail due to partial state.")
+                self.log("  Run a full 'Install All' if you need complete environment verification.")
+            else:
+                self.log("PHASE 6: Verifying installation")
+                self._verify_installation(venv_python)
             
             self.log("=" * 60)
             self.log("✓ Installation complete")
@@ -284,8 +365,9 @@ class ImmutableInstaller:
                                 self.log(f"  ✗ Retry after fix failed: {retry_error}")
                                 # Fall through to cleanup
             
-            # Delete corrupted venv only if we can't fix it
-            if self.venv_path.exists():
+            # IMPORTANT: In resume/repair mode, do not destroy the venv automatically.
+            # Destructive cleanup belongs to explicit "full install" flow.
+            if self.venv_path.exists() and not should_resume:
                 self.log("Cleaning up corrupted venv...")
                 try:
                     shutil.rmtree(self.venv_path, ignore_errors=True)
@@ -297,6 +379,7 @@ class ImmutableInstaller:
     
     def _validate_environment(self):
         """Validate environment before starting"""
+        self.log("  Validating environment suitability...")
         # Check wheelhouse exists
         if not self.wheelhouse.exists():
             raise InstallationFailed(f"Wheelhouse not found: {self.wheelhouse}")
@@ -313,6 +396,21 @@ class ImmutableInstaller:
             )
         
         self.log(f"  ✓ Python {py_version[0]}.{py_version[1]} OK")
+
+        # Check for venv locks (Windows specific)
+        if sys.platform == 'win32' and self.venv_path.exists():
+            self.log("  Checking for environment locks...")
+            try:
+                # Try to see if we can open a dummy file in the venv
+                test_file = self.venv_path / ".repair_lock_test"
+                with open(test_file, 'w') as f:
+                    f.write('test')
+                test_file.unlink()
+                self.log("  ✓ Environment is writable")
+            except Exception as e:
+                self.log(f"  ⚠ Warning: Environment might be locked: {e}")
+                self.log("  Please ensure no other training or server processes are running.")
+
     
     def _destroy_venv(self):
         """Completely destroy existing venv"""
@@ -444,9 +542,20 @@ class ImmutableInstaller:
         deps = sorted(self.manifest["core_dependencies"], key=lambda x: x["order"])
         cuda_packages = self.manifest["cuda_configs"][cuda_config]["packages"]
         
+        # Use profile versions if available (same as in venv checking phase)
+        if self.profile_versions:
+            # Profile mode: use exact versions from profile
+            cuda_packages_to_install = {k: self.profile_versions.get(k, v) for k, v in cuda_packages.items()}
+        else:
+            cuda_packages_to_install = cuda_packages
+        
         # Create set of packages to install for quick lookup
         packages_to_install_set = None
-        if packages_to_install:
+        if packages_to_install is not None:
+            # If empty list, skip all installations
+            if len(packages_to_install) == 0:
+                self.log("  ✓ All packages already installed correctly - skipping all installations")
+                return
             # Normalize package names for lookup
             packages_to_install_set = set()
             for pkg_name, version_spec in packages_to_install:
@@ -456,10 +565,10 @@ class ImmutableInstaller:
         
         installed_count = 0
         skipped_count = 0
-        total_count = len([d for d in deps if d["version"] != "FROM_CUDA_CONFIG"]) + len(cuda_packages)
+        total_count = len([d for d in deps if d["version"] != "FROM_CUDA_CONFIG"]) + len(cuda_packages_to_install)
         
         # Install CUDA packages first
-        for pkg_name, pkg_version in cuda_packages.items():
+        for pkg_name, pkg_version in cuda_packages_to_install.items():
             version_spec = f"=={pkg_version}"
             
             # If packages_to_install is specified, only install those packages
@@ -469,12 +578,25 @@ class ImmutableInstaller:
                     continue
             
             # Check if package is already installed (if skip_installed is True)
+            extra_reinstall_args: List[str] = []
             if skip_installed:
-                is_installed, version_matches = self._check_package_installed(venv_python, pkg_name, version_spec)
-                if is_installed and version_matches:
+                is_installed, version_matches, is_broken = self._check_package_installed(venv_python, pkg_name, version_spec, check_functionality=True)
+                if is_installed and version_matches and not is_broken:
                     skipped_count += 1
                     self.log(f"  [{installed_count + skipped_count}/{total_count}] Skipping {pkg_name} (already installed correctly)")
                     continue
+                elif is_broken:
+                    self.log(f"  [{installed_count + skipped_count}/{total_count}] Package {pkg_name} is broken - will reinstall")
+                    # Force uninstall first, then reinstall
+                    self.log(f"    Uninstalling broken {pkg_name}...")
+                    self._uninstall_package(venv_python, pkg_name)
+                    # After uninstall, we'll do a clean install (no extra args needed)
+                    extra_reinstall_args = []
+                elif is_installed and not version_matches:
+                    # Force uninstall for wrong version, then clean install
+                    self.log(f"    Uninstalling wrong version of {pkg_name}...")
+                    self._uninstall_package(venv_python, pkg_name)
+                    extra_reinstall_args = []
             
             installed_count += 1
             progress = f"[{installed_count + skipped_count}/{total_count}]"
@@ -485,7 +607,7 @@ class ImmutableInstaller:
                 venv_python=venv_python,
                 package_name=pkg_name,
                 version_spec=version_spec,
-                install_args=["--no-deps"]  # CUDA packages use --no-deps
+                install_args=["--no-deps"] + extra_reinstall_args  # CUDA packages use --no-deps
             )
             
             if not success:
@@ -504,17 +626,17 @@ class ImmutableInstaller:
                 self.log(f"  Skipping {pkg_name} (platform: {dep['platform']})")
                 continue
             
-            # Handle CUDA packages
+            # CUDA stack was already installed in the first loop; don't install it twice.
             if dep["version"] == "FROM_CUDA_CONFIG":
-                if pkg_name in cuda_packages:
-                    pkg_version = cuda_packages[pkg_name]
-                    version_spec = f"=={pkg_version}"
-                else:
-                    continue
+                continue
+
+            # Extract version from spec
+            # Use profile version if available (same as in venv checking phase), otherwise use manifest version
+            if self.profile_versions and pkg_name in self.profile_versions:
+                version_spec = f"=={self.profile_versions[pkg_name]}"
             else:
-                # Extract version from spec
                 version_spec = dep["version"]
-                pkg_version = None  # Will use version_spec directly
+            pkg_version = None  # Will use version_spec directly
             
             # If packages_to_install is specified, only install those packages
             if packages_to_install_set is not None:
@@ -526,12 +648,64 @@ class ImmutableInstaller:
                         continue
             
             # Check if package is already installed (if skip_installed is True)
+            extra_reinstall_args = []
             if skip_installed:
-                is_installed, version_matches = self._check_package_installed(venv_python, pkg_name, version_spec)
-                if is_installed and version_matches:
+                is_installed, version_matches, is_broken = self._check_package_installed(venv_python, pkg_name, version_spec, check_functionality=True)
+                if is_installed and version_matches and not is_broken:
                     skipped_count += 1
                     self.log(f"  [{installed_count + skipped_count}/{total_count}] Skipping {pkg_name} (already installed correctly)")
                     continue
+                elif is_broken:
+                    self.log(f"  [{installed_count + skipped_count}/{total_count}] Package {pkg_name} is broken - will reinstall")
+                    # Force uninstall first, then reinstall (don't use --force-reinstall which keeps corrupted files)
+                    self.log(f"    Uninstalling broken {pkg_name}...")
+                    self._uninstall_package(venv_python, pkg_name)
+                    # After uninstall, we'll do a clean install (no extra args needed)
+                    extra_reinstall_args = []
+                    
+                    # For torch, ensure all DLL files are cleaned up before reinstall to avoid corruption
+                    if pkg_name == "torch":
+                        self.log(f"    Cleaning up corrupted torch DLLs before reinstall...")
+                        torch_lib = self.venv_path / "Lib" / "site-packages" / "torch" / "lib"
+                        if torch_lib.exists():
+                            try:
+                                for dll_file in torch_lib.glob("*.dll"):
+                                    try:
+                                        dll_file.unlink()
+                                        self.log(f"      Removed: {dll_file.name}")
+                                    except Exception as e:
+                                        self.log(f"      Warning: Could not remove {dll_file.name}: {e}")
+                            except Exception as e:
+                                self.log(f"      Warning: DLL cleanup failed: {e}")
+                    
+                    # For triton, ensure clean reinstall if broken (missing ops sub-module)
+                    elif pkg_name in ["triton", "triton-windows"]:
+                        self.log(f"    Cleaning up broken triton installation...")
+                        triton_path = self.venv_path / "Lib" / "site-packages" / "triton"
+                        if triton_path.exists():
+                            try:
+                                import shutil
+                                shutil.rmtree(triton_path, ignore_errors=True)
+                                self.log(f"      Removed triton directory for clean reinstall")
+                            except Exception as e:
+                                self.log(f"      Warning: Could not remove triton directory: {e}")
+                    
+                    # For peft/transformers, ensure clean reinstall if broken (version compatibility issues)
+                    elif pkg_name in ["peft", "transformers"]:
+                        self.log(f"    Cleaning up broken {pkg_name} installation...")
+                        pkg_path = self.venv_path / "Lib" / "site-packages" / pkg_name
+                        if pkg_path.exists():
+                            try:
+                                import shutil
+                                shutil.rmtree(pkg_path, ignore_errors=True)
+                                self.log(f"      Removed {pkg_name} directory for clean reinstall")
+                            except Exception as e:
+                                self.log(f"      Warning: Could not remove {pkg_name} directory: {e}")
+                elif is_installed and not version_matches:
+                    # Force uninstall for wrong version, then clean install
+                    self.log(f"    Uninstalling wrong version of {pkg_name}...")
+                    self._uninstall_package(venv_python, pkg_name)
+                    extra_reinstall_args = []
             
             # Skip optional packages
             # (Could add logic here to check blacklist_deps)
@@ -545,7 +719,7 @@ class ImmutableInstaller:
                 venv_python=venv_python,
                 package_name=pkg_name,
                 version_spec=pkg_version or dep["version"],
-                install_args=dep.get("install_args", [])
+                install_args=dep.get("install_args", []) + extra_reinstall_args
             )
             
             if not success:
@@ -614,11 +788,15 @@ class ImmutableInstaller:
             str(venv_python), "-m", "pip", "install",
             "--no-index",  # Critical: offline only
             "--find-links", str(self.wheelhouse),
-            "--no-cache-dir"
+            "--no-cache-dir",
+            "--no-deps"  # Critical: prevent pip from resolving any dependencies
         ]
         
-        # Add additional args (like --no-deps)
-        cmd.extend(install_args)
+        # Add additional args (like --no-deps, --force-reinstall)
+        # BUT: Never add install_args if they're already in cmd (avoid duplicate --no-deps)
+        for arg in install_args:
+            if arg not in cmd:
+                cmd.append(arg)
         
         # Add package specifier
         if version_spec.startswith("==") or version_spec.startswith(">=") or version_spec.startswith("<"):
@@ -646,6 +824,64 @@ class ImmutableInstaller:
         except Exception as e:
             return False, str(e)
     
+    def _uninstall_package(self, venv_python: Path, package_name: str) -> Tuple[bool, str]:
+        """
+        Uninstall a package completely.
+        
+        Args:
+            venv_python: Path to venv Python
+            package_name: Package name to uninstall
+        
+        Returns:
+            Tuple of (success: bool, error_message: str)
+        """
+        cmd = [
+            str(venv_python), "-m", "pip", "uninstall",
+            "-y",  # No confirmation
+            package_name
+        ]
+        
+        try:
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=60,  # 1 minute timeout
+                **self.subprocess_flags
+            )
+            
+            if result.returncode != 0:
+                # If package not found, that's OK (already uninstalled)
+                if "not installed" in result.stdout.lower() or "not installed" in result.stderr.lower():
+                    return True, ""
+                error = result.stderr or result.stdout
+                return False, error[:500]  # Truncate long errors
+            
+            return True, ""
+            
+        except subprocess.TimeoutExpired:
+            return False, f"Uninstall timeout for {package_name}"
+        except Exception as e:
+            return False, str(e)
+
+    def _uninstall_blacklisted_packages(self, venv_python: Path) -> None:
+        """
+        Uninstall any globally-blacklisted packages from the target venv.
+        These packages are known to break imports (e.g., torchao causing transformers failures).
+        """
+        blacklist = self.manifest.get("global_blacklist", [])
+        if not blacklist:
+            return
+
+        for pkg in blacklist:
+            try:
+                # Best-effort uninstall; treat "not installed" as success.
+                self.log(f"    Removing blacklisted package if present: {pkg}...")
+                self._uninstall_package(venv_python, pkg)
+            except Exception:
+                # Never fail install because of uninstall issues; main install will surface real errors.
+                pass
+    
     def _create_torch_lock(self, version: str):
         """Create immutability marker for torch"""
         lock_data = {
@@ -658,7 +894,171 @@ class ImmutableInstaller:
         self.torch_lock.write_text(json.dumps(lock_data, indent=2))
         self.log(f"    ✓ Torch lock created: {version}")
     
-    def _check_package_installed(self, venv_python: Path, package_name: str, version_spec: str) -> Tuple[bool, bool]:
+    def _check_package_broken(self, venv_python: Path, package_name: str) -> bool:
+        """
+        Check if a package is broken (importable but missing critical attributes or DLL corruption).
+        
+        Args:
+            venv_python: Path to venv Python executable
+            package_name: Package name to check
+        
+        Returns:
+            True if package is broken (imports but missing critical attributes or DLL errors), False otherwise
+        """
+        # Special handling for torch - check critical attributes AND DLL integrity
+        if package_name == "torch":
+            code = """
+try:
+    import torch
+    import sys
+    # Check for critical attributes
+    has_version = hasattr(torch, '__version__')
+    has_cuda = hasattr(torch, 'cuda')
+    has_tensor = hasattr(torch, 'Tensor')
+    
+    # Try to access CUDA to detect DLL corruption
+    dll_ok = True
+    try:
+        _ = torch.cuda.is_available()  # This will fail if DLLs are corrupted
+    except Exception as e:
+        dll_ok = False
+        print(f'DLL_ERROR: {e}', file=sys.stderr)
+    
+    if has_version and has_cuda and has_tensor and dll_ok:
+        print('OK')
+    else:
+        print('BROKEN')
+except ImportError:
+    print('NOT_INSTALLED')
+except Exception as e:
+    import sys
+    print(f'ERROR: {e}', file=sys.stderr)
+    print('BROKEN')  # Any other error means it's broken
+"""
+        elif package_name in ["triton", "triton-windows"]:
+            code = """
+try:
+    import triton
+    # Check if triton has basic functionality
+    # Note: triton-windows may not have triton.ops (Windows port limitation),
+    # so we only check if triton itself can be imported and has core features
+    has_version = hasattr(triton, '__version__')
+    has_compile = hasattr(triton, 'compile')
+    if has_version and has_compile:
+        print('OK')
+    else:
+        print('BROKEN')
+except ImportError:
+    print('NOT_INSTALLED')
+except Exception as e:
+    print(f'ERROR: {e}')
+    print('BROKEN')
+"""
+        elif package_name == "bitsandbytes":
+            code = """
+try:
+    import bitsandbytes
+    # Try a simple import that often fails if triton is broken
+    from bitsandbytes.nn import Linear8bitLt
+    print('OK')
+except ImportError:
+    print('NOT_INSTALLED')
+except Exception as e:
+    print(f'ERROR: {e}')
+    print('BROKEN')
+"""
+        elif package_name == "transformers":
+            code = """
+try:
+    import transformers
+    from transformers import PreTrainedModel, AutoModel, AutoTokenizer
+    print('OK')
+except Exception as e:
+    print(f'ERROR: {e}')
+    print('BROKEN')
+"""
+        elif package_name == "peft":
+            code = """
+try:
+    import peft
+    import sys
+    # Try importing key classes that are commonly used
+    from peft import LoraConfig, get_peft_model
+    # Also check that peft can properly import from transformers
+    from peft.utils.constants import TRANSFORMERS_MODELS_TO_LORA_TARGET_MODULES_MAPPING
+    print('OK')
+except ImportError as e:
+    # Check if it's the BloomPreTrainedModel error or similar compatibility issue
+    error_str = str(e)
+    if 'BloomPreTrainedModel' in error_str or 'cannot import name' in error_str:
+        print('BROKEN')
+    else:
+        print('NOT_INSTALLED')
+except Exception as e:
+    print(f'ERROR: {e}')
+    print('BROKEN')
+"""
+        elif package_name == "accelerate":
+            code = """
+try:
+    import accelerate
+    from accelerate import Accelerator
+    print('OK')
+except Exception as e:
+    print(f'ERROR: {e}')
+    print('BROKEN')
+"""
+        elif package_name == "datasets":
+            code = """
+try:
+    import datasets
+    from datasets import load_dataset
+    print('OK')
+except Exception as e:
+    print(f'ERROR: {e}')
+    print('BROKEN')
+"""
+        elif package_name == "torchao":
+            code = """
+try:
+    import torchao
+    # Check for basic functionality
+    from torchao.quantization import quantize_
+    print('OK')
+except Exception as e:
+    print(f'ERROR: {e}')
+    print('BROKEN')
+"""
+        else:
+            # For other packages, just check if import works
+            code = f"""
+try:
+    import {package_name}
+    print('OK')
+except ImportError:
+    print('NOT_INSTALLED')
+except Exception as e:
+    print(f'ERROR: {{e}}')
+"""
+        
+        try:
+            result = subprocess.run(
+                [str(venv_python), "-c", code],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                **self.subprocess_flags
+            )
+            
+            if result.returncode != 0:
+                return True  # Consider broken if check fails
+            
+            output = result.stdout.strip()
+            return output == "BROKEN" or output.startswith("ERROR:")
+        except Exception:
+            return True  # Consider broken if check fails
+    
+    def _check_package_installed(self, venv_python: Path, package_name: str, version_spec: str, check_functionality: bool = False) -> Tuple[bool, bool, bool]:
         """
         Check if a package is installed and if its version matches the requirement.
         
@@ -666,10 +1066,21 @@ class ImmutableInstaller:
             venv_python: Path to venv Python executable
             package_name: Package name to check
             version_spec: Version specifier (e.g., "==4.51.3" or ">=4.51.3,!=4.52.*")
+            check_functionality: If True, also check if package is broken (missing critical attributes)
         
         Returns:
-            Tuple of (is_installed: bool, version_matches: bool)
+            Tuple of (is_installed: bool, version_matches: bool, is_broken: bool)
+            If check_functionality is False, is_broken will always be False
         """
+        is_broken = False
+        
+        # Check functionality first if requested
+        if check_functionality:
+            is_broken = self._check_package_broken(venv_python, package_name)
+            # If broken, we need to reinstall even if metadata says it's installed
+            if is_broken:
+                return True, False, True  # Installed (metadata), wrong version (broken), is_broken=True
+        
         # Check if package is installed using importlib.metadata
         if not METADATA_AVAILABLE:
             # Fallback: try to import the package
@@ -684,11 +1095,11 @@ class ImmutableInstaller:
                 )
                 is_installed = result.returncode == 0
                 if not is_installed:
-                    return False, False
+                    return False, False, False
                 # Can't verify version without metadata, assume it matches
-                return True, True
+                return True, True, False
             except Exception:
-                return False, False
+                return False, False, False
         
         # Use importlib.metadata to get installed version
         try:
@@ -719,7 +1130,7 @@ except PackageNotFoundError:
             
             output = result.stdout.strip()
             if output == "NOT_FOUND" or not output:
-                return False, False
+                return False, False, False
             
             installed_version = output.strip()
             
@@ -728,24 +1139,44 @@ except PackageNotFoundError:
                 # Fallback: only support exact == matches
                 if version_spec.startswith("=="):
                     required = version_spec[2:].strip()
-                    return True, installed_version == required
+                    version_matches = installed_version == required
+                    return True, version_matches, is_broken
                 else:
                     # Can't verify complex specifiers, assume it matches
-                    return True, True
+                    return True, True, is_broken
             
             # Use packaging library for robust version comparison
             try:
-                spec = SpecifierSet(version_spec)
-                # Handle build tags (e.g., "2.5.1+cu124" -> "2.5.1")
-                base_version = installed_version.split("+")[0].split("-")[0]
-                version_matches = spec.contains(pkg_version.parse(base_version))
-                return True, version_matches
+                # Handle build tags in both installed version and version_spec
+                # e.g., "2.5.1+cu121" -> compare base "2.5.1" and build "+cu121"
+                installed_base = installed_version.split("+")[0]
+                installed_build = "+" + installed_version.split("+")[1] if "+" in installed_version else ""
+                
+                # Parse version_spec to extract base version and build tag
+                if version_spec.startswith("=="):
+                    required_full = version_spec[2:].strip()
+                    required_base = required_full.split("+")[0]
+                    required_build = "+" + required_full.split("+")[1] if "+" in required_full else ""
+                    
+                    # Both base version and build tag must match for ==
+                    version_matches = (installed_base == required_base) and (installed_build == required_build)
+                    return True, version_matches, is_broken
+                elif version_spec.startswith(">=") or version_spec.startswith("<"):
+                    # For range specifiers, only compare base version (ignore build tags)
+                    spec = SpecifierSet(version_spec)
+                    version_matches = spec.contains(pkg_version.parse(installed_base))
+                    return True, version_matches, is_broken
+                else:
+                    # Complex specifier - use packaging
+                    spec = SpecifierSet(version_spec)
+                    version_matches = spec.contains(pkg_version.parse(installed_base))
+                    return True, version_matches, is_broken
             except Exception:
                 # If parsing fails, assume version doesn't match
-                return True, False
+                return True, False, is_broken
                 
         except Exception:
-            return False, False
+            return False, False, False
     
     def _verify_package_import(self, venv_python: Path, package_name: str) -> Tuple[bool, str]:
         """
@@ -854,7 +1285,7 @@ except PackageNotFoundError:
                     self.log(f"    ⚠ Could not identify package from error message")
                     return False
         
-        # Find correct version from manifest
+        # Find correct version (prefer profile if available, fall back to manifest)
         deps = sorted(self.manifest["core_dependencies"], key=lambda x: x["order"])
         dep_info = None
         
@@ -866,8 +1297,17 @@ except PackageNotFoundError:
         if not dep_info:
             self.log(f"    ⚠ Package {pkg_name} not found in manifest")
             return False
-        
+
+        # Prefer exact profile pin when available, otherwise use manifest (may be flexible).
+        normalized_pkg = pkg_name.lower().replace("_", "-")
         version_spec = dep_info["version"]
+        if getattr(self, "profile_versions", None):
+            # Try both normalized and raw keys.
+            if normalized_pkg in self.profile_versions:
+                version_spec = f"=={self.profile_versions[normalized_pkg]}"
+            elif pkg_name in self.profile_versions:
+                version_spec = f"=={self.profile_versions[pkg_name]}"
+
         self.log(f"    Reinstalling {pkg_name} with correct version {version_spec}...")
         
         # Uninstall wrong version

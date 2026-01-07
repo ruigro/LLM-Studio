@@ -7,7 +7,7 @@ import subprocess
 import sys
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -27,6 +27,8 @@ class ToolContext:
     token: str
     allow_shell: bool = False
     allow_write: bool = False
+    allow_git: bool = True  # Default to True for git
+    allow_network: bool = False
     require_token_for_openai: bool = False
 
     # OpenAI backend config
@@ -34,6 +36,12 @@ class ToolContext:
     model_path: str = ""
     backend_url: str = ""  # for proxy
     system_fingerprint: str = "local-llm-studio"
+    
+    # Tool enablement map (tool name -> enabled)
+    enabled_tools: Dict[str, bool] = field(default_factory=dict)
+    
+    # Auth policy
+    require_auth_for_tools_list: bool = False  # If True, /tools requires auth
 
     def _safe_path(self, rel: str) -> Path:
         p = (self.root / rel).resolve()
@@ -43,133 +51,38 @@ class ToolContext:
 
 
 # -------------------------
-# Tool implementations
+# Tool implementations (using registry)
 # -------------------------
+from tool_server.registry import ToolRegistry
+from tool_server.discovery import discover_tools
+
+# Discover tools on import
+_discovery_done = False
+
+def _ensure_discovery():
+    global _discovery_done
+    if not _discovery_done:
+        discover_tools()
+        _discovery_done = True
+
+
 def list_tools(ctx: ToolContext) -> List[Dict[str, Any]]:
-    tools: List[Dict[str, Any]] = [
-        {
-            "name": "list_dir",
-            "description": "List files/folders under a relative directory.",
-            "input_schema": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]},
-        },
-        {
-            "name": "read_file",
-            "description": "Read a text file under workspace root (utf-8, best effort).",
-            "input_schema": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]},
-        },
-        {
-            "name": "write_file",
-            "description": "Write text content to a file under workspace root (creates parents).",
-            "input_schema": {
-                "type": "object",
-                "properties": {"path": {"type": "string"}, "content": {"type": "string"}},
-                "required": ["path", "content"],
-            },
-            "requires": ["allow_write"],
-        },
-        {
-            "name": "run_shell",
-            "description": "Run a shell command in workspace root and return stdout/stderr.",
-            "input_schema": {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]},
-            "requires": ["allow_shell"],
-        },
-        {
-            "name": "git_status",
-            "description": "Run 'git status --porcelain=v1' in workspace root.",
-            "input_schema": {"type": "object", "properties": {}, "required": []},
-            "requires": ["allow_shell"],
-        },
-    ]
-    return tools
-
-
-def _require_feature(ctx: ToolContext, requires: List[str]) -> None:
-    for r in requires:
-        if r == "allow_write" and not ctx.allow_write:
-            raise PermissionError("write_file is disabled (allow_write=false)")
-        if r == "allow_shell" and not ctx.allow_shell:
-            raise PermissionError("run_shell is disabled (allow_shell=false)")
+    """List all tools from registry."""
+    _ensure_discovery()
+    registry = ToolRegistry()
+    return registry.list_tools(ctx.enabled_tools)
 
 
 def call_tool(ctx: ToolContext, name: str, args: Dict[str, Any]) -> Dict[str, Any]:
-    tools_by_name = {t["name"]: t for t in list_tools(ctx)}
-    if name not in tools_by_name:
-        raise ValueError(f"Unknown tool: {name}")
-
-    meta = tools_by_name[name]
-    _require_feature(ctx, meta.get("requires", []))
-
-    if name == "list_dir":
-        rel = args.get("path", ".")
-        p = ctx._safe_path(rel)
-        if not p.exists():
-            return {"ok": False, "error": "path not found"}
-        if not p.is_dir():
-            return {"ok": False, "error": "path is not a directory"}
-        items = []
-        for child in sorted(p.iterdir(), key=lambda x: x.name.lower()):
-            items.append(
-                {
-                    "name": child.name,
-                    "type": "dir" if child.is_dir() else "file",
-                    "size": child.stat().st_size if child.is_file() else None,
-                }
-            )
-        return {"ok": True, "items": items}
-
-    if name == "read_file":
-        rel = args.get("path")
-        if not rel:
-            raise ValueError("path is required")
-        p = ctx._safe_path(rel)
-        if not p.exists() or not p.is_file():
-            return {"ok": False, "error": "file not found"}
-        data = p.read_bytes()
-        try:
-            txt = data.decode("utf-8")
-        except UnicodeDecodeError:
-            txt = data.decode("utf-8", "replace")
-        return {"ok": True, "content": txt}
-
-    if name == "write_file":
-        rel = args.get("path")
-        content = args.get("content", "")
-        if not rel:
-            raise ValueError("path is required")
-        p = ctx._safe_path(rel)
-        p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(content, encoding="utf-8")
-        return {"ok": True, "written": str(rel)}
-
-    if name == "run_shell":
-        cmd = args.get("command")
-        if not cmd:
-            raise ValueError("command is required")
-        # Use system shell; run in workspace root
-        proc = subprocess.run(
-            cmd,
-            cwd=str(ctx.root),
-            shell=True,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-        )
-        return {"ok": proc.returncode == 0, "returncode": proc.returncode, "stdout": proc.stdout, "stderr": proc.stderr}
-
-    if name == "git_status":
-        proc = subprocess.run(
-            ["git", "status", "--porcelain=v1"],
-            cwd=str(ctx.root),
-            shell=False,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-        )
-        return {"ok": proc.returncode == 0, "returncode": proc.returncode, "stdout": proc.stdout, "stderr": proc.stderr}
-
-    raise ValueError(f"Tool not implemented: {name}")
+    """Call a tool via registry."""
+    _ensure_discovery()
+    registry = ToolRegistry()
+    
+    # Check if tool is enabled
+    if ctx.enabled_tools and not ctx.enabled_tools.get(name, True):
+        return {"ok": False, "error": f"Tool '{name}' is disabled"}
+    
+    return registry.call_tool(name, args, ctx)
 
 
 # -------------------------
@@ -364,9 +277,21 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if path == "/tools":
-            if not self._require_auth():
-                return
-            self._send_json(200, {"tools": list_tools(self._ctx())})
+            # Check if auth is required for tools list
+            if self._ctx().require_auth_for_tools_list:
+                if not self._require_auth():
+                    return
+            # Otherwise, allow unauthenticated access (for localhost convenience)
+            tools = list_tools(self._ctx())
+            # Convert args_schema_json back to dict for compatibility
+            for tool in tools:
+                if tool.get("args_schema_json"):
+                    import json
+                    try:
+                        tool["input_schema"] = json.loads(tool["args_schema_json"])
+                    except:
+                        pass
+            self._send_json(200, {"tools": tools})
             return
 
         if path == "/v1/models":
@@ -405,7 +330,11 @@ class Handler(BaseHTTPRequestHandler):
                 if not name:
                     raise ValueError("name is required")
                 result = call_tool(self._ctx(), name, args)
-                self._send_json(200, {"ok": True, "result": result})
+                # Result already has ok/error structure from registry
+                if result.get("ok"):
+                    self._send_json(200, result)
+                else:
+                    self._send_json(400, result)
             except PermissionError as e:
                 self._send_json(403, {"ok": False, "error": str(e)})
             except Exception as e:
@@ -568,10 +497,14 @@ def main(argv: Optional[List[str]] = None) -> int:
         token=token,
         allow_shell=bool(args.allow_shell),
         allow_write=bool(args.allow_write),
+        allow_git=True,  # Default True
+        allow_network=False,  # Default False
         require_token_for_openai=bool(args.require_token_for_openai),
         backend=args.backend,
         model_path=args.model_path,
         backend_url=args.backend_url,
+        enabled_tools={},  # Will be loaded from config if available (via UI)
+        require_auth_for_tools_list=False,  # Default False (for CLI, UI sets this)
     )
 
     srv = Server(args.host, args.port, ctx)

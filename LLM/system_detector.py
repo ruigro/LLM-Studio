@@ -96,98 +96,114 @@ class SystemDetector:
             "pip_available": False
         }
         
-        # Check current Python
-        if sys.executable:
-            try:
-                version = sys.version_info
-                result["found"] = True
-                result["version"] = f"{version.major}.{version.minor}.{version.micro}"
-                result["executable"] = sys.executable
-                result["path"] = os.path.dirname(sys.executable)
-                
-                # Check pip
+        try:
+            # Check current Python
+            if sys.executable:
                 try:
-                    import pip
-                    result["pip_available"] = True
-                except ImportError:
-                    # Try running pip command
+                    version = sys.version_info
+                    result["found"] = True
+                    result["version"] = f"{version.major}.{version.minor}.{version.micro}"
+                    result["executable"] = sys.executable
+                    result["path"] = os.path.dirname(sys.executable)
+                    
+                    # Check pip
                     try:
-                        subprocess.run([sys.executable, "-m", "pip", "--version"], 
-                                      capture_output=True, check=True, timeout=5, **self.subprocess_flags)
+                        import pip
                         result["pip_available"] = True
-                    except:
-                        pass
-            except Exception as e:
-                pass
-        
-        # If not found, check common paths
-        if not result["found"]:
-            if self.platform == "windows":
-                common_paths = [
-                    r"C:\Python*",
-                    r"C:\Program Files\Python*",
-                    r"C:\Program Files (x86)\Python*",
-                    os.path.expanduser(r"~\AppData\Local\Programs\Python\Python*")
-                ]
-                # Also check PATH
-                path_dirs = os.environ.get("PATH", "").split(os.pathsep)
-                for path_dir in path_dirs:
-                    python_exe = os.path.join(path_dir, "python.exe")
-                    if os.path.exists(python_exe):
+                    except ImportError:
+                        # Try running pip command
+                        try:
+                            subprocess.run([sys.executable, "-m", "pip", "--version"], 
+                                          capture_output=True, check=True, timeout=5, **self.subprocess_flags)
+                            result["pip_available"] = True
+                        except:
+                            pass
+                except Exception as e:
+                    pass
+            
+            # If not found, check common paths
+            if not result["found"]:
+                if self.platform == "windows":
+                    common_paths = [
+                        r"C:\Python*",
+                        r"C:\Program Files\Python*",
+                        r"C:\Program Files (x86)\Python*",
+                        os.path.expanduser(r"~\AppData\Local\Programs\Python\Python*")
+                    ]
+                    # Also check PATH
+                    path_dirs = os.environ.get("PATH", "").split(os.pathsep)
+                    for path_dir in path_dirs:
+                        python_exe = os.path.join(path_dir, "python.exe")
+                        if os.path.exists(python_exe):
+                            try:
+                                version_output = subprocess.run(
+                                    [python_exe, "--version"],
+                                    capture_output=True, text=True, timeout=5, **self.subprocess_flags
+                                )
+                                if version_output.returncode == 0:
+                                    version_str = version_output.stdout.strip()
+                                    result["found"] = True
+                                    result["executable"] = python_exe
+                                    result["path"] = path_dir
+                                    # Extract version
+                                    import re
+                                    match = re.search(r"(\d+)\.(\d+)\.(\d+)", version_str)
+                                    if match:
+                                        result["version"] = f"{match.group(1)}.{match.group(2)}.{match.group(3)}"
+                                    break
+                            except:
+                                continue
+                
+                elif self.platform in ["linux", "darwin"]:
+                    # Try common commands
+                    for cmd in ["python3", "python"]:
                         try:
                             version_output = subprocess.run(
-                                [python_exe, "--version"],
+                                [cmd, "--version"],
                                 capture_output=True, text=True, timeout=5, **self.subprocess_flags
                             )
                             if version_output.returncode == 0:
-                                version_str = version_output.stdout.strip()
-                                result["found"] = True
-                                result["executable"] = python_exe
-                                result["path"] = path_dir
-                                # Extract version
-                                import re
-                                match = re.search(r"(\d+)\.(\d+)\.(\d+)", version_str)
-                                if match:
-                                    result["version"] = f"{match.group(1)}.{match.group(2)}.{match.group(3)}"
-                                break
+                                which_output = subprocess.run(
+                                    ["which", cmd],
+                                    capture_output=True, text=True, timeout=5, **self.subprocess_flags
+                                )
+                                if which_output.returncode == 0:
+                                    result["found"] = True
+                                    result["executable"] = which_output.stdout.strip()
+                                    result["path"] = os.path.dirname(result["executable"])
+                                    version_str = version_output.stdout.strip()
+                                    import re
+                                    match = re.search(r"(\d+)\.(\d+)\.(\d+)", version_str)
+                                    if match:
+                                        result["version"] = f"{match.group(1)}.{match.group(2)}.{match.group(3)}"
+                                    
+                                    # Check pip
+                                    try:
+                                        subprocess.run([result["executable"], "-m", "pip", "--version"],
+                                                     capture_output=True, check=True, timeout=5, **self.subprocess_flags)
+                                        result["pip_available"] = True
+                                    except:
+                                        pass
+                                    break
                         except:
                             continue
             
-            elif self.platform in ["linux", "darwin"]:
-                # Try common commands
-                for cmd in ["python3", "python"]:
-                    try:
-                        version_output = subprocess.run(
-                            [cmd, "--version"],
-                            capture_output=True, text=True, timeout=5, **self.subprocess_flags
-                        )
-                        if version_output.returncode == 0:
-                            which_output = subprocess.run(
-                                ["which", cmd],
-                                capture_output=True, text=True, timeout=5, **self.subprocess_flags
-                            )
-                            if which_output.returncode == 0:
-                                result["found"] = True
-                                result["executable"] = which_output.stdout.strip()
-                                result["path"] = os.path.dirname(result["executable"])
-                                version_str = version_output.stdout.strip()
-                                import re
-                                match = re.search(r"(\d+)\.(\d+)\.(\d+)", version_str)
-                                if match:
-                                    result["version"] = f"{match.group(1)}.{match.group(2)}.{match.group(3)}"
-                                
-                                # Check pip
-                                try:
-                                    subprocess.run([result["executable"], "-m", "pip", "--version"],
-                                                 capture_output=True, check=True, timeout=5, **self.subprocess_flags)
-                                    result["pip_available"] = True
-                                except:
-                                    pass
-                                break
-                    except:
-                        continue
-        
-        return result
+            return result
+        except Exception as e:
+            import traceback
+            from pathlib import Path
+            log_dir = Path(__file__).parent.parent / ".cursor"
+            log_dir.mkdir(parents=True, exist_ok=True)
+            try:
+                with (log_dir / "debug.log").open("a", encoding="utf-8") as log_file:
+                    import json
+                    import time
+                    log_file.write(json.dumps({"id": f"log_{int(time.time() * 1000)}_detect_python_error", "timestamp": int(time.time() * 1000), "location": "system_detector.py:89", "message": "Exception in detect_python", "data": {"error_type": type(e).__name__, "error_msg": str(e), "traceback": traceback.format_exc()}, "sessionId": "debug-session", "runId": "run1", "hypothesisId": "A"}) + "\n")
+            except Exception:
+                pass
+            result["error"] = str(e)
+            result["traceback"] = traceback.format_exc()
+            return result
     
     def detect_pytorch(self) -> Dict:
         """Detect PyTorch installation"""
@@ -200,25 +216,41 @@ class SystemDetector:
         }
         
         try:
-            import torch
-            result["found"] = True
-            result["version"] = torch.__version__
+            try:
+                import torch
+                result["found"] = True
+                result["version"] = torch.__version__
+                
+                # Check CUDA availability
+                if torch.cuda.is_available():
+                    result["cuda_available"] = True
+                    result["cuda_version"] = torch.version.cuda
+                    result["device"] = "cuda"
+                else:
+                    result["device"] = "cpu"
+            except ImportError:
+                # PyTorch not installed
+                pass
+            except Exception as e:
+                # Error detecting PyTorch
+                result["error"] = str(e)
             
-            # Check CUDA availability
-            if torch.cuda.is_available():
-                result["cuda_available"] = True
-                result["cuda_version"] = torch.version.cuda
-                result["device"] = "cuda"
-            else:
-                result["device"] = "cpu"
-        except ImportError:
-            # PyTorch not installed
-            pass
+            return result
         except Exception as e:
-            # Error detecting PyTorch
+            import traceback
+            from pathlib import Path
+            log_dir = Path(__file__).parent.parent / ".cursor"
+            log_dir.mkdir(parents=True, exist_ok=True)
+            try:
+                with (log_dir / "debug.log").open("a", encoding="utf-8") as log_file:
+                    import json
+                    import time
+                    log_file.write(json.dumps({"id": f"log_{int(time.time() * 1000)}_detect_pytorch_error", "timestamp": int(time.time() * 1000), "location": "system_detector.py:192", "message": "Exception in detect_pytorch", "data": {"error_type": type(e).__name__, "error_msg": str(e), "traceback": traceback.format_exc()}, "sessionId": "debug-session", "runId": "run1", "hypothesisId": "A"}) + "\n")
+            except Exception:
+                pass
             result["error"] = str(e)
-        
-        return result
+            result["traceback"] = traceback.format_exc()
+            return result
     
     def _try_nvidia_smi(self, max_retries: int = 3) -> Tuple[Optional[subprocess.CompletedProcess], List[str]]:
         """Try nvidia-smi with retry logic and exponential backoff"""
@@ -463,37 +495,53 @@ class SystemDetector:
             "detection_timestamp": datetime.now().isoformat()
         }
         
-        # Method 1: nvidia-smi (primary, most reliable)
-        if self._detect_cuda_via_nvidia_smi(result):
-            result["detection_methods"].append("nvidia-smi")
-        
-        # Method 2: PyTorch CUDA check (verification)
-        if self._detect_cuda_via_pytorch(result):
-            result["detection_methods"].append("pytorch")
-        
-        # Method 3: File system detection (fallback)
-        if self._detect_cuda_via_filesystem(result):
-            result["detection_methods"].append("filesystem")
-        
-        # Method 4: Windows registry check (fallback)
-        if self._detect_cuda_via_registry(result):
-            result["detection_methods"].append("registry")
-        
-        # If we found CUDA toolkit but no GPUs, set available=False
-        if result["found"] and not result["gpus"]:
-            result["available"] = False
-            if "nvidia-smi" not in result["detection_methods"]:
-                result.setdefault("warnings", []).append("CUDA toolkit found but no GPUs detected (nvidia-smi unavailable)")
-        
-        # Clean up empty warnings list
-        if not result["warnings"]:
-            del result["warnings"]
-        
-        # Log detection attempt
-        success = result["found"] and result.get("available", False)
-        self._log_cuda_detection(result, success)
-        
-        return result
+        try:
+            # Method 1: nvidia-smi (primary, most reliable)
+            if self._detect_cuda_via_nvidia_smi(result):
+                result["detection_methods"].append("nvidia-smi")
+            
+            # Method 2: PyTorch CUDA check (verification)
+            if self._detect_cuda_via_pytorch(result):
+                result["detection_methods"].append("pytorch")
+            
+            # Method 3: File system detection (fallback)
+            if self._detect_cuda_via_filesystem(result):
+                result["detection_methods"].append("filesystem")
+            
+            # Method 4: Windows registry check (fallback)
+            if self._detect_cuda_via_registry(result):
+                result["detection_methods"].append("registry")
+            
+            # If we found CUDA toolkit but no GPUs, set available=False
+            if result["found"] and not result["gpus"]:
+                result["available"] = False
+                if "nvidia-smi" not in result["detection_methods"]:
+                    result.setdefault("warnings", []).append("CUDA toolkit found but no GPUs detected (nvidia-smi unavailable)")
+            
+            # Clean up empty warnings list
+            if not result["warnings"]:
+                del result["warnings"]
+            
+            # Log detection attempt
+            success = result["found"] and result.get("available", False)
+            self._log_cuda_detection(result, success)
+            
+            return result
+        except Exception as e:
+            import traceback
+            from pathlib import Path
+            log_dir = Path(__file__).parent.parent / ".cursor"
+            log_dir.mkdir(parents=True, exist_ok=True)
+            try:
+                with (log_dir / "debug.log").open("a", encoding="utf-8") as log_file:
+                    import json
+                    import time
+                    log_file.write(json.dumps({"id": f"log_{int(time.time() * 1000)}_detect_cuda_error", "timestamp": int(time.time() * 1000), "location": "system_detector.py:452", "message": "Exception in detect_cuda", "data": {"error_type": type(e).__name__, "error_msg": str(e), "traceback": traceback.format_exc()}, "sessionId": "debug-session", "runId": "run1", "hypothesisId": "A"}) + "\n")
+            except Exception:
+                pass
+            result["error"] = str(e)
+            result["traceback"] = traceback.format_exc()
+            return result
     
     def verify_cuda_health(self) -> Dict:
         """Quick health check for CUDA - returns detailed status with recommendations"""
@@ -562,124 +610,140 @@ class SystemDetector:
             "disk_space_gb": None
         }
         
-        # Get CPU name/processor info
         try:
-            if self.platform == "windows":
-                # Use WMI to get actual CPU name on Windows
-                try:
-                    cpu_cmd = subprocess.run(
-                        ["wmic", "cpu", "get", "name"],
-                        capture_output=True, text=True, timeout=5, **self.subprocess_flags
-                    )
-                    if cpu_cmd.returncode == 0:
-                        lines = [line.strip() for line in cpu_cmd.stdout.strip().split('\n') if line.strip()]
-                        # First line is "Name", second is the actual CPU name
-                        if len(lines) > 1 and lines[1]:
-                            result["cpu_name"] = lines[1]
-                        elif len(lines) > 0 and lines[0] and lines[0] != "Name":
-                            result["cpu_name"] = lines[0]
+            # Get CPU name/processor info
+            try:
+                if self.platform == "windows":
+                    # Use WMI to get actual CPU name on Windows
+                    try:
+                        cpu_cmd = subprocess.run(
+                            ["wmic", "cpu", "get", "name"],
+                            capture_output=True, text=True, timeout=5, **self.subprocess_flags
+                        )
+                        if cpu_cmd.returncode == 0:
+                            lines = [line.strip() for line in cpu_cmd.stdout.strip().split('\n') if line.strip()]
+                            # First line is "Name", second is the actual CPU name
+                            if len(lines) > 1 and lines[1]:
+                                result["cpu_name"] = lines[1]
+                            elif len(lines) > 0 and lines[0] and lines[0] != "Name":
+                                result["cpu_name"] = lines[0]
+                            else:
+                                result["cpu_name"] = platform.processor()
                         else:
                             result["cpu_name"] = platform.processor()
-                    else:
-                        result["cpu_name"] = platform.processor()
-                except Exception as e:
-                    # Fallback to platform.processor() on error
-                    result["cpu_name"] = platform.processor() or "Unknown CPU"
-            else:
-                processor = platform.processor()
-                if processor:
-                    result["cpu_name"] = processor
+                    except Exception as e:
+                        # Fallback to platform.processor() on error
+                        result["cpu_name"] = platform.processor() or "Unknown CPU"
                 else:
-                    # Fallback to cores + architecture
-                    cores = os.cpu_count()
-                    arch = platform.machine()
-                    result["cpu_name"] = f"{cores}-core {arch}"
-        except Exception as e:
-            result["cpu_name"] = f"Unknown (error: {str(e)[:30]})"
-        
-        # CPU cores
-        try:
-            if self.platform == "windows":
-                result["cpu"]["cores"] = os.cpu_count()
-            else:
-                result["cpu"]["cores"] = os.cpu_count()
-        except:
-            pass
-        
-        # RAM
-        try:
-            if self.platform == "windows":
-                import ctypes
-                class MEMORYSTATUSEX(ctypes.Structure):
-                    _fields_ = [
-                        ("dwLength", ctypes.c_ulong),
-                        ("dwMemoryLoad", ctypes.c_ulong),
-                        ("ullTotalPhys", ctypes.c_ulonglong),
-                        ("ullAvailPhys", ctypes.c_ulonglong),
-                        ("ullTotalPageFile", ctypes.c_ulonglong),
-                        ("ullAvailPageFile", ctypes.c_ulonglong),
-                        ("ullTotalVirtual", ctypes.c_ulonglong),
-                        ("ullAvailVirtual", ctypes.c_ulonglong),
-                        ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
-                    ]
-                stat = MEMORYSTATUSEX()
-                stat.dwLength = ctypes.sizeof(stat)
-                ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(stat))
-                result["ram_gb"] = round(stat.ullTotalPhys / (1024**3), 2)
-            elif self.platform == "linux":
-                with open('/proc/meminfo', 'r') as f:
-                    for line in f:
-                        if line.startswith('MemTotal:'):
-                            kb = int(line.split()[1])
-                            result["ram_gb"] = round(kb / (1024**2), 2)
-                            break
-            elif self.platform == "darwin":
-                mem_output = subprocess.run(
-                    ["sysctl", "-n", "hw.memsize"],
-                    capture_output=True, text=True, timeout=5, **self.subprocess_flags
-                )
-                if mem_output.returncode == 0:
-                    bytes = int(mem_output.stdout.strip())
-                    result["ram_gb"] = round(bytes / (1024**3), 2)
-        except:
-            pass
-        
-        # GPU (from CUDA detection or system)
-        cuda_info = self.detect_cuda()
-        if cuda_info["found"] and cuda_info["gpus"]:
-            gpu = cuda_info["gpus"][0]
-            result["gpu"]["found"] = True
-            result["gpu"]["vendor"] = "NVIDIA"
-            result["gpu"]["model"] = gpu.get("name", "Unknown")
-            # Parse memory
+                    processor = platform.processor()
+                    if processor:
+                        result["cpu_name"] = processor
+                    else:
+                        # Fallback to cores + architecture
+                        cores = os.cpu_count()
+                        arch = platform.machine()
+                        result["cpu_name"] = f"{cores}-core {arch}"
+            except Exception as e:
+                result["cpu_name"] = f"Unknown (error: {str(e)[:30]})"
+            
+            # CPU cores
             try:
-                mem_str = gpu.get("memory", "")
-                if "MiB" in mem_str:
-                    mem_mib = int(mem_str.replace("MiB", "").strip())
-                    result["gpu"]["memory_gb"] = round(mem_mib / 1024, 2)
+                if self.platform == "windows":
+                    result["cpu"]["cores"] = os.cpu_count()
+                else:
+                    result["cpu"]["cores"] = os.cpu_count()
             except:
                 pass
-        
-        # Disk space (check current directory)
-        try:
-            if self.platform == "windows":
-                import ctypes
-                free_bytes = ctypes.c_ulonglong(0)
-                ctypes.windll.kernel32.GetDiskFreeSpaceExW(
-                    ctypes.c_wchar_p(os.getcwd()),
-                    ctypes.pointer(ctypes.c_ulonglong()),
-                    ctypes.pointer(ctypes.c_ulonglong()),
-                    ctypes.pointer(free_bytes)
-                )
-                result["disk_space_gb"] = round(free_bytes.value / (1024**3), 2)
-            else:
-                import shutil
-                stat = shutil.disk_usage(os.getcwd())
-                result["disk_space_gb"] = round(stat.free / (1024**3), 2)
-        except:
-            pass
-        
-        return result
+            
+            # RAM
+            try:
+                if self.platform == "windows":
+                    import ctypes
+                    class MEMORYSTATUSEX(ctypes.Structure):
+                        _fields_ = [
+                            ("dwLength", ctypes.c_ulong),
+                            ("dwMemoryLoad", ctypes.c_ulong),
+                            ("ullTotalPhys", ctypes.c_ulonglong),
+                            ("ullAvailPhys", ctypes.c_ulonglong),
+                            ("ullTotalPageFile", ctypes.c_ulonglong),
+                            ("ullAvailPageFile", ctypes.c_ulonglong),
+                            ("ullTotalVirtual", ctypes.c_ulonglong),
+                            ("ullAvailVirtual", ctypes.c_ulonglong),
+                            ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
+                        ]
+                    stat = MEMORYSTATUSEX()
+                    stat.dwLength = ctypes.sizeof(stat)
+                    ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(stat))
+                    result["ram_gb"] = round(stat.ullTotalPhys / (1024**3), 2)
+                elif self.platform == "linux":
+                    with open('/proc/meminfo', 'r') as f:
+                        for line in f:
+                            if line.startswith('MemTotal:'):
+                                kb = int(line.split()[1])
+                                result["ram_gb"] = round(kb / (1024**2), 2)
+                                break
+                elif self.platform == "darwin":
+                    mem_output = subprocess.run(
+                        ["sysctl", "-n", "hw.memsize"],
+                        capture_output=True, text=True, timeout=5, **self.subprocess_flags
+                    )
+                    if mem_output.returncode == 0:
+                        bytes = int(mem_output.stdout.strip())
+                        result["ram_gb"] = round(bytes / (1024**3), 2)
+            except:
+                pass
+            
+            # GPU (from CUDA detection or system)
+            cuda_info = self.detect_cuda()
+            if cuda_info["found"] and cuda_info["gpus"]:
+                gpu = cuda_info["gpus"][0]
+                result["gpu"]["found"] = True
+                result["gpu"]["vendor"] = "NVIDIA"
+                result["gpu"]["model"] = gpu.get("name", "Unknown")
+                # Parse memory
+                try:
+                    mem_str = gpu.get("memory", "")
+                    if "MiB" in mem_str:
+                        mem_mib = int(mem_str.replace("MiB", "").strip())
+                        result["gpu"]["memory_gb"] = round(mem_mib / 1024, 2)
+                except:
+                    pass
+            
+            # Disk space (check current directory)
+            try:
+                if self.platform == "windows":
+                    import ctypes
+                    free_bytes = ctypes.c_ulonglong(0)
+                    ctypes.windll.kernel32.GetDiskFreeSpaceExW(
+                        ctypes.c_wchar_p(os.getcwd()),
+                        ctypes.pointer(ctypes.c_ulonglong()),
+                        ctypes.pointer(ctypes.c_ulonglong()),
+                        ctypes.pointer(free_bytes)
+                    )
+                    result["disk_space_gb"] = round(free_bytes.value / (1024**3), 2)
+                else:
+                    import shutil
+                    stat = shutil.disk_usage(os.getcwd())
+                    result["disk_space_gb"] = round(stat.free / (1024**3), 2)
+            except:
+                pass
+            
+            return result
+        except Exception as e:
+            import traceback
+            from pathlib import Path
+            log_dir = Path(__file__).parent.parent / ".cursor"
+            log_dir.mkdir(parents=True, exist_ok=True)
+            try:
+                with (log_dir / "debug.log").open("a", encoding="utf-8") as log_file:
+                    import json
+                    import time
+                    log_file.write(json.dumps({"id": f"log_{int(time.time() * 1000)}_detect_hardware_error", "timestamp": int(time.time() * 1000), "location": "system_detector.py:594", "message": "Exception in detect_hardware", "data": {"error_type": type(e).__name__, "error_msg": str(e), "traceback": traceback.format_exc()}, "sessionId": "debug-session", "runId": "run1", "hypothesisId": "A"}) + "\n")
+            except Exception:
+                pass
+            result["error"] = str(e)
+            result["traceback"] = traceback.format_exc()
+            return result
     
     def detect_vcredist(self) -> Dict:
         """Detect Visual C++ Redistributables (Windows only)"""

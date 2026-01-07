@@ -1,14 +1,19 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import sys
 import os
+import shutil
+import json
+from functools import partial
+from datetime import datetime
 from pathlib import Path
+from typing import Optional
 
-from PySide6.QtCore import Qt, QProcess, QTimer, QThread, Signal, QProcessEnvironment, QRect, QSize
+from PySide6.QtCore import Qt, QProcess, QTimer, QThread, Signal, QProcessEnvironment, QRect, QSize, QEvent, QObject, QPoint
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QTabWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QLineEdit, QPushButton, QFileDialog, QComboBox, QTextEdit, QPlainTextEdit,
-    QSpinBox, QDoubleSpinBox, QMessageBox, QListWidget, QListWidgetItem, QSplitter, QToolBar, QScrollArea, QGridLayout, QFrame, QProgressBar, QSizePolicy, QTabBar, QStyleOptionTab, QStyle, QStackedWidget, QGroupBox
+    QSpinBox, QDoubleSpinBox, QMessageBox, QListWidget, QListWidgetItem, QSplitter, QToolBar, QScrollArea, QGridLayout, QFrame, QProgressBar, QSizePolicy, QTabBar, QStyleOptionTab, QStyle, QStackedWidget, QGroupBox, QInputDialog, QCheckBox
 )
 from PySide6.QtGui import QAction, QIcon, QFont, QMouseEvent, QCursor, QPixmap
 
@@ -18,8 +23,9 @@ USE_HYBRID_FRAME = os.getenv("USE_HYBRID_FRAME", "1") == "1"
 
 from desktop_app.model_card_widget import ModelCard, DownloadedModelCard
 from desktop_app.training_widgets import MetricCard
-from desktop_app.chat_widget import ChatWidget
 from desktop_app.splash_screen import SplashScreen
+from desktop_app.pages.server_page import ServerPage
+from desktop_app.pages.mcp_page import MCPPage
 
 from system_detector import SystemDetector
 from smart_installer import SmartInstaller
@@ -31,7 +37,8 @@ from core.training import TrainingConfig, default_output_dir, build_finetune_cmd
 from core.inference import InferenceConfig, build_run_adapter_cmd
 
 
-APP_TITLE = "🤖 LLM Fine-tuning Studio"
+_APP_BUILD = datetime.fromtimestamp(Path(__file__).stat().st_mtime).strftime("%y%m%d-%H%M%S")
+APP_TITLE = f"🤖 LLM Fine-tuning Studio [{_APP_BUILD}]"
 
 
 class InstallerThread(QThread):
@@ -45,6 +52,43 @@ class InstallerThread(QThread):
     
     def run(self):
         try:
+            # For repair, use InstallerV2 for targeted repair
+            if self.install_type == "repair":
+                self.log_output.emit("Starting targeted repair process...")
+                self.log_output.emit("This will only fix broken/missing packages without reinstalling everything")
+                
+                # Import and run InstallerV2 repair
+                from installer_v2 import InstallerV2
+                from pathlib import Path
+                
+                # Explicitly target LLM/.venv (not bootstrap/.venv)
+                llm_root = Path(__file__).parent.parent
+                target_venv = llm_root / ".venv"
+                
+                self.log_output.emit(f"Target environment: {target_venv}")
+                
+                installer_v2 = InstallerV2(root_dir=llm_root)
+                
+                # Redirect logs
+                original_log = installer_v2.log
+                def gui_log(message):
+                    # Ensure message is safe for the log output
+                    try:
+                        self.log_output.emit(message)
+                    except Exception:
+                        pass
+                    
+                    # Original log already has safety for print() now
+                    original_log(message)
+                
+                installer_v2.log = gui_log
+                
+                success = installer_v2.repair()
+                self.log_output.emit(f"Repair completed with result: {success}")
+                self.finished_signal.emit(success)
+                return
+            
+            # For all other operations, use SmartInstaller
             installer = SmartInstaller()
             
             # Redirect installer logs to GUI
@@ -63,13 +107,12 @@ class InstallerThread(QThread):
                 success = installer.install_pytorch()
             elif self.install_type == "dependencies":
                 success = installer.install_dependencies()
-            elif self.install_type == "repair":
-                self.log_output.emit("Starting repair process...")
-                # Use the current Python executable (should be venv Python if running from venv)
+            elif self.install_type == "uninstall":
+                self.log_output.emit("Starting uninstallation process...")
                 python_exe = sys.executable
                 self.log_output.emit(f"Using Python: {python_exe}")
-                success = installer.repair_all(python_executable=python_exe)
-                self.log_output.emit(f"Repair completed with result: {success}")
+                success = installer.uninstall_all(python_executable=python_exe)
+                self.log_output.emit(f"Uninstallation completed with result: {success}")
             else:  # "all"
                 success = installer.install()
             
@@ -84,6 +127,50 @@ class InstallerThread(QThread):
             self.finished_signal.emit(False)
 
 
+class PipPackageThread(QThread):
+    """Thread for running a single pip install/uninstall without freezing UI."""
+    log_output = Signal(str)
+    finished_signal = Signal(bool)
+
+    def __init__(self, action: str, package_spec: str, python_exe: str | None = None):
+        super().__init__()
+        self.action = action  # "install" | "uninstall"
+        self.package_spec = package_spec
+        self.python_exe = python_exe or sys.executable
+
+    def run(self):
+        import subprocess
+        try:
+            if self.action == "uninstall":
+                cmd = [self.python_exe, "-m", "pip", "uninstall", "-y", self.package_spec]
+            else:
+                # Install/update a single package only; do NOT resolve deps (to avoid cascading reinstalls).
+                cmd = [self.python_exe, "-m", "pip", "install", "--no-deps", "--no-cache-dir", self.package_spec]
+
+            self.log_output.emit(f"Running: {' '.join(cmd)}")
+
+            proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+                universal_newlines=True,
+            )
+            assert proc.stdout is not None
+            for line in proc.stdout:
+                line = line.rstrip()
+                if line:
+                    self.log_output.emit(line)
+            rc = proc.wait()
+            self.finished_signal.emit(rc == 0)
+        except Exception as e:
+            import traceback
+            self.log_output.emit(f"[ERROR] pip task failed: {e}")
+            self.log_output.emit(traceback.format_exc())
+            self.finished_signal.emit(False)
+
+
 class SystemDetectThread(QThread):
     """Thread for running system detection without freezing UI."""
     detected = Signal(dict)        # system_info dict
@@ -92,11 +179,16 @@ class SystemDetectThread(QThread):
     def run(self):
         try:
             detector = SystemDetector()
+            python_info = detector.detect_python()
+            cuda_info = detector.detect_cuda()
+            pytorch_info = detector.detect_pytorch()
+            hardware_info = detector.detect_hardware()
+            
             system_info = {
-                "python": detector.detect_python(),
-                "cuda": detector.detect_cuda(),
-                "pytorch": detector.detect_pytorch(),
-                "hardware": detector.detect_hardware(),
+                "python": python_info,
+                "cuda": cuda_info,
+                "pytorch": pytorch_info,
+                "hardware": hardware_info,
             }
             self.detected.emit(system_info)
         except Exception as e:
@@ -139,6 +231,133 @@ class DownloadThread(QThread):
             
         except Exception as e:
             self.error.emit(str(e))
+
+
+class PackageCard(QFrame):
+    """Modern, polished card widget for displaying a package with version info and status."""
+    clicked = Signal(str)  # Emits package name when clicked
+    
+    def __init__(self, pkg_name, required_version, installed_version, is_installed, status, status_color, status_text, description, parent=None):
+        super().__init__(parent)
+        self.pkg_name = pkg_name
+        self.required_version = required_version
+        self.installed_version = installed_version
+        self.is_installed = is_installed
+        self.status_text = status_text
+        self.status_color = status_color
+        self.description = description
+        
+        self.setFrameShape(QFrame.NoFrame)
+        self.setMinimumHeight(140)
+        self.setMaximumHeight(250)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
+        self.setCursor(Qt.PointingHandCursor)
+        self._setup_style(False)
+        
+        layout = QVBoxLayout(self)
+        layout.setSpacing(8)
+        layout.setContentsMargins(18, 16, 18, 16)
+        
+        # Header: Name + Status badge
+        header = QHBoxLayout()
+        header.setSpacing(12)
+        
+        name_label = QLabel(pkg_name)
+        name_label.setWordWrap(True)
+        name_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        name_label.setStyleSheet("""
+            font-size: 15pt; 
+            font-weight: 700; 
+            color: #ffffff; 
+            background: transparent;
+            letter-spacing: 0.5px;
+        """)
+        header.addWidget(name_label, 1)
+        header.addStretch()
+        
+        # Status badge with rounded background
+        status_badge = QLabel(status_text)
+        status_badge.setStyleSheet(f"""
+            background: {status_color}33;
+            color: {status_color};
+            padding: 4px 12px;
+            border-radius: 12px;
+            font-size: 9pt;
+            font-weight: 600;
+            border: 1px solid {status_color}66;
+        """)
+        header.addWidget(status_badge)
+        layout.addLayout(header)
+        
+        # Version info - vertical layout for proper wrapping
+        if installed_version:
+            inst_label = QLabel(f"Installed: {installed_version}")
+            inst_label.setWordWrap(True)
+            inst_label.setStyleSheet(f"color: {status_color}; font-size: 10pt; font-weight: 500; background: transparent;")
+            layout.addWidget(inst_label)
+        else:
+            inst_label = QLabel("Not installed")
+            inst_label.setWordWrap(True)
+            inst_label.setStyleSheet("color: #888; font-size: 10pt; background: transparent;")
+            layout.addWidget(inst_label)
+        
+        if required_version:
+            req_label = QLabel(f"Required: {required_version}")
+            req_label.setWordWrap(True)
+            req_label.setStyleSheet("color: #aaa; font-size: 9pt; background: transparent;")
+            layout.addWidget(req_label)
+        
+        # Description
+        if description:
+            desc = QLabel(description)
+            desc.setWordWrap(True)
+            desc.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+            desc.setStyleSheet("""
+                color: #b0b0b0; 
+                font-size: 10pt; 
+                background: transparent;
+                line-height: 1.4;
+                margin-top: 4px;
+            """)
+            layout.addWidget(desc)
+        
+        layout.addStretch()
+
+    def _setup_style(self, selected=False):
+        if selected:
+            self.setStyleSheet(f"""
+                PackageCard {{
+                    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                        stop:0 rgba(102, 126, 234, 0.15), stop:1 rgba(118, 75, 162, 0.15));
+                    border: 2px solid {self.status_color};
+                    border-radius: 12px;
+                    padding: 0px;
+                }}
+            """)
+        else:
+            self.setStyleSheet(f"""
+                PackageCard {{
+                    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                        stop:0 rgba(40, 40, 55, 0.6), stop:1 rgba(25, 25, 35, 0.6));
+                    border: 1px solid rgba(102, 126, 234, 0.2);
+                    border-radius: 12px;
+                    padding: 0px;
+                }}
+                PackageCard:hover {{
+                    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                        stop:0 rgba(60, 60, 80, 0.8), stop:1 rgba(40, 40, 55, 0.8));
+                    border: 1px solid rgba(102, 126, 234, 0.5);
+                    transform: translateY(-2px);
+                }}
+            """)
+
+    def mousePressEvent(self, event: QMouseEvent):
+        if event.button() == Qt.LeftButton:
+            self.clicked.emit(self.pkg_name)
+        super().mousePressEvent(event)
+
+    def set_selected(self, selected: bool):
+        self._setup_style(selected)
 
 
 # Dark theme stylesheet with gradient accents
@@ -764,6 +983,10 @@ class MainWindow(QMainWindow):
             splash.update_progress(5, "Initializing model checker", "")
         self.model_checker = ModelIntegrityChecker()
 
+        # App shutdown coordination (stop server first, then exit)
+        self._shutdown_in_progress = False
+        self._shutdown_force_timer = None
+
         # IMPORTANT:
         # - If splash is provided (slow path): do full detection synchronously with UI updates.
         # - If splash is None (fast path): do NOT run detection here (it can take minutes and freeze at 50%).
@@ -842,6 +1065,8 @@ class MainWindow(QMainWindow):
         # Background detection state (fast path uses this to populate real values)
         self._bg_detect_thread: SystemDetectThread | None = None
         self._bg_detect_started: bool = False
+        self._home_tab_needs_update: bool = False
+        self._rebuilding_home_tab: bool = False
 
         # Create a beautiful unified header
         header_widget = QFrame()
@@ -1135,12 +1360,14 @@ class MainWindow(QMainWindow):
         self.download_btn = QPushButton("📥 Download")
         self.test_btn = QPushButton("🧪 Test")
         self.logs_btn = QPushButton("📊 Logs")
+        self.server_btn = QPushButton("🖧 Server")
+        self.mcp_btn = QPushButton("🧩 MCP")
         self.requirements_btn = QPushButton("🔧")  # Tool icon only
         self.info_btn = QPushButton("ℹ️ Info")
         
         # Navigation buttons will be styled by theme system
         
-        for btn in [self.home_btn, self.train_btn, self.download_btn, self.test_btn, self.logs_btn, self.requirements_btn, self.info_btn]:
+        for btn in [self.home_btn, self.train_btn, self.download_btn, self.test_btn, self.logs_btn, self.server_btn, self.mcp_btn, self.requirements_btn, self.info_btn]:
             btn.setCheckable(True)
             # Navigation buttons will be styled by theme system
         
@@ -1152,13 +1379,15 @@ class MainWindow(QMainWindow):
         navbar_layout.addWidget(self.train_btn)
         navbar_layout.addWidget(self.download_btn)
         navbar_layout.addWidget(self.test_btn)
-        navbar_layout.addWidget(self.logs_btn)
+        navbar_layout.addWidget(self.server_btn)
+        navbar_layout.addWidget(self.mcp_btn)
         
         # Add stretch to consume remaining space
         navbar_layout.addStretch(1)
         
-        # Add Requirements and Info buttons on far right
+        # Add Requirements, Logs and Info buttons on far right
         navbar_layout.addWidget(self.requirements_btn)
+        navbar_layout.addWidget(self.logs_btn)
         navbar_layout.addWidget(self.info_btn)
         
         main_layout.addWidget(navbar)
@@ -1174,6 +1403,9 @@ class MainWindow(QMainWindow):
         tabs.addTab(self._build_models_tab(), "Download")
         tabs.addTab(self._build_test_tab(), "Test")
         tabs.addTab(self._build_logs_tab(), "Logs")
+        self.server_page = ServerPage(self)
+        tabs.addTab(self.server_page, "Server")
+        tabs.addTab(MCPPage(self), "MCP")
         tabs.addTab(self._build_requirements_tab(), "Requirements")
         tabs.addTab(self._build_info_tab(), "Info")
         
@@ -1183,11 +1415,14 @@ class MainWindow(QMainWindow):
         self.download_btn.clicked.connect(lambda: self._switch_tab(tabs, 2))
         self.test_btn.clicked.connect(lambda: self._switch_tab(tabs, 3))
         self.logs_btn.clicked.connect(lambda: self._switch_tab(tabs, 4))
-        self.requirements_btn.clicked.connect(lambda: self._switch_tab(tabs, 5))
-        self.info_btn.clicked.connect(lambda: self._switch_tab(tabs, 6))
+        self.server_btn.clicked.connect(lambda: self._switch_tab(tabs, 5))
+        self.mcp_btn.clicked.connect(lambda: self._switch_tab(tabs, 6))
+        self.requirements_btn.clicked.connect(lambda: self._switch_tab(tabs, 7))
+        self.info_btn.clicked.connect(lambda: self._switch_tab(tabs, 8))
         
         # Also connect to tab widget's currentChanged signal to handle programmatic changes
         tabs.currentChanged.connect(self._update_frame_corner_br)
+        tabs.currentChanged.connect(self._on_tab_changed)
         
         # Set Home as default
         self.home_btn.setChecked(True)
@@ -1603,6 +1838,38 @@ class MainWindow(QMainWindow):
             print(f"Unexpected error in mouseReleaseEvent: {e}")
         
         super().mouseReleaseEvent(event)
+
+    def closeEvent(self, event):
+        """
+        When user clicks the window X:
+        1) trigger server stop
+        2) wait 2.5s
+        3) close
+        """
+        # If we're already in the final close pass, allow it.
+        if getattr(self, "_shutdown_in_progress", False):
+            event.accept()
+            return
+
+        print("[DEBUG] closeEvent triggered - shutting down server...")
+        server_page = getattr(self, "server_page", None)
+        if server_page:
+            try:
+                # Trigger the same logic as the "Stop Server" button
+                server_page.request_stop()
+                print("[DEBUG] Server stop requested")
+            except Exception as e:
+                print(f"[DEBUG] Error requesting server stop: {e}")
+
+        # Mark that we are shutting down
+        self._shutdown_in_progress = True
+        
+        # Prevent immediate close
+        event.ignore()
+        
+        # Wait exactly 2.5s then force close
+        print("[DEBUG] Waiting 2.5s before app exit...")
+        QTimer.singleShot(2500, self.close)
     
     def eventFilter(self, obj, event) -> bool:
         """Event filter to catch mouse events for window resizing from child widgets"""
@@ -1895,17 +2162,59 @@ class MainWindow(QMainWindow):
         else:
             self.showFullScreen()
     
+    def _on_tab_changed(self, index: int):
+        """Update UI when tabs are switched."""
+        # Handle corner image update
+        self._update_frame_corner_br(index)
+        
+        # index 0 is Home tab
+        if index == 0 and self._home_tab_needs_update:
+            # Home tab is now visible and needs update
+            QTimer.singleShot(100, self._rebuild_home_tab)
+            
+        # index 7 is Requirements tab
+        elif index == 7:
+            self._refresh_requirements_grid()
+
     def _switch_tab(self, tab_widget: QTabWidget, index: int):
         """Switch to a tab and update button states"""
         tab_widget.setCurrentIndex(index)
         
         # Update button checked states
-        buttons = [self.home_btn, self.train_btn, self.download_btn, self.test_btn, self.logs_btn, self.requirements_btn, self.info_btn]
+        buttons = [self.home_btn, self.train_btn, self.download_btn, self.test_btn, self.logs_btn, self.server_btn, self.mcp_btn, self.requirements_btn, self.info_btn]
         for i, btn in enumerate(buttons):
             btn.setChecked(i == index)
         
         # Update corner_br image based on current tab
         self._update_frame_corner_br(index)
+
+    def _rebuild_home_tab(self):
+        """Safely rebuild Home tab with latest detection results."""
+        try:
+            if not hasattr(self, "tabs") or self.tabs is None or self.tabs.count() == 0:
+                return
+            
+            # Prevent multiple simultaneous rebuilds
+            if hasattr(self, "_rebuilding_home_tab") and self._rebuilding_home_tab:
+                return
+            self._rebuilding_home_tab = True
+            
+            current_index = self.tabs.currentIndex()
+            # Rebuild Home tab (index 0)
+            self.tabs.removeTab(0)
+            self.tabs.insertTab(0, self._build_home_tab(), "🏠 Home")
+            # Restore current tab if it wasn't Home
+            if current_index != 0:
+                self.tabs.setCurrentIndex(current_index)
+            else:
+                self.tabs.setCurrentIndex(0)
+            
+            self._home_tab_needs_update = False
+            self._rebuilding_home_tab = False
+        except Exception as e:
+            self._log_to_app_log(f"[ERROR] Failed to rebuild Home tab: {e}")
+            if hasattr(self, "_rebuilding_home_tab"):
+                self._rebuilding_home_tab = False
     
     def _update_frame_corner_br(self, tab_index: int) -> None:
         """Update the frame's corner_br image based on the current tab."""
@@ -1915,14 +2224,17 @@ class MainWindow(QMainWindow):
             return
         
         # Map tab indices to corner_br image names
+        # All corner images are sized to 150px width (height adaptable) by hybrid_frame system
         tab_to_image = {
             0: "corner_br_owl_coding",      # Home
             1: "corner_br_owl_training",     # Train
             2: "corner_br_owl_models",       # Download
             3: "corner_br_owl_chat",        # Test
             4: "corner_br_owl_logs",         # Logs
-            5: "corner_br_owl_tools",        # Requirements (using tools as fallback)
-            6: "corner_br_owl_thanks",       # Info
+            5: "corner_br_owl_server",       # Server
+            6: "corner_br_owl_MCP",          # MCP
+            7: "corner_br_owl_tools",        # Requirements (using tools as fallback)
+            8: "corner_br_owl_info",         # Info (changed from corner_br_owl_thanks)
         }
         
         image_name = tab_to_image.get(tab_index, "corner_br")  # Default to corner_br if not found
@@ -2255,6 +2567,8 @@ class MainWindow(QMainWindow):
                 label.setStyleSheet(f"font-size: 16pt; padding: 10px; background: {self._get_gradient_style(primary, secondary)}; color: white; border-radius: 6px;")
             elif obj_name == "modelBHeader":
                 label.setStyleSheet(f"font-size: 16pt; padding: 10px; background: {self._get_gradient_style(primary, secondary)}; color: white; border-radius: 6px;")
+            elif obj_name == "modelCHeader":
+                label.setStyleSheet(f"font-size: 16pt; padding: 10px; background: {self._get_gradient_style(primary, secondary)}; color: white; border-radius: 6px;")
             elif obj_name == "trainModelHeader":
                 label.setStyleSheet(f"font-size: 14pt; color: {primary}; border: none; padding: 0;")
             # Home tab labels
@@ -2310,10 +2624,9 @@ class MainWindow(QMainWindow):
                 detail_color = "#666666" if not self.dark_mode else "#888888"
                 label.setStyleSheet(f"background: transparent; color: {detail_color}; font-size: 10pt;")
         
-        # Update chat widgets theme
-        if hasattr(self, 'chat_widgets'):
-            for chat_widget in self.chat_widgets:
-                chat_widget.set_theme(self.dark_mode)
+        # Update chat display theme
+        if hasattr(self, 'chat_display'):
+            self.chat_display.set_theme(self.dark_mode)
         
         # Update all model cards
         for card in self.model_cards:
@@ -2792,131 +3105,211 @@ class MainWindow(QMainWindow):
     # ---------------- Models (Download) tab ----------------
     def _build_models_tab(self) -> QWidget:
         w = QWidget()
-        main_layout = QHBoxLayout(w)
-        main_layout.setSpacing(20)
+        main_layout = QVBoxLayout(w)
+        main_layout.setSpacing(10)
         main_layout.setContentsMargins(15, 15, 15, 15)
         
-        # Create splitter for 2 columns
-        splitter = QSplitter(Qt.Horizontal)
+        # 1. TOP SEARCH BAR (Beautiful and prominent)
+        search_container = QFrame()
+        search_container.setObjectName("searchContainer")
+        search_container.setMinimumHeight(80)
+        search_container.setStyleSheet("""
+            QFrame#searchContainer {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, 
+                                            stop:0 rgba(102, 126, 234, 0.1), stop:1 rgba(118, 75, 162, 0.1));
+                border: 1px solid rgba(102, 126, 234, 0.3);
+                border-radius: 12px;
+            }
+        """)
+        search_h_layout = QHBoxLayout(search_container)
+        search_h_layout.setContentsMargins(20, 10, 20, 10)
+        search_h_layout.setSpacing(15)
         
-        # LEFT COLUMN: Curated Models
-        left_widget = QWidget()
-        left_layout = QVBoxLayout(left_widget)
-        left_layout.setSpacing(15)
+        search_icon = QLabel("🔍")
+        search_icon.setStyleSheet("font-size: 20pt; background: transparent;")
+        search_h_layout.addWidget(search_icon)
         
-        curated_label = QLabel("📚 Curated Models for Fine-tuning")
-        curated_label.setStyleSheet("font-size: 18pt; font-weight: bold; text-decoration: none; border: none; border-bottom: none;")
-        font = curated_label.font()
-        font.setUnderline(False)
-        curated_label.setFont(font)
-        left_layout.addWidget(curated_label)
+        self.hf_query = QLineEdit()
+        self.hf_query.setPlaceholderText("Search thousands of models on Hugging Face (e.g., Qwen2.5, Llama-3, DeepSeek)...")
+        self.hf_query.setMinimumHeight(45)
+        self.hf_query.setStyleSheet("""
+            QLineEdit {
+                background-color: rgba(255, 255, 255, 0.05);
+                border: 2px solid rgba(102, 126, 234, 0.5);
+                border-radius: 8px;
+                padding: 5px 15px;
+                font-size: 14pt;
+                color: white;
+            }
+            QLineEdit:focus {
+                border: 2px solid #764ba2;
+                background-color: rgba(255, 255, 255, 0.1);
+            }
+        """)
+        self.hf_query.returnPressed.connect(self._hf_search)
+        search_h_layout.addWidget(self.hf_query, 1)
         
-        # Scroll area for curated models
+        self.hf_search_btn = QPushButton("Search Models")
+        self.hf_search_btn.setMinimumHeight(45)
+        self.hf_search_btn.setMinimumWidth(150)
+        self.hf_search_btn.clicked.connect(self._hf_search)
+        search_h_layout.addWidget(self.hf_search_btn)
+        
+        main_layout.addWidget(search_container)
+        
+        # 2. MAIN CONTENT TABS
+        self.models_content_tabs = QTabWidget()
+        self.models_content_tabs.setStyleSheet("""
+            QTabWidget::pane {
+                border: 1px solid rgba(102, 126, 234, 0.2);
+                background: transparent;
+                border-radius: 8px;
+            }
+            QTabBar::tab {
+                background: rgba(102, 126, 234, 0.1);
+                color: #888;
+                padding: 10px 30px;
+                border-top-left-radius: 8px;
+                border-top-right-radius: 8px;
+                font-weight: bold;
+                font-size: 12pt;
+            }
+            QTabBar::tab:selected {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #667eea, stop:1 #764ba2);
+                color: white;
+            }
+        """)
+        
+        # 2a. BROWSE TAB (Curated + Search Results)
+        browse_tab = QWidget()
+        browse_layout = QVBoxLayout(browse_tab)
+        browse_layout.setContentsMargins(10, 10, 10, 10)
+        
+        self.browse_stack = QStackedWidget()
+        
+        # Curated View
+        curated_view = QWidget()
+        curated_v_layout = QVBoxLayout(curated_view)
+        
+        curated_header = QHBoxLayout()
+        curated_title = QLabel("📚 Recommended Models")
+        curated_title.setStyleSheet("font-size: 16pt; font-weight: bold; color: #667eea;")
+        curated_header.addWidget(curated_title)
+        curated_header.addStretch(1)
+        curated_v_layout.addLayout(curated_header)
+        
         curated_scroll = QScrollArea()
         curated_scroll.setWidgetResizable(True)
-        curated_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        curated_scroll.setFrameShape(QFrame.NoFrame)
+        curated_scroll.setStyleSheet("background: transparent;")
         
         self.curated_container = QWidget()
         self.curated_layout = QGridLayout(self.curated_container)
-        self.curated_layout.setSpacing(15)
+        self.curated_layout.setSpacing(20)
         self.curated_layout.setContentsMargins(5, 5, 5, 5)
         
         curated_scroll.setWidget(self.curated_container)
-        left_layout.addWidget(curated_scroll)
+        curated_v_layout.addWidget(curated_scroll)
+        self.browse_stack.addWidget(curated_view)
         
-        # RIGHT COLUMN: Downloaded Models + Search
-        right_widget = QWidget()
-        right_layout = QVBoxLayout(right_widget)
-        right_layout.setSpacing(15)
+        # Search Results View
+        search_view = QWidget()
+        search_v_layout = QVBoxLayout(search_view)
         
-        # Section 1: Downloaded Models
-        downloaded_label = QLabel("📥 Downloaded Models")
-        downloaded_label.setStyleSheet("font-size: 18pt; font-weight: bold; text-decoration: none; border: none; border-bottom: none;")
-        font = downloaded_label.font()
-        font.setUnderline(False)
-        downloaded_label.setFont(font)
-        right_layout.addWidget(downloaded_label)
+        search_results_header = QHBoxLayout()
+        self.search_results_title = QLabel("🔍 Search Results")
+        self.search_results_title.setStyleSheet("font-size: 16pt; font-weight: bold; color: #667eea;")
+        search_results_header.addWidget(self.search_results_title)
+        
+        self.back_to_curated_btn = QPushButton("← Back to Recommendations")
+        self.back_to_curated_btn.setStyleSheet("background: transparent; color: #888; font-size: 11pt;")
+        self.back_to_curated_btn.clicked.connect(lambda: self.browse_stack.setCurrentIndex(0))
+        search_results_header.addWidget(self.back_to_curated_btn)
+        search_results_header.addStretch(1)
+        search_v_layout.addLayout(search_results_header)
+        
+        search_scroll = QScrollArea()
+        search_scroll.setWidgetResizable(True)
+        search_scroll.setFrameShape(QFrame.NoFrame)
+        
+        self.search_results_container = QWidget()
+        self.search_results_layout = QGridLayout(self.search_results_container)
+        self.search_results_layout.setSpacing(20)
+        self.search_results_layout.setContentsMargins(5, 5, 5, 5)
+        
+        search_scroll.setWidget(self.search_results_container)
+        search_v_layout.addWidget(search_scroll)
+        self.browse_stack.addWidget(search_view)
+        
+        browse_layout.addWidget(self.browse_stack)
+        self.models_content_tabs.addTab(browse_tab, "🚀 Browse Models")
+        
+        # 2b. DOWNLOADED TAB
+        downloaded_tab = QWidget()
+        downloaded_layout = QVBoxLayout(downloaded_tab)
+        
+        downloaded_header = QHBoxLayout()
+        downloaded_title = QLabel("📥 My Local Models")
+        downloaded_title.setStyleSheet("font-size: 16pt; font-weight: bold; color: #667eea;")
+        downloaded_header.addWidget(downloaded_title)
+        downloaded_header.addStretch(1)
+        
+        refresh_btn = QPushButton("🔄 Refresh List")
+        refresh_btn.clicked.connect(self._refresh_models)
+        downloaded_header.addWidget(refresh_btn)
+        downloaded_layout.addLayout(downloaded_header)
         
         downloaded_scroll = QScrollArea()
         downloaded_scroll.setWidgetResizable(True)
-        downloaded_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        downloaded_scroll.setMinimumHeight(200)
-        # Increased max height to accommodate larger fonts and more content
-        downloaded_scroll.setMaximumHeight(600)
+        downloaded_scroll.setFrameShape(QFrame.NoFrame)
         
         self.downloaded_container = QWidget()
-        self.downloaded_layout = QVBoxLayout(self.downloaded_container)
-        self.downloaded_layout.setSpacing(10)
+        self.downloaded_layout = QGridLayout(self.downloaded_container) # Use grid for consistency
+        self.downloaded_layout.setSpacing(20)
         self.downloaded_layout.setContentsMargins(5, 5, 5, 5)
-        self.downloaded_layout.addStretch(1)
         
         downloaded_scroll.setWidget(self.downloaded_container)
-        right_layout.addWidget(downloaded_scroll)
+        downloaded_layout.addWidget(downloaded_scroll)
         
-        # Section 2: Search Hugging Face
-        search_label = QLabel("🔍 Search Hugging Face")
-        search_label.setStyleSheet("font-size: 18pt; font-weight: bold; text-decoration: none; border: none; border-bottom: none;")
-        font = search_label.font()
-        font.setUnderline(False)
-        search_label.setFont(font)
-        right_layout.addWidget(search_label)
+        self.models_content_tabs.addTab(downloaded_tab, "💾 Downloaded")
         
-        search_row = QHBoxLayout()
-        self.hf_query = QLineEdit()
-        self.hf_query.setPlaceholderText("Search models (e.g., Qwen2.5 bnb 4bit)")
-        self.hf_search_btn = QPushButton("Search")
-        self.hf_search_btn.clicked.connect(self._hf_search)
-        search_row.addWidget(self.hf_query)
-        search_row.addWidget(self.hf_search_btn)
-        right_layout.addLayout(search_row)
-
-        self.hf_results = QListWidget()
-        self.hf_results.setMaximumHeight(350)
-        right_layout.addWidget(self.hf_results)
-
-        dl_row = QHBoxLayout()
+        main_layout.addWidget(self.models_content_tabs)
+        
+        # 3. BOTTOM STATUS & CONFIG
+        bottom_row = QHBoxLayout()
+        
+        # Download path config
+        path_frame = QFrame()
+        path_frame.setStyleSheet("background: rgba(0,0,0,0.2); border-radius: 6px; padding: 2px;")
+        path_layout = QHBoxLayout(path_frame)
+        path_layout.setContentsMargins(10, 5, 10, 5)
+        path_layout.addWidget(QLabel("📂 Download Path:"))
         self.hf_target_dir = QLineEdit(str(self.root / "models"))
-        self.hf_browse_btn = QPushButton("Browse…")
+        self.hf_target_dir.setStyleSheet("background: transparent; border: none;")
+        path_layout.addWidget(self.hf_target_dir, 1)
+        self.hf_browse_btn = QPushButton("Browse")
         self.hf_browse_btn.clicked.connect(self._browse_hf_target)
-        self.hf_download_btn = QPushButton("Download Selected")
-        self.hf_download_btn.clicked.connect(self._hf_download_selected)
-        dl_row.addWidget(QLabel("Download to:"))
-        dl_row.addWidget(self.hf_target_dir, 2)
-        dl_row.addWidget(self.hf_browse_btn)
-        dl_row.addWidget(self.hf_download_btn)
-        right_layout.addLayout(dl_row)
-
+        path_layout.addWidget(self.hf_browse_btn)
+        bottom_row.addWidget(path_frame, 1)
+        
+        # Status message (collapsed by default)
         self.models_status = QPlainTextEdit()
         self.models_status.setReadOnly(True)
-        self.models_status.setMaximumBlockCount(500)
-        self.models_status.setMaximumHeight(220)
-        right_layout.addWidget(self.models_status)
+        self.models_status.setPlaceholderText("Download status and logs will appear here...")
+        self.models_status.setMaximumHeight(80)
+        bottom_row.addWidget(self.models_status, 1)
         
-        # Refresh button at bottom
-        refresh_btn = QPushButton("🔄 Refresh Models")
-        refresh_btn.setMaximumWidth(200)
-        refresh_btn.clicked.connect(self._refresh_models)
-        right_layout.addWidget(refresh_btn)
+        main_layout.addLayout(bottom_row)
         
-        # Add to splitter
-        splitter.addWidget(left_widget)
-        splitter.addWidget(right_widget)
+        # Store model cards for theme updates
+        self.model_cards = []
+        self.downloaded_model_cards = []
+        self.search_model_cards = []
         
-        # Right column = EXACTLY 1/4 width, Left = 3/4
-        right_widget.setMaximumWidth(400)  # Cap the right side
-        splitter.setStretchFactor(0, 3)
-        splitter.setStretchFactor(1, 1)
+        # Track active downloads
+        self.active_downloads = {}  # model_id -> (thread, card)
         
-        # Apply actual 3:1 ratio after widget is shown
-        def _apply_download_split():
-            w = splitter.width() or 1400
-            right_w = int(w * 0.25)  # Exactly 1/4
-            left_w = w - right_w      # The rest (3/4)
-            splitter.setSizes([left_w, right_w])
-        
-        QTimer.singleShot(0, _apply_download_split)
-        
-        main_layout.addWidget(splitter)
+        return w
         
         # Store model cards for theme updates
         self.model_cards = []
@@ -2930,7 +3323,7 @@ class MainWindow(QMainWindow):
     def _refresh_models(self) -> None:
         """Refresh all models - curated and downloaded"""
         # Clear existing cards
-        while self.downloaded_layout.count() > 1:  # Keep stretch
+        while self.downloaded_layout.count():
             item = self.downloaded_layout.takeAt(0)
             if item.widget():
                 item.widget().deleteLater()
@@ -2949,29 +3342,40 @@ class MainWindow(QMainWindow):
             for model_status in incomplete_models:
                 self._log_models(f"   ✗ {model_status.model_name} - Missing: {', '.join(model_status.missing_files)}")
         
-        # Downloaded models (vertical list on right)
+        # Downloaded models (Grid layout)
         models_dir = self.root / "models"
-        if models_dir.exists():
-            for model_dir in sorted(models_dir.iterdir()):
-                if model_dir.is_dir():
-                    model_name = model_dir.name
-                    
-                    # Check if model is complete
-                    status = self.model_checker.check_model(model_dir)
-                    if not status.is_complete:
-                        # Show as incomplete with warning
-                        size = "⚠️ INCOMPLETE"
-                        icons = "❌"
-                    else:
-                        size = get_model_size(str(model_dir))
-                        capabilities = detect_model_capabilities(model_name=model_name, model_path=str(model_dir))
-                        icons = get_capability_icons(capabilities)
-                    
-                    card = DownloadedModelCard(model_name, str(model_dir), size, icons)
-                    card.set_theme(self.dark_mode)
-                    card.selected.connect(self._on_model_selected)
-                    self.downloaded_layout.insertWidget(self.downloaded_layout.count() - 1, card)
-                    self.downloaded_model_cards.append(card)
+        models_dirs = [models_dir]
+        
+        row, col = 0, 0
+        max_cols = 3 # More columns for downloaded models since they are smaller
+        
+        for base_dir in models_dirs:
+            if base_dir.exists():
+                for model_dir in sorted(base_dir.iterdir()):
+                    if model_dir.is_dir():
+                        model_name = model_dir.name
+                        
+                        # Check if model is complete
+                        status = self.model_checker.check_model(model_dir)
+                        if not status.is_complete:
+                            size = "⚠️ INCOMPLETE"
+                            icons = "❌"
+                        else:
+                            size = get_model_size(str(model_dir))
+                            capabilities = detect_model_capabilities(model_name=model_name, model_path=str(model_dir))
+                            icons = get_capability_icons(capabilities)
+                        
+                        card = DownloadedModelCard(model_name, str(model_dir), size, icons)
+                        card.set_theme(self.dark_mode)
+                        card.selected.connect(self._on_model_selected)
+                        card.delete_clicked.connect(self._on_delete_model)
+                        self.downloaded_layout.addWidget(card, row, col)
+                        self.downloaded_model_cards.append(card)
+                        
+                        col += 1
+                        if col >= max_cols:
+                            col = 0
+                            row += 1
         
         # Curated models: 4 LATEST + 20 MOST POPULAR (2 columns)
         latest_models = [
@@ -3010,8 +3414,11 @@ class MainWindow(QMainWindow):
         for name, model_id, desc, size, is_new in all_models:
             # Check if downloaded
             model_slug = model_id.replace("/", "__")
-            model_path = models_dir / model_slug if models_dir.exists() else None
-            is_downloaded = model_path and model_path.exists()
+            is_downloaded = False
+            for base_dir in models_dirs:
+                if base_dir.exists() and (base_dir / model_slug).exists():
+                    is_downloaded = True
+                    break
             
             capabilities = detect_model_capabilities(model_id=model_id, model_name=name)
             icons = get_capability_icons(capabilities)
@@ -3030,6 +3437,79 @@ class MainWindow(QMainWindow):
     def _on_model_selected(self, model_path: str):
         """Handle downloaded model selection"""
         self._log_models(f"Selected: {model_path}")
+    
+    def _on_delete_model(self, model_path: str):
+        """Delete a downloaded model directory forcefully"""
+        path = Path(model_path)
+        model_name = path.name
+        
+        # Check if any inference process is running
+        running_procs = []
+        if hasattr(self, 'test_proc_a') and self.test_proc_a is not None: running_procs.append("Model A")
+        if hasattr(self, 'test_proc_b') and self.test_proc_b is not None: running_procs.append("Model B")
+        if hasattr(self, 'test_proc_c') and self.test_proc_c is not None: running_procs.append("Model C")
+        
+        if running_procs:
+            QMessageBox.warning(
+                self, "Model Locked",
+                f"Cannot delete model while inference is running for: {', '.join(running_procs)}.\n\n"
+                "Please stop inference before deleting."
+            )
+            return
+
+        # Confirmation dialog
+        reply = QMessageBox.question(
+            self, "Delete Model",
+            f"Are you sure you want to delete the model '{model_name}'?\n\n"
+            f"This will permanently remove all files from:\n{model_path}",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No
+        )
+        
+        if reply == QMessageBox.Yes:
+            try:
+                self._log_models(f"🗑️ Deleting model: {model_name}...")
+                
+                # Robust deletion with retries for Windows
+                import time
+                import subprocess
+                
+                success = False
+                for attempt in range(1, 4):
+                    try:
+                        if sys.platform == 'win32':
+                            # Force delete on Windows using cmd
+                            subprocess.run(['cmd', '/c', 'rmdir', '/S', '/Q', str(path)], 
+                                         capture_output=True, timeout=30)
+                        else:
+                            shutil.rmtree(path, ignore_errors=True)
+                        
+                        if not path.exists():
+                            success = True
+                            break
+                    except Exception:
+                        pass
+                    
+                    if attempt < 3:
+                        time.sleep(1)
+                
+                if success:
+                    self._log_models(f"✓ Model '{model_name}' deleted successfully.")
+                else:
+                    # Final attempt with direct shutil if path still exists
+                    if path.exists():
+                        shutil.rmtree(path)
+                    
+                    if not path.exists():
+                        self._log_models(f"✓ Model '{model_name}' deleted successfully.")
+                    else:
+                        raise RuntimeError("Directory still exists after multiple deletion attempts.")
+                
+                # Refresh all local state (Download tab cards + dropdowns)
+                self._refresh_locals()
+                    
+            except Exception as e:
+                self._log_models(f"❌ Error deleting model: {str(e)}")
+                QMessageBox.critical(self, "Error", f"Could not delete model directory:\n{str(e)}\n\nFiles may be locked by another process.")
     
     def _download_curated_model(self, model_id: str):
         """Download a curated model in background thread with progress"""
@@ -3155,33 +3635,80 @@ class MainWindow(QMainWindow):
 
     def _hf_search(self) -> None:
         q = self.hf_query.text().strip()
-        self.hf_results.clear()
         if not q:
             return
+            
+        # Switch to Search Results view
+        self.browse_stack.setCurrentIndex(1)
+        self.search_results_title.setText(f"🔍 Search Results for: '{q}'")
+        
+        # Clear existing results
+        while self.search_results_layout.count():
+            item = self.search_results_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        self.search_model_cards.clear()
+        
+        self._log_models(f"🔍 Searching Hugging Face for: {q}...")
+        
         try:
-            hits = search_hf_models(q, limit=30)
+            hits = search_hf_models(q, limit=24) # Show up to 24 results
+            
+            if not hits:
+                no_results = QLabel(f"No models found matching '{q}'")
+                no_results.setStyleSheet("font-size: 14pt; color: #888; padding: 20px;")
+                self.search_results_layout.addWidget(no_results, 0, 0)
+                return
+                
+            row, col = 0, 0
             for h in hits:
-                item = QListWidgetItem(f"{h.model_id}  | downloads={h.downloads} likes={h.likes}")
-                item.setData(Qt.UserRole, h.model_id)
-                self.hf_results.addItem(item)
-            self._log_models(f"Found {len(hits)} results for: {q}")
+                model_id = h.model_id
+                model_name = model_id.split("/")[-1]
+                
+                # Check if downloaded
+                model_slug = model_id.replace("/", "__")
+                models_dir = self.root / "models"
+                is_downloaded = (models_dir / model_slug).exists()
+                
+                capabilities = detect_model_capabilities(model_id=model_id)
+                icons = get_capability_icons(capabilities)
+                
+                # Format stats
+                dl_text = f"{h.downloads:,}" if h.downloads else "0"
+                likes_text = f"{h.likes:,}" if h.likes else "0"
+                
+                # Create card
+                card = ModelCard(
+                    model_name, 
+                    model_id, 
+                    "", # No description for search results yet
+                    "Unknown size", 
+                    icons, 
+                    is_downloaded, 
+                    downloads=dl_text, 
+                    likes=likes_text
+                )
+                card.set_theme(self.dark_mode)
+                card.download_clicked.connect(self._download_curated_model)
+                self.search_results_layout.addWidget(card, row, col)
+                self.search_model_cards.append(card)
+                
+                col += 1
+                if col >= 2: # 2 columns for search results
+                    col = 0
+                    row += 1
+                    
+            self._log_models(f"✓ Found {len(hits)} models for: {q}")
+            
         except Exception as e:
-            self._log_models(f"[ERROR] HF search failed: {e}")
+            self._log_models(f"❌ HF search failed: {e}")
+            error_label = QLabel(f"Error searching models: {str(e)}")
+            error_label.setStyleSheet("color: #f44336; font-size: 12pt;")
+            self.search_results_layout.addWidget(error_label, 0, 0)
 
     def _hf_download_selected(self) -> None:
-        item = self.hf_results.currentItem()
-        if not item:
-            QMessageBox.warning(self, "Download", "Select a model in the results list.")
-            return
-        model_id = item.data(Qt.UserRole)
-        target = Path(self.hf_target_dir.text().strip())
-        try:
-            self._log_models(f"Downloading {model_id} -> {target}")
-            dest = download_hf_model(model_id, target)
-            self._log_models(f"Download complete: {dest}")
-            self._refresh_locals()
-        except Exception as e:
-            self._log_models(f"[ERROR] Download failed: {e}")
+        """Deprecated: use individual card download buttons"""
+        pass
 
     def _log_models(self, msg: str) -> None:
         self.models_status.appendPlainText(msg)
@@ -4155,9 +4682,12 @@ class MainWindow(QMainWindow):
         proc.setProcessChannelMode(QProcess.MergedChannels)
         
         # Set UTF-8 encoding for Windows to handle emojis in transformers/unsloth output
+        # CRITICAL: Force unbuffered output for real-time GUI updates
         env = QProcessEnvironment.systemEnvironment()
         env.insert("PYTHONIOENCODING", "utf-8")
         env.insert("PYTHONUTF8", "1")
+        env.insert("PYTHONUNBUFFERED", "1")  # Force unbuffered output (even stronger than -u)
+        env.insert("PYTHONLEGACYWINDOWSSTDIO", "0")  # Use new Windows stdio for better real-time output
         
         # Set GPU selection from Train tab dropdown
         if hasattr(self, 'gpu_select') and self.gpu_select.isEnabled():
@@ -4167,7 +4697,7 @@ class MainWindow(QMainWindow):
         
         proc.setProcessEnvironment(env)
         
-        proc.readyReadStandardOutput.connect(lambda: self._append_proc_output(proc, self.train_log))
+        proc.readyReadStandardOutput.connect(lambda: self._append_training_output(proc))
         proc.errorOccurred.connect(lambda err: self._on_training_error(proc, err))
         proc.finished.connect(self._train_finished)
 
@@ -4232,14 +4762,42 @@ class MainWindow(QMainWindow):
     # ---------------- Test tab ----------------
     def _build_test_tab(self) -> QWidget:
         w = QWidget()
-        layout = QVBoxLayout(w)
-        layout.setContentsMargins(15, 15, 15, 15)
-        layout.setSpacing(15)
+        main_layout = QHBoxLayout(w)
+        main_layout.setContentsMargins(15, 15, 15, 15)
+        main_layout.setSpacing(15)
 
-        # Title
+        # LEFT COLUMN (3/4 width) - Main test interface
+        left_widget = QWidget()
+        left_layout = QVBoxLayout(left_widget)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.setSpacing(15)
+        # Store reference to layout for chat display replacement
+        self.test_left_layout = left_layout
+
+        # Title and model count selector
+        title_row = QHBoxLayout()
         test_title = QLabel("🧪 Test Models - Side-by-Side Chat")
         test_title.setStyleSheet("font-size: 18pt; font-weight: bold; text-decoration: none;")
-        layout.addWidget(test_title)
+        title_row.addWidget(test_title)
+        title_row.addStretch(1)
+        
+        # Model count selector (two round checkboxes)
+        title_row.addWidget(QLabel("Number of models:"))
+        
+        # Checkbox for 2 models
+        self.test_model_count_2 = QCheckBox("2")
+        self.test_model_count_2.setChecked(False)  # Default to 3 models
+        self.test_model_count_2.setTristate(False)
+        self.test_model_count_2.toggled.connect(self._on_model_count_2_toggled)
+        title_row.addWidget(self.test_model_count_2)
+        
+        # Checkbox for 3 models
+        self.test_model_count_3 = QCheckBox("3")
+        self.test_model_count_3.setChecked(True)  # Default to 3 models
+        self.test_model_count_3.setTristate(False)
+        self.test_model_count_3.toggled.connect(self._on_model_count_3_toggled)
+        title_row.addWidget(self.test_model_count_3)
+        left_layout.addLayout(title_row)
         
         # GPU selection for inference
         gpu_frame = QGroupBox("⚙️ Hardware Settings")
@@ -4272,63 +4830,71 @@ class MainWindow(QMainWindow):
         self.test_gpu_info.setWordWrap(True)
         gpu_layout.addWidget(self.test_gpu_info)
         
-        layout.addWidget(gpu_frame)
+        left_layout.addWidget(gpu_frame)
 
         # Side-by-side model comparison (TOP - Chat)
-        models_layout = QHBoxLayout()
-        models_layout.setSpacing(20)
+        # Headers and model selectors (outside scroll)
+        headers_layout = QHBoxLayout()
+        headers_layout.setContentsMargins(0, 0, 0, 0)  # No margins for alignment
+        headers_layout.setSpacing(6)  # 6 pixels between model headers
         
-        # MODEL A (Left)
-        model_a_widget = QWidget()
-        model_a_layout = QVBoxLayout(model_a_widget)
-        model_a_layout.setSpacing(10)
-        
-        # Header
+        # MODEL A Header and selector
+        model_a_header_widget = QWidget()
+        model_a_header_widget.setContentsMargins(0, 0, 0, 0)  # No margins for alignment
+        model_a_header_layout = QVBoxLayout(model_a_header_widget)
+        model_a_header_layout.setContentsMargins(0, 0, 0, 0)  # No margins
+        model_a_header_layout.setSpacing(6)  # 6 pixels between header and selector
         header_a = QLabel("🔵 <b>Model A</b>")
         header_a.setObjectName("modelAHeader")
         colors = self._get_theme_colors()
         header_a.setStyleSheet(f"font-size: 16pt; padding: 10px; background: {self._get_gradient_style(colors['primary'], colors['secondary'])}; color: white; border-radius: 6px;")
         self.themed_widgets["labels"].append(header_a)
-        model_a_layout.addWidget(header_a)
-        
-        # Model selection
+        model_a_header_layout.addWidget(header_a)
         self.test_model_a = QComboBox()
         self.test_model_a.setEditable(True)
-        self.test_model_a.addItem("None")
-        model_a_layout.addWidget(self.test_model_a)
+        model_a_header_layout.addWidget(self.test_model_a)
+        headers_layout.addWidget(model_a_header_widget, 1)
         
-        # Chat widget (WhatsApp style)
-        self.chat_widget_a = ChatWidget()
-        model_a_layout.addWidget(self.chat_widget_a, 1)
-        
-        models_layout.addWidget(model_a_widget, 1)
-        
-        # MODEL B (Right)
-        model_b_widget = QWidget()
-        model_b_layout = QVBoxLayout(model_b_widget)
-        model_b_layout.setSpacing(10)
-        
-        # Header
+        # MODEL B Header and selector
+        model_b_header_widget = QWidget()
+        model_b_header_widget.setContentsMargins(0, 0, 0, 0)  # No margins for alignment
+        model_b_header_layout = QVBoxLayout(model_b_header_widget)
+        model_b_header_layout.setContentsMargins(0, 0, 0, 0)  # No margins
+        model_b_header_layout.setSpacing(6)  # 6 pixels between header and selector
         header_b = QLabel("🟢 <b>Model B</b>")
         header_b.setObjectName("modelBHeader")
-        colors = self._get_theme_colors()
         header_b.setStyleSheet(f"font-size: 16pt; padding: 10px; background: {self._get_gradient_style(colors['primary'], colors['secondary'])}; color: white; border-radius: 6px;")
         self.themed_widgets["labels"].append(header_b)
-        model_b_layout.addWidget(header_b)
-        
-        # Model selection
+        model_b_header_layout.addWidget(header_b)
         self.test_model_b = QComboBox()
         self.test_model_b.setEditable(True)
-        self.test_model_b.addItem("None")
-        model_b_layout.addWidget(self.test_model_b)
+        model_b_header_layout.addWidget(self.test_model_b)
+        headers_layout.addWidget(model_b_header_widget, 1)
         
-        # Chat widget (WhatsApp style)
-        self.chat_widget_b = ChatWidget()
-        model_b_layout.addWidget(self.chat_widget_b, 1)
+        # MODEL C Header and selector (initially hidden)
+        model_c_header_widget = QWidget()
+        model_c_header_widget.setContentsMargins(0, 0, 0, 0)  # No margins for alignment
+        model_c_header_layout = QVBoxLayout(model_c_header_widget)
+        model_c_header_layout.setContentsMargins(0, 0, 0, 0)  # No margins
+        model_c_header_layout.setSpacing(6)  # 6 pixels between header and selector
+        header_c = QLabel("🟣 <b>Model C</b>")
+        header_c.setObjectName("modelCHeader")
+        header_c.setStyleSheet(f"font-size: 16pt; padding: 10px; background: {self._get_gradient_style(colors['primary'], colors['secondary'])}; color: white; border-radius: 6px;")
+        self.themed_widgets["labels"].append(header_c)
+        model_c_header_layout.addWidget(header_c)
+        self.test_model_c = QComboBox()
+        self.test_model_c.setEditable(True)
+        model_c_header_layout.addWidget(self.test_model_c)
+        headers_layout.addWidget(model_c_header_widget, 1)
+        model_c_header_widget.setVisible(True)  # Visible by default (3 models)
+        self.test_model_c_header_widget = model_c_header_widget
         
-        models_layout.addWidget(model_b_widget, 1)
+        left_layout.addLayout(headers_layout)
         
-        layout.addLayout(models_layout, 1)
+        # SYNCHRONIZED CHAT DISPLAY
+        from desktop_app.synchronized_chat_display import SynchronizedChatDisplay
+        self.chat_display = SynchronizedChatDisplay(num_models=3)  # Start with 3 models
+        left_layout.addWidget(self.chat_display, 1)
 
         # Shared prompt input area (BOTTOM)
         prompt_layout = QVBoxLayout()
@@ -4338,6 +4904,7 @@ class MainWindow(QMainWindow):
         self.test_prompt.setPlaceholderText("Type your message here...")
         self.test_prompt.setMinimumHeight(120)
         self.test_prompt.setMaximumHeight(120)
+        self.test_prompt.textChanged.connect(self._update_token_count)
         prompt_layout.addWidget(self.test_prompt)
         
         # Buttons row
@@ -4359,69 +4926,468 @@ class MainWindow(QMainWindow):
         btn_layout.addStretch(1)
         
         prompt_layout.addLayout(btn_layout)
-        layout.addLayout(prompt_layout)
+        left_layout.addLayout(prompt_layout)
+
+        # RIGHT COLUMN (1/4 width) - Instruction adjustment tools
+        right_widget = QWidget()
+        # Set minimum width to ensure content is visible, but allow expansion
+        right_widget.setMinimumWidth(360)  # Minimum to show content
+        right_widget.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
+        right_layout = QVBoxLayout(right_widget)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        right_layout.setSpacing(12)
+
+        # Model A/B selector buttons at top
+        model_selector_layout = QHBoxLayout()
+        model_selector_layout.setSpacing(5)
+        self.test_model_a_btn = QPushButton("🔵 A")
+        self.test_model_a_btn.setCheckable(True)
+        self.test_model_a_btn.setChecked(True)
+        self.test_model_a_btn.clicked.connect(lambda: self._switch_model_settings(0))
+        self.test_model_b_btn = QPushButton("🟢 B")
+        self.test_model_b_btn.setCheckable(True)
+        self.test_model_b_btn.clicked.connect(lambda: self._switch_model_settings(1))
+        self.test_model_c_btn = QPushButton("🟣 C")
+        self.test_model_c_btn.setCheckable(True)
+        self.test_model_c_btn.clicked.connect(lambda: self._switch_model_settings(2))
+        self.test_model_c_btn.setVisible(True)  # Visible by default (3 models)
+        model_selector_layout.addWidget(self.test_model_a_btn)
+        model_selector_layout.addWidget(self.test_model_b_btn)
+        model_selector_layout.addWidget(self.test_model_c_btn)
+        right_layout.addLayout(model_selector_layout)
+
+        # Stacked widget for Model A, Model B, and Model C settings
+        self.test_model_settings_stack = QStackedWidget()
+        
+        # Helper function to create model settings page
+        def create_model_settings_page(model_name: str) -> QWidget:
+            page = QWidget()
+            # Set object name first, then apply background color based on model (60% transparency)
+            page.setObjectName("modelSettingsPage")
+            if model_name == "A":
+                # Blue for Model A: rgba(0, 100, 200, 0.6)
+                page.setStyleSheet("QWidget#modelSettingsPage { background-color: rgba(0, 100, 200, 0.6); }")
+            elif model_name == "B":
+                # Green for Model B: rgba(0, 200, 100, 0.6)
+                page.setStyleSheet("QWidget#modelSettingsPage { background-color: rgba(0, 200, 100, 0.6); }")
+            else:
+                # Purple for Model C: rgba(155, 89, 182, 0.6)
+                page.setStyleSheet("QWidget#modelSettingsPage { background-color: rgba(155, 89, 182, 0.6); }")
+            
+            scroll = QScrollArea()
+            scroll.setWidgetResizable(True)
+            scroll.setFrameShape(QFrame.NoFrame)
+            # Ensure scroll area can expand properly
+            scroll.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+            scroll_content = QWidget()
+            scroll_layout = QVBoxLayout(scroll_content)
+            scroll_layout.setContentsMargins(10, 10, 10, 10)
+            scroll_layout.setSpacing(12)
+
+            # Instruction Templates - MOVED TO TOP
+            template_group = QGroupBox("📋 Instruction Templates")
+            template_layout = QVBoxLayout(template_group)
+            
+            # Template selection row
+            template_row = QHBoxLayout()
+            template_select = QComboBox()
+            template_select.addItems([
+                "None",
+                "Alpaca",
+                "Vicuna",
+                "ChatML",
+                "Llama-2",
+                "Custom"
+            ])
+            # Load saved custom instructions into this dropdown
+            self._load_saved_instructions_into_combo(template_select)
+            template_select.currentTextChanged.connect(lambda t: self._apply_instruction_template(t, system_prompt))
+            template_row.addWidget(template_select, 1)
+            
+            # Save button
+            save_btn = QPushButton("💾 Save")
+            save_btn.setToolTip("Save current system prompt as a custom instruction")
+            save_btn.clicked.connect(lambda: self._save_custom_instruction(system_prompt, template_select))
+            template_row.addWidget(save_btn)
+            template_layout.addLayout(template_row)
+            
+            scroll_layout.addWidget(template_group)
+
+            # System Prompt
+            system_group = QGroupBox("📝 System Prompt")
+            system_layout = QVBoxLayout(system_group)
+            system_prompt = QTextEdit()
+            system_prompt.setPlaceholderText("Enter system instructions...")
+            system_prompt.setMinimumHeight(200)
+            system_prompt.setMaximumHeight(300)
+            system_layout.addWidget(system_prompt)
+            scroll_layout.addWidget(system_group)
+
+            # Generation Parameters - VERTICAL LAYOUT (1 per row)
+            params_group = QGroupBox("⚙️ Generation Parameters")
+            params_layout = QVBoxLayout(params_group)
+            params_layout.setSpacing(5)
+
+            # Temperature
+            temp_layout = QHBoxLayout()
+            temp_layout.addStretch(1)
+            temp_layout.addWidget(QLabel("Temperature:"))
+            temp_label = QLabel("0.7")
+            temp_label.setMinimumWidth(40)
+            temp_layout.addWidget(temp_label)
+            temperature = QDoubleSpinBox()
+            temperature.setRange(0.0, 2.0)
+            temperature.setSingleStep(0.1)
+            temperature.setValue(0.7)
+            temperature.setDecimals(1)
+            temperature.setMinimumWidth(80)
+            temperature.valueChanged.connect(lambda v: temp_label.setText(f"{v:.1f}"))
+            temp_layout.addWidget(temperature)
+            params_layout.addLayout(temp_layout)
+
+            # Max Tokens
+            max_tokens_layout = QHBoxLayout()
+            max_tokens_layout.addStretch(1)
+            max_tokens_layout.addWidget(QLabel("Max Tokens:"))
+            def format_max_tokens(value):
+                """Format max tokens value in short form if >= 1000"""
+                if value < 1000:
+                    return str(value)
+                elif value < 1000000:
+                    # Format as K (thousands)
+                    if value % 1000 == 0:
+                        return f"{value // 1000}K"
+                    else:
+                        return f"{value / 1000:.1f}K".rstrip('0').rstrip('.')
+                else:
+                    # Format as M (millions)
+                    if value % 1000000 == 0:
+                        return f"{value // 1000000}M"
+                    else:
+                        return f"{value / 1000000:.1f}M".rstrip('0').rstrip('.')
+            
+            max_tokens_label = QLabel(format_max_tokens(512))
+            max_tokens_label.setMinimumWidth(40)
+            max_tokens_layout.addWidget(max_tokens_label)
+            max_tokens = QSpinBox()
+            max_tokens.setRange(1, 999999999)  # No practical limit
+            max_tokens.setSingleStep(32)
+            max_tokens.setValue(512)
+            max_tokens.setMinimumWidth(80)
+            max_tokens.valueChanged.connect(lambda v: max_tokens_label.setText(format_max_tokens(v)))
+            max_tokens_layout.addWidget(max_tokens)
+            params_layout.addLayout(max_tokens_layout)
+
+            # Top-p
+            top_p_layout = QHBoxLayout()
+            top_p_layout.addStretch(1)
+            top_p_layout.addWidget(QLabel("Top-p:"))
+            top_p_label = QLabel("0.9")
+            top_p_label.setMinimumWidth(40)
+            top_p_layout.addWidget(top_p_label)
+            top_p = QDoubleSpinBox()
+            top_p.setRange(0.0, 1.0)
+            top_p.setSingleStep(0.05)
+            top_p.setValue(0.9)
+            top_p.setDecimals(2)
+            top_p.setMinimumWidth(80)
+            top_p.valueChanged.connect(lambda v: top_p_label.setText(f"{v:.2f}"))
+            top_p_layout.addWidget(top_p)
+            params_layout.addLayout(top_p_layout)
+
+            # Repetition Penalty
+            rep_pen_layout = QHBoxLayout()
+            rep_pen_layout.addStretch(1)
+            rep_pen_layout.addWidget(QLabel("Repetition Penalty:"))
+            rep_pen_label = QLabel("1.0")
+            rep_pen_label.setMinimumWidth(40)
+            rep_pen_layout.addWidget(rep_pen_label)
+            repetition_penalty = QDoubleSpinBox()
+            repetition_penalty.setRange(0.0, 2.0)
+            repetition_penalty.setSingleStep(0.1)
+            repetition_penalty.setValue(1.0)
+            repetition_penalty.setDecimals(1)
+            repetition_penalty.setMinimumWidth(80)
+            repetition_penalty.valueChanged.connect(lambda v: rep_pen_label.setText(f"{v:.1f}"))
+            rep_pen_layout.addWidget(repetition_penalty)
+            params_layout.addLayout(rep_pen_layout)
+
+            scroll_layout.addWidget(params_group)
+
+            # Token Count
+            token_count = QLabel("Tokens: 0")
+            token_count.setStyleSheet("color: #888; font-size: 10pt;")
+            scroll_layout.addWidget(token_count)
+
+            scroll_layout.addStretch(1)
+            scroll.setWidget(scroll_content)
+            
+            page_layout = QVBoxLayout(page)
+            page_layout.setContentsMargins(0, 0, 0, 0)
+            page_layout.addWidget(scroll)
+            
+            # Store references for access
+            setattr(page, 'system_prompt', system_prompt)
+            setattr(page, 'temperature', temperature)
+            setattr(page, 'max_tokens', max_tokens)
+            setattr(page, 'top_p', top_p)
+            setattr(page, 'repetition_penalty', repetition_penalty)
+            setattr(page, 'template_select', template_select)
+            setattr(page, 'token_count', token_count)
+            
+            return page
+
+        # Create Model A, Model B, and Model C settings pages
+        model_a_page = create_model_settings_page("A")
+        model_b_page = create_model_settings_page("B")
+        model_c_page = create_model_settings_page("C")
+        
+        # Connect system prompt signals after pages are created
+        model_a_page.system_prompt.textChanged.connect(lambda: self._update_token_count_for_page(model_a_page))
+        model_b_page.system_prompt.textChanged.connect(lambda: self._update_token_count_for_page(model_b_page))
+        model_c_page.system_prompt.textChanged.connect(lambda: self._update_token_count_for_page(model_c_page))
+        
+        self.test_model_settings_stack.addWidget(model_a_page)
+        self.test_model_settings_stack.addWidget(model_b_page)
+        self.test_model_settings_stack.addWidget(model_c_page)
+        
+        # Store references for easy access
+        self.test_model_a_settings = model_a_page
+        self.test_model_b_settings = model_b_page
+        self.test_model_c_settings = model_c_page
+        
+        right_layout.addWidget(self.test_model_settings_stack)
+
+        # Add columns to main layout
+        # Use stretch factors to maintain ratio: left takes most space, right gets what it needs
+        # Stretch 0 for right means it only takes its preferred size, not extra space
+        main_layout.addWidget(left_widget, 1)  # Takes remaining space after right widget
+        main_layout.addWidget(right_widget, 0)  # Takes only its preferred size, no stretch
 
         # Store for theme updates
-        self.chat_widgets = [self.chat_widget_a, self.chat_widget_b]
+        self.chat_display_widget = self.chat_display
         
         # Initialize process and buffer variables
         self.test_proc_a = None
         self.test_proc_b = None
         self.inference_buffer_a = ""
         self.inference_buffer_b = ""
+        self.inference_buffer_c = ""
+
+        # Initialize default values
+        self._update_token_count()
 
         return w
     
     def _run_side_by_side_test(self) -> None:
         """Run inference on both models simultaneously"""
-        prompt = self.test_prompt.toPlainText().strip()
-        if not prompt:
+        user_prompt = self.test_prompt.toPlainText().strip()
+        if not user_prompt:
             QMessageBox.warning(self, "Test", "Please enter a prompt.")
             return
         
         model_a_text = self.test_model_a.currentText().strip()
         model_b_text = self.test_model_b.currentText().strip()
+        model_c_text = self.test_model_c.currentText().strip() if hasattr(self, 'test_model_c') else ""
         
-        if (model_a_text == "None" or model_a_text.startswith("(No models")) and \
-           (model_b_text == "None" or model_b_text.startswith("(No models")):
+        # Check if at least one model is selected
+        has_model = (
+            (not model_a_text.startswith("(No models") and model_a_text) or
+            (not model_b_text.startswith("(No models") and model_b_text) or
+            (hasattr(self, 'test_model_c') and not model_c_text.startswith("(No models") and model_c_text)
+        )
+        
+        if not has_model:
             QMessageBox.warning(self, "Test", "Please download and select at least one model from the Download tab.")
             return
         
-        # Get full paths
+        # Get full paths (only for valid model selections)
         model_a_path = None
         model_b_path = None
+        model_c_path = None
         
-        if model_a_text != "None" and not model_a_text.startswith("(No models"):
+        if not model_a_text.startswith("(No models") and model_a_text:
             idx = self.test_model_a.currentIndex()
-            model_a_path = self.test_model_a.itemData(idx)
+            path_data = self.test_model_a.itemData(idx)
+            if path_data:
+                model_a_path = str(path_data)  # Ensure it's a string
         
-        if model_b_text != "None" and not model_b_text.startswith("(No models"):
+        if not model_b_text.startswith("(No models") and model_b_text:
             idx = self.test_model_b.currentIndex()
-            model_b_path = self.test_model_b.itemData(idx)
+            path_data = self.test_model_b.itemData(idx)
+            if path_data:
+                model_b_path = str(path_data)  # Ensure it's a string
         
-        # Add user message to both chats (RIGHT side bubble)
-        if model_a_path:
-            self.chat_widget_a.add_message(prompt, is_user=True)
-        if model_b_path:
-            self.chat_widget_b.add_message(prompt, is_user=True)
+        if hasattr(self, 'test_model_c') and not model_c_text.startswith("(No models") and model_c_text:
+            idx = self.test_model_c.currentIndex()
+            path_data = self.test_model_c.itemData(idx)
+            if path_data:
+                model_c_path = str(path_data)  # Ensure it's a string
+        
+        # Get system prompts for each model
+        system_prompt_a = ""
+        if model_a_path and hasattr(self.test_model_a_settings, 'system_prompt'):
+            system_prompt_a = self.test_model_a_settings.system_prompt.toPlainText().strip()
+        
+        system_prompt_b = ""
+        if model_b_path and hasattr(self.test_model_b_settings, 'system_prompt'):
+            system_prompt_b = self.test_model_b_settings.system_prompt.toPlainText().strip()
+        
+        system_prompt_c = ""
+        if model_c_path and hasattr(self, 'test_model_c_settings') and hasattr(self.test_model_c_settings, 'system_prompt'):
+            system_prompt_c = self.test_model_c_settings.system_prompt.toPlainText().strip()
+        
+        # Keep prompts separate - system prompt will be passed separately for instruct models
+        prompt_a = user_prompt
+        prompt_b = user_prompt
+        prompt_c = user_prompt
+        
+        # Add user message to all columns on the same line
+        self.chat_display.add_user_message(user_prompt)
         
         # Run Model A
         if model_a_path:
-            self.chat_widget_a.add_message("Thinking...", is_user=False)
-            self._run_inference_a(model_a_path, prompt)
+            self.chat_display.start_model_a_response()
+            self._run_inference_a(model_a_path, prompt_a, system_prompt_a)
         
         # Run Model B
         if model_b_path:
-            self.chat_widget_b.add_message("Thinking...", is_user=False)
-            self._run_inference_b(model_b_path, prompt)
+            self.chat_display.start_model_b_response()
+            self._run_inference_b(model_b_path, prompt_b, system_prompt_b)
+        
+        # Run Model C
+        if model_c_path:
+            self.chat_display.start_model_c_response()
+            self._run_inference_c(model_c_path, prompt_c, system_prompt_c)
         
         # Clear prompt
         self.test_prompt.clear()
     
-    def _run_inference_a(self, model_path: str, prompt: str):
+    def _filter_inference_output(self, buffer_text: str) -> str:
+        """Shared filtering function for both models - removes unwanted log messages and technical output"""
+        # First check for OUTPUT marker - this is the cleanest output
+        if "--- OUTPUT ---" in buffer_text:
+            parts = buffer_text.split("--- OUTPUT ---", 1)
+            if len(parts) > 1:
+                output = parts[1].strip()
+                # If output starts with [ERROR], it's an error message - show it
+                if output.startswith("[ERROR]"):
+                    return output
+                
+                # EVEN with OUTPUT marker, we should still filter out any technical lines 
+                # that might have leaked into the output stream (e.g. from stderr)
+                lines = output.split('\n')
+                filtered_lines = []
+                technical_patterns = [
+                    '[INFO]', '[WARN]', '[OK]', '[DEBUG]', 'Loading', 'Generating...', 'it/s', '█',
+                    'Asking to truncate', 'no maximum length is provided',
+                    '--base-model', '--prompt', '--adapter-dir', '--system-prompt', # Filter arguments
+                    'Python ', 'Usage:', 'python run_adapter.py' # Filter help text
+                ]
+                for line in lines:
+                    line_stripped = line.strip()
+                    if not line_stripped:
+                        continue
+                    if any(pattern in line_stripped for pattern in technical_patterns):
+                        continue
+                    # Extra check for common log markers that might not have brackets
+                    if line_stripped.startswith(('INFO:', 'WARNING:', 'ERROR:', 'DEBUG:')) and not line_stripped.startswith('ERROR: [ERROR]'):
+                        if not line_stripped.startswith('ERROR: '): # Keep actual errors but not just the prefix
+                            continue
+                    filtered_lines.append(line_stripped)
+                return '\n'.join(filtered_lines).strip()
+        
+        # Check if this looks like a traceback or error output
+        # If we see Python traceback patterns, try to extract just the error message
+        if "Traceback (most recent call last)" in buffer_text or "File \"" in buffer_text:
+            # Look for error messages in the traceback
+            lines = buffer_text.split('\n')
+            error_lines = []
+            in_traceback = False
+            for line in lines:
+                line_stripped = line.strip()
+                if "Traceback" in line_stripped:
+                    in_traceback = True
+                    continue
+                if in_traceback and (line_stripped.startswith(('Error:', 'Exception:', 'RuntimeError:', 'ValueError:', 'TypeError:', 'AttributeError:')) or 
+                                     line_stripped.startswith('[ERROR]')):
+                    error_lines.append(line_stripped)
+                    break
+            if error_lines:
+                return f"[ERROR] {error_lines[0]}"
+            # If we can't find a clear error, return a generic message
+            return "[ERROR] An error occurred during model execution. Check logs for details."
+        
+        # Filter out log lines and technical output
+        lines = buffer_text.split('\n')
+        filtered_lines = []
+        
+        # Patterns to filter out (case-insensitive matching)
+        filter_patterns = [
+            '[INFO]', '[WARN]', '[OK]', '[DEBUG]',
+            'FutureWarning', 'UserWarning', 'TRANSFORMERS_CACHE',
+            'warnings.warn', 'DeprecationWarning', 'RuntimeWarning', 'ImportWarning',
+            'Loading tokenizer', 'Loading base model', 'Loading model', 'Loading checkpoint',
+            'Windows detected', 'Generating...', 'Generating text', 'Starting generation',
+            'Loading checkpoint shards:', 'Using device', 'Model loaded',
+            'CUDA', 'torch', 'transformers', 'device', 'dtype', 'device_map',
+            'tokenizer', 'config', 'weights', 'safetensors', '.bin', '.json',
+            'it/s', '█', '▌', '▐', '│', 'progress', 'eta', 'steps',
+            'checkpoint', 'shard', 'parameter', 'layer', 'module',
+            'return cls._from_pretrained', 'self.sp_model', 'get_spm_processor',
+            'LoadFromFile', 'SentencePieceProcessor', 'main()', '^' * 10,  # Filter sentencepiece traceback patterns
+            'Asking to truncate', 'no maximum length is provided' # Filter truncation warnings
+        ]
+        
+        for line in lines:
+            line_stripped = line.strip()
+            if not line_stripped:
+                continue
+            
+            line_lower = line_stripped.lower()
+            
+            # Skip lines that match filter patterns
+            if any(pattern.lower() in line_lower for pattern in filter_patterns):
+                continue
+            
+            # Skip lines that are just carets (^) - common in tracebacks
+            if all(c in '^ ' for c in line_stripped):
+                continue
+            
+            # Skip lines that look like file paths or Python source
+            if line_lower.startswith(('c:\\', '/', 'file:', 'path:', 'using ', 'loading ', 'return ', 'def ', 'class ', 'import ')):
+                continue
+            
+            # Skip lines that are just numbers, percentages, or progress indicators
+            line_clean = line_lower.replace(' ', '').replace('|', '').replace('%', '').replace(':', '').replace('-', '').replace('^', '')
+            if line_clean.isdigit() or (line_clean.replace('.', '').isdigit() and len(line_clean) < 10):
+                continue
+            
+            # Skip lines that are just separators or formatting
+            if all(c in '|-=_ ' for c in line_stripped):
+                continue
+            
+            # Keep everything else
+            filtered_lines.append(line_stripped)
+        
+        result = '\n'.join(filtered_lines).strip()
+        
+        # If we filtered everything out, just return empty string for now
+        # This prevents "[ERROR] Unable to parse..." from showing while the model is still loading
+        if not result:
+            return ""
+        
+        return result
+    
+    def _run_inference_a(self, model_path: str, prompt: str, system_prompt: str = ""):
         """Run inference for Model A using QProcess"""
         # Reset buffer
         self.inference_buffer_a = ""
+        
+        # Ensure model_path is a string
+        if not model_path or not isinstance(model_path, str):
+            self.chat_display.update_model_a_response("[ERROR] Invalid model path provided.")
+            return
         
         # Check if this is an adapter or base model
         from pathlib import Path
@@ -4430,28 +5396,46 @@ class MainWindow(QMainWindow):
                     (model_path_obj / "adapter_model.safetensors").exists() or \
                     (model_path_obj / "adapter_model.bin").exists()
         
-        # Detect if this is an instruct model (check if "instruct" is in the path)
+        # Detect if this is an instruct model (check if "instruct", "chat", or "-it" is in the path)
         model_path_lower = str(model_path).lower()
-        is_instruct = "instruct" in model_path_lower or "chat" in model_path_lower
+        is_instruct = "instruct" in model_path_lower or "chat" in model_path_lower or "-it" in model_path_lower
         model_type = "instruct" if is_instruct else "base"
+        
+        # Get parameters from Model A settings
+        max_tokens = 512
+        temperature = 0.7
+        if hasattr(self.test_model_a_settings, 'max_tokens'):
+            max_tokens = self.test_model_a_settings.max_tokens.value()
+        if hasattr(self.test_model_a_settings, 'temperature'):
+            temperature = self.test_model_a_settings.temperature.value()
         
         # Build command - use run_adapter.py for both base models and adapters
         cmd = [
             sys.executable, "-u", "run_adapter.py",
             "--prompt", prompt,
-            "--max-new-tokens", "512",
-            "--temperature", "0.7",
+            "--max-new-tokens", str(max_tokens),
+            "--temperature", str(temperature),
             "--model-type", model_type
         ]
         
+        # Add system prompt if provided
+        if system_prompt:
+            cmd += ["--system-prompt", system_prompt]
+        
+        # Ensure model_path is a string before adding to command
+        model_path_str = str(model_path) if model_path else ""
+        if not model_path_str:
+            self.chat_display.update_model_a_response("[ERROR] Invalid model path: path is empty.")
+            return
+        
         if is_adapter:
             # Load as adapter (requires base model + adapter)
-            cmd += ["--adapter-dir", model_path]
+            cmd += ["--adapter-dir", model_path_str]
             # TODO: Need to specify base model - for now use default
             cmd += ["--base-model", "unsloth/llama-3.2-3b-instruct-unsloth-bnb-4bit"]
         else:
             # Load as base model only
-            cmd += ["--base-model", model_path, "--no-adapter"]
+            cmd += ["--base-model", model_path_str, "--no-adapter"]
         
         # Create QProcess
         proc = QProcess(self)
@@ -4477,6 +5461,7 @@ class MainWindow(QMainWindow):
         proc.start()
         self.test_proc_a = proc
     
+    
     def _update_inference_output_a(self, proc: QProcess):
         """Update Model A chat bubble with streaming output"""
         # Read output from process
@@ -4486,51 +5471,33 @@ class MainWindow(QMainWindow):
         # Accumulate text in buffer
         self.inference_buffer_a += text
         
-        # Extract only the actual output (after "--- OUTPUT ---")
-        if "--- OUTPUT ---" in self.inference_buffer_a:
-            # Split and take everything after the marker
-            parts = self.inference_buffer_a.split("--- OUTPUT ---", 1)
-            if len(parts) > 1:
-                actual_output = parts[1].strip()
-                if actual_output:
-                    self.chat_widget_a.update_last_ai_message(actual_output)
-        else:
-            # Before we see OUTPUT marker, check if there's any useful partial response
-            # Filter out all log lines (lines starting with [INFO], [WARN], [OK], etc.)
-            lines = self.inference_buffer_a.split('\n')
-            filtered_lines = []
-            
-            for line in lines:
-                # Skip log messages and technical output
-                if any(x in line for x in [
-                    '[INFO]', '[WARN]', '[OK]', '[ERROR]',
-                    'FutureWarning', 'UserWarning', 'TRANSFORMERS_CACHE',
-                    'warnings.warn', 'DeprecationWarning', 'Loading tokenizer',
-                    'Loading base model', 'Windows detected', 'Generating...',
-                    'Loading checkpoint shards:', '|', 'it/s', '█', '▌'
-                ]):
-                    continue
-                # Keep everything else
-                if line.strip():
-                    filtered_lines.append(line)
-            
-            # Only update if we have filtered content
-            if filtered_lines:
-                clean_response = '\n'.join(filtered_lines).strip()
-                if clean_response:
-                    self.chat_widget_a.update_last_ai_message(clean_response)
+        # Use shared filtering function
+        filtered_output = self._filter_inference_output(self.inference_buffer_a)
+        if filtered_output:
+            self.chat_display.update_model_a_response(filtered_output)
     
     def _on_inference_finished_a(self):
         """Called when Model A inference finishes"""
         # Final update with complete output
         if self.inference_buffer_a.strip():
             self._update_inference_output_a(self.test_proc_a)
+            
+            # Check if after final update we still have no filtered output
+            final_filtered = self._filter_inference_output(self.inference_buffer_a)
+            if not final_filtered:
+                self.chat_display.update_model_a_response("[ERROR] Model failed to produce any valid output. Check logs for details.")
+        
         self.test_proc_a = None
     
-    def _run_inference_b(self, model_path: str, prompt: str):
+    def _run_inference_b(self, model_path: str, prompt: str, system_prompt: str = ""):
         """Run inference for Model B using QProcess"""
         # Reset buffer
         self.inference_buffer_b = ""
+        
+        # Ensure model_path is a string
+        if not model_path or not isinstance(model_path, str):
+            self.chat_display.update_model_b_response("[ERROR] Invalid model path provided.")
+            return
         
         # Check if this is an adapter or base model
         from pathlib import Path
@@ -4539,28 +5506,46 @@ class MainWindow(QMainWindow):
                     (model_path_obj / "adapter_model.safetensors").exists() or \
                     (model_path_obj / "adapter_model.bin").exists()
         
-        # Detect if this is an instruct model (check if "instruct" is in the path)
+        # Detect if this is an instruct model (check if "instruct", "chat", or "-it" is in the path)
         model_path_lower = str(model_path).lower()
-        is_instruct = "instruct" in model_path_lower or "chat" in model_path_lower
+        is_instruct = "instruct" in model_path_lower or "chat" in model_path_lower or "-it" in model_path_lower
         model_type = "instruct" if is_instruct else "base"
+        
+        # Get parameters from Model B settings
+        max_tokens = 512
+        temperature = 0.7
+        if hasattr(self.test_model_b_settings, 'max_tokens'):
+            max_tokens = self.test_model_b_settings.max_tokens.value()
+        if hasattr(self.test_model_b_settings, 'temperature'):
+            temperature = self.test_model_b_settings.temperature.value()
         
         # Build command - use run_adapter.py for both base models and adapters
         cmd = [
             sys.executable, "-u", "run_adapter.py",
             "--prompt", prompt,
-            "--max-new-tokens", "512",
-            "--temperature", "0.7",
+            "--max-new-tokens", str(max_tokens),
+            "--temperature", str(temperature),
             "--model-type", model_type
         ]
         
+        # Add system prompt if provided
+        if system_prompt:
+            cmd += ["--system-prompt", system_prompt]
+        
+        # Ensure model_path is a string before adding to command
+        model_path_str = str(model_path) if model_path else ""
+        if not model_path_str:
+            self.chat_display.update_model_b_response("[ERROR] Invalid model path: path is empty.")
+            return
+        
         if is_adapter:
             # Load as adapter (requires base model + adapter)
-            cmd += ["--adapter-dir", model_path]
+            cmd += ["--adapter-dir", model_path_str]
             # TODO: Need to specify base model - for now use default
             cmd += ["--base-model", "unsloth/llama-3.2-3b-instruct-unsloth-bnb-4bit"]
         else:
             # Load as base model only
-            cmd += ["--base-model", model_path, "--no-adapter"]
+            cmd += ["--base-model", model_path_str, "--no-adapter"]
         
         # Create QProcess
         proc = QProcess(self)
@@ -4595,322 +5580,1273 @@ class MainWindow(QMainWindow):
         # Accumulate text in buffer
         self.inference_buffer_b += text
         
-        # Extract only the actual output (after "--- OUTPUT ---")
-        if "--- OUTPUT ---" in self.inference_buffer_b:
-            # Split and take everything after the marker
-            parts = self.inference_buffer_b.split("--- OUTPUT ---", 1)
-            if len(parts) > 1:
-                actual_output = parts[1].strip()
-                if actual_output:
-                    self.chat_widget_b.update_last_ai_message(actual_output)
-        else:
-            # Before we see OUTPUT marker, check if there's any useful partial response
-            # Filter out all log lines (lines starting with [INFO], [WARN], [OK], etc.)
-            lines = self.inference_buffer_b.split('\n')
-            filtered_lines = []
-            
-            for line in lines:
-                # Skip log messages and technical output
-                if any(x in line for x in [
-                    '[INFO]', '[WARN]', '[OK]', '[ERROR]',
-                    'FutureWarning', 'UserWarning', 'TRANSFORMERS_CACHE',
-                    'warnings.warn', 'DeprecationWarning', 'Loading tokenizer',
-                    'Loading base model', 'Windows detected', 'Generating...',
-                    'Loading checkpoint shards:', '|', 'it/s', '█', '▌'
-                ]):
-                    continue
-                # Keep everything else
-                if line.strip():
-                    filtered_lines.append(line)
-            
-            # Only update if we have filtered content
-            if filtered_lines:
-                clean_response = '\n'.join(filtered_lines).strip()
-                if clean_response:
-                    self.chat_widget_b.update_last_ai_message(clean_response)
+        # Use shared filtering function
+        filtered_output = self._filter_inference_output(self.inference_buffer_b)
+        if filtered_output:
+            self.chat_display.update_model_b_response(filtered_output)
     
     def _on_inference_finished_b(self):
         """Called when Model B inference finishes"""
         # Final update with complete output
         if self.inference_buffer_b.strip():
             self._update_inference_output_b(self.test_proc_b)
+            
+            # Check if after final update we still have no filtered output
+            final_filtered = self._filter_inference_output(self.inference_buffer_b)
+            if not final_filtered:
+                self.chat_display.update_model_b_response("[ERROR] Model failed to produce any valid output. Check logs for details.")
+                
         self.test_proc_b = None
+    
+    def _run_inference_c(self, model_path: str, prompt: str, system_prompt: str = ""):
+        """Run inference for Model C using QProcess"""
+        # Reset buffer
+        if not hasattr(self, 'inference_buffer_c'):
+            self.inference_buffer_c = ""
+        else:
+            self.inference_buffer_c = ""
+        
+        # Ensure model_path is a string
+        if not model_path or not isinstance(model_path, str):
+            self.chat_display.update_model_c_response("[ERROR] Invalid model path provided.")
+            return
+        
+        # Check if this is an adapter or base model
+        from pathlib import Path
+        model_path_obj = Path(model_path)
+        is_adapter = (model_path_obj / "adapter_config.json").exists() or \
+                    (model_path_obj / "adapter_model.safetensors").exists() or \
+                    (model_path_obj / "adapter_model.bin").exists()
+        
+        # Detect if this is an instruct model (check if "instruct", "chat", or "-it" is in the path)
+        model_path_lower = str(model_path).lower()
+        is_instruct = "instruct" in model_path_lower or "chat" in model_path_lower or "-it" in model_path_lower
+        model_type = "instruct" if is_instruct else "base"
+        
+        # Get parameters from Model C settings
+        max_tokens = 512
+        temperature = 0.7
+        if hasattr(self, 'test_model_c_settings'):
+            if hasattr(self.test_model_c_settings, 'max_tokens'):
+                max_tokens = self.test_model_c_settings.max_tokens.value()
+            if hasattr(self.test_model_c_settings, 'temperature'):
+                temperature = self.test_model_c_settings.temperature.value()
+        
+        # Build command - use run_adapter.py for both base models and adapters
+        cmd = [
+            sys.executable, "-u", "run_adapter.py",
+            "--prompt", prompt,
+            "--max-new-tokens", str(max_tokens),
+            "--temperature", str(temperature),
+            "--model-type", model_type
+        ]
+        
+        # Add system prompt if provided
+        if system_prompt:
+            cmd += ["--system-prompt", system_prompt]
+        
+        # Ensure model_path is a string before adding to command
+        model_path_str = str(model_path) if model_path else ""
+        if not model_path_str:
+            self.chat_display.update_model_c_response("[ERROR] Invalid model path: path is empty.")
+            return
+        
+        if is_adapter:
+            # Load as adapter (requires base model + adapter)
+            cmd += ["--adapter-dir", model_path_str]
+            # TODO: Need to specify base model - for now use default
+            cmd += ["--base-model", "unsloth/llama-3.2-3b-instruct-unsloth-bnb-4bit"]
+        else:
+            # Load as base model only
+            cmd += ["--base-model", model_path_str, "--no-adapter"]
+        
+        # Create QProcess
+        proc = QProcess(self)
+        proc.setProgram(cmd[0])
+        proc.setArguments(cmd[1:])
+        proc.setWorkingDirectory(str(self.root))
+        proc.setProcessChannelMode(QProcess.MergedChannels)
+        
+        # Set GPU selection via environment variable
+        env = QProcessEnvironment.systemEnvironment()
+        if hasattr(self, 'test_gpu_select') and self.test_gpu_select.isEnabled():
+            selected_gpu_idx = self.test_gpu_select.currentIndex()
+            env.insert("CUDA_VISIBLE_DEVICES", str(selected_gpu_idx))
+        
+        proc.setProcessEnvironment(env)
+        
+        # Connect to read output and update last bubble
+        proc.readyReadStandardOutput.connect(
+            lambda: self._update_inference_output_c(proc)
+        )
+        proc.finished.connect(lambda: self._on_inference_finished_c())
+        
+        proc.start()
+        self.test_proc_c = proc
+    
+    def _update_inference_output_c(self, proc: QProcess):
+        """Update Model C chat bubble with streaming output"""
+        # Read output from process
+        data = proc.readAllStandardOutput()
+        text = bytes(data).decode('utf-8', errors='replace')
+        
+        # Accumulate text in buffer
+        if not hasattr(self, 'inference_buffer_c'):
+            self.inference_buffer_c = ""
+        self.inference_buffer_c += text
+        
+        # Use shared filtering function
+        filtered_output = self._filter_inference_output(self.inference_buffer_c)
+        if filtered_output:
+            self.chat_display.update_model_c_response(filtered_output)
+    
+    def _on_inference_finished_c(self):
+        """Called when Model C inference finishes"""
+        # Final update with complete output
+        if hasattr(self, 'inference_buffer_c') and self.inference_buffer_c.strip():
+            self._update_inference_output_c(self.test_proc_c)
+            
+            # Check if after final update we still have no filtered output
+            final_filtered = self._filter_inference_output(self.inference_buffer_c)
+            if not final_filtered:
+                self.chat_display.update_model_c_response("[ERROR] Model failed to produce any valid output. Check logs for details.")
+                
+        self.test_proc_c = None
+    
+    def _switch_model_settings(self, model_index: int) -> None:
+        """Switch between Model A, Model B, and Model C settings"""
+        if model_index == 0:
+            self.test_model_a_btn.setChecked(True)
+            self.test_model_b_btn.setChecked(False)
+            if hasattr(self, 'test_model_c_btn'):
+                self.test_model_c_btn.setChecked(False)
+            self.test_model_settings_stack.setCurrentIndex(0)
+        elif model_index == 1:
+            self.test_model_a_btn.setChecked(False)
+            self.test_model_b_btn.setChecked(True)
+            if hasattr(self, 'test_model_c_btn'):
+                self.test_model_c_btn.setChecked(False)
+            self.test_model_settings_stack.setCurrentIndex(1)
+        else:
+            self.test_model_a_btn.setChecked(False)
+            self.test_model_b_btn.setChecked(False)
+            self.test_model_c_btn.setChecked(True)
+            self.test_model_settings_stack.setCurrentIndex(2)
+    
+    def _on_model_count_2_toggled(self, checked: bool) -> None:
+        """Handle 2 models checkbox toggle"""
+        print(f"DEBUG: _on_model_count_2_toggled called with checked={checked}")
+        if checked:
+            # Block signals to prevent feedback loop
+            self.test_model_count_3.blockSignals(True)
+            self.test_model_count_3.setChecked(False)
+            self.test_model_count_3.blockSignals(False)
+            self._on_model_count_changed("2")
+        else:
+            # If unchecking 2, ensure 3 is checked (at least one must be checked)
+            if not self.test_model_count_3.isChecked():
+                self.test_model_count_3.blockSignals(True)
+                self.test_model_count_3.setChecked(True)
+                self.test_model_count_3.blockSignals(False)
+                self._on_model_count_changed("3")
+    
+    def _on_model_count_3_toggled(self, checked: bool) -> None:
+        """Handle 3 models checkbox toggle"""
+        print(f"DEBUG: _on_model_count_3_toggled called with checked={checked}")
+        if checked:
+            # Block signals to prevent feedback loop
+            self.test_model_count_2.blockSignals(True)
+            self.test_model_count_2.setChecked(False)
+            self.test_model_count_2.blockSignals(False)
+            self._on_model_count_changed("3")
+        else:
+            # If unchecking 3, ensure 2 is checked (at least one must be checked)
+            if not self.test_model_count_2.isChecked():
+                self.test_model_count_2.blockSignals(True)
+                self.test_model_count_2.setChecked(True)
+                self.test_model_count_2.blockSignals(False)
+                self._on_model_count_changed("2")
+    
+    def _on_model_count_changed(self, count_str: str) -> None:
+        """Handle model count change (2 or 3 models)"""
+        print(f"DEBUG: _on_model_count_changed called with count_str={count_str}")
+        count = int(count_str)
+        if count == 3:
+            print("DEBUG: Setting up for 3 models")
+            # Show Model C
+            print("DEBUG: Showing Model C widgets")
+            print(f"DEBUG: test_model_c_header_widget exists: {hasattr(self, 'test_model_c_header_widget')}")
+            print(f"DEBUG: test_model_c_btn exists: {hasattr(self, 'test_model_c_btn')}")
+            self.test_model_c_header_widget.setVisible(True)
+            self.test_model_c_btn.setVisible(True)
+            # Update button text to short form (A, B, C)
+            self.test_model_a_btn.setText("🔵 A")
+            self.test_model_b_btn.setText("🟢 B")
+            self.test_model_c_btn.setText("🟣 C")
+            # Update chat display to 3 columns
+            print("DEBUG: Replacing chat display with 3-column version")
+            from desktop_app.synchronized_chat_display import SynchronizedChatDisplay
+            old_display = self.chat_display
+            # Use stored layout reference
+            if hasattr(self, 'test_left_layout'):
+                # Find index of old display in layout
+                index = self.test_left_layout.indexOf(old_display)
+                print(f"DEBUG: Old display index in layout: {index}")
+                if index == -1:
+                    print("DEBUG: WARNING: indexOf returned -1, using addWidget instead")
+                    # Remove old display
+                    self.test_left_layout.removeWidget(old_display)
+                    old_display.setParent(None)
+                    old_display.deleteLater()
+                    # Create and add new display
+                    self.chat_display = SynchronizedChatDisplay(num_models=3)
+                    self.chat_display.set_theme(self.dark_mode)
+                    self.test_left_layout.addWidget(self.chat_display, 1)
+                else:
+                    # Remove old display
+                    self.test_left_layout.removeWidget(old_display)
+                    old_display.setParent(None)
+                    old_display.deleteLater()
+                    # Create and add new display at same position
+                    self.chat_display = SynchronizedChatDisplay(num_models=3)
+                    self.chat_display.set_theme(self.dark_mode)
+                    self.test_left_layout.insertWidget(index, self.chat_display, 1)
+                self.chat_display_widget = self.chat_display
+                print("DEBUG: Chat display replaced successfully")
+            else:
+                print("DEBUG: ERROR: test_left_layout not found!")
+        else:
+            # Hide Model C
+            print("DEBUG: Hiding Model C widgets")
+            self.test_model_c_header_widget.setVisible(False)
+            # Switch to Model A if Model C was selected
+            if self.test_model_c_btn.isChecked():
+                self._switch_model_settings(0)
+            self.test_model_c_btn.setVisible(False)
+            # Update button text to full form (Model A, Model B)
+            self.test_model_a_btn.setText("🔵 Model A")
+            self.test_model_b_btn.setText("🟢 Model B")
+            # Update chat display to 2 columns
+            print("DEBUG: Replacing chat display with 2-column version")
+            from desktop_app.synchronized_chat_display import SynchronizedChatDisplay
+            old_display = self.chat_display
+            # Use stored layout reference
+            if hasattr(self, 'test_left_layout'):
+                # Find index of old display in layout
+                index = self.test_left_layout.indexOf(old_display)
+                print(f"DEBUG: Old display index in layout: {index}")
+                if index == -1:
+                    print("DEBUG: WARNING: indexOf returned -1, using addWidget instead")
+                    # Remove old display
+                    self.test_left_layout.removeWidget(old_display)
+                    old_display.setParent(None)
+                    old_display.deleteLater()
+                    # Create and add new display
+                    self.chat_display = SynchronizedChatDisplay(num_models=2)
+                    self.chat_display.set_theme(self.dark_mode)
+                    self.test_left_layout.addWidget(self.chat_display, 1)
+                else:
+                    # Remove old display
+                    self.test_left_layout.removeWidget(old_display)
+                    old_display.setParent(None)
+                    old_display.deleteLater()
+                    # Create and add new display at same position
+                    self.chat_display = SynchronizedChatDisplay(num_models=2)
+                    self.chat_display.set_theme(self.dark_mode)
+                    self.test_left_layout.insertWidget(index, self.chat_display, 1)
+                self.chat_display_widget = self.chat_display
+                print("DEBUG: Chat display replaced successfully")
+            else:
+                print("DEBUG: ERROR: test_left_layout not found!")
+        self._update_token_count()
+    
+    def _update_token_count(self) -> None:
+        """Update token count for current model settings"""
+        if not hasattr(self, 'test_model_settings_stack'):
+            return
+        current_page = self.test_model_settings_stack.currentWidget()
+        self._update_token_count_for_page(current_page)
+    
+    def _update_token_count_for_page(self, current_page=None) -> None:
+        """Update token count for a specific page"""
+        if current_page is None:
+            if not hasattr(self, 'test_model_settings_stack'):
+                return
+            current_page = self.test_model_settings_stack.currentWidget()
+        
+        if not current_page or not hasattr(current_page, 'token_count'):
+            return
+        
+        system_prompt = ""
+        if hasattr(current_page, 'system_prompt'):
+            system_prompt = current_page.system_prompt.toPlainText().strip()
+        
+        user_prompt = ""
+        if hasattr(self, 'test_prompt'):
+            user_prompt = self.test_prompt.toPlainText().strip()
+        
+        # Estimate token count (rough approximation: 1 token ≈ 4 characters)
+        total_text = system_prompt + "\n" + user_prompt if system_prompt and user_prompt else (system_prompt or user_prompt)
+        estimated_tokens = len(total_text) // 4
+        current_page.token_count.setText(f"Tokens: ~{estimated_tokens}")
+    
+    def _apply_instruction_template(self, template_name: str, system_prompt_widget: QTextEdit) -> None:
+        """Apply a predefined instruction template"""
+        if template_name == "None":
+            return
+        
+        templates = {
+            "Alpaca": "Below is an instruction that describes a task. Write a response that appropriately completes the request.",
+            "Vicuna": "A chat between a curious user and an artificial intelligence assistant. The assistant gives helpful, detailed, and polite answers to the user's questions.",
+            "ChatML": "<|im_start|>system\nYou are a helpful assistant.<|im_end|>",
+            "Llama-2": "[INST] <<SYS>>\nYou are a helpful, harmless, and honest assistant.\n<</SYS>>\n\n",
+            "Custom": ""
+        }
+        
+        if template_name in templates:
+            system_prompt_widget.setPlainText(templates[template_name])
+            self._update_token_count()
+        else:
+            # Check if it's a saved custom instruction (remove 💾 prefix if present)
+            instruction_name = template_name.replace("💾 ", "").strip()
+            saved_instructions = self._load_saved_instructions_dict()
+            if instruction_name in saved_instructions:
+                system_prompt_widget.setPlainText(saved_instructions[instruction_name])
+                self._update_token_count()
+    
+    def _get_saved_instructions_file(self) -> Path:
+        """Get the path to the saved instructions JSON file"""
+        return self.root / "saved_instructions.json"
+    
+    def _load_saved_instructions_dict(self) -> dict:
+        """Load saved custom instructions from JSON file"""
+        instructions_file = self._get_saved_instructions_file()
+        if instructions_file.exists():
+            try:
+                with open(instructions_file, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+            except (json.JSONDecodeError, IOError):
+                return {}
+        return {}
+    
+    def _load_saved_instructions_into_combo(self, combo: QComboBox) -> None:
+        """Load saved custom instructions and add them to the given combo box"""
+        saved_instructions = self._load_saved_instructions_dict()
+        
+        # Add saved custom instructions
+        for name in sorted(saved_instructions.keys()):
+            combo.addItem(f"💾 {name}")
+    
+    def _save_custom_instruction(self, system_prompt_widget: QTextEdit, template_combo: QComboBox) -> None:
+        """Save the current system prompt as a custom instruction"""
+        current_text = system_prompt_widget.toPlainText().strip()
+        
+        if not current_text:
+            QMessageBox.warning(self, "Save Instruction", "Please enter some text in the System Prompt field before saving.")
+            return
+        
+        # Get name from user
+        name, ok = QInputDialog.getText(
+            self,
+            "Save Custom Instruction",
+            "Enter a name for this instruction:",
+            text=""
+        )
+        
+        if not ok or not name.strip():
+            return
+        
+        name = name.strip()
+        
+        # Check if name already exists
+        saved_instructions = self._load_saved_instructions_dict()
+        if name in saved_instructions:
+            reply = QMessageBox.question(
+                self,
+                "Overwrite Instruction",
+                f"An instruction named '{name}' already exists. Do you want to overwrite it?",
+                QMessageBox.Yes | QMessageBox.No
+            )
+            if reply != QMessageBox.Yes:
+                return
+        
+        # Save the instruction
+        saved_instructions[name] = current_text
+        instructions_file = self._get_saved_instructions_file()
+        
+        try:
+            with open(instructions_file, 'w', encoding='utf-8') as f:
+                json.dump(saved_instructions, f, indent=2, ensure_ascii=False)
+            
+            # Reload this dropdown
+            self._load_saved_instructions_into_combo(template_combo)
+            
+            # Select the newly saved instruction
+            index = template_combo.findText(f"💾 {name}")
+            if index >= 0:
+                template_combo.setCurrentIndex(index)
+            
+            # Also reload other template dropdowns (Model A and Model B)
+            if hasattr(self, 'test_model_settings_stack'):
+                for i in range(self.test_model_settings_stack.count()):
+                    page = self.test_model_settings_stack.widget(i)
+                    if page and hasattr(page, 'template_select'):
+                        # Clear and reload
+                        combo = getattr(page, 'template_select')
+                        # Remove custom items (keep built-in)
+                        items_to_remove = []
+                        for j in range(combo.count()):
+                            text = combo.itemText(j)
+                            if text.startswith("💾 "):
+                                items_to_remove.append(j)
+                        for j in reversed(items_to_remove):
+                            combo.removeItem(j)
+                        # Add all saved instructions
+                        self._load_saved_instructions_into_combo(combo)
+            
+            QMessageBox.information(self, "Saved", f"Instruction '{name}' has been saved successfully!")
+        except IOError as e:
+            QMessageBox.critical(self, "Save Error", f"Failed to save instruction: {str(e)}")
     
     def _clear_test_chat(self) -> None:
         """Clear both chat histories"""
-        self.chat_widget_a.clear()
-        self.chat_widget_b.clear()
+        self.chat_display.clear()
         self.test_prompt.clear()
 
     # ---------------- Info/About tab ----------------
-    def _build_requirements_tab(self) -> QWidget:
-        """Build Requirements tab showing required vs installed versions (source of truth)"""
-        w = QWidget()
-        layout = QVBoxLayout(w)
-        layout.setContentsMargins(40, 30, 40, 30)
-        layout.setSpacing(20)
+    def _is_package_functional(self, pkg_name: str) -> bool:
+        """Thorough check for package functionality beyond just version presence.
         
-        # Title
-        title = QLabel("🔧 Required Packages & Versions")
-        title.setAlignment(Qt.AlignCenter)
-        title.setStyleSheet("background: transparent; color: white; font-size: 24pt; font-weight: bold; text-decoration: none;")
-        layout.addWidget(title)
+        IMPORTANT: Uses LLM/.venv Python (not bootstrap/.venv) to check packages.
+        """
+        if pkg_name not in ["torch", "triton-windows", "bitsandbytes"]:
+            return True # Assume other packages are fine if version matches
         
-        # Info text
-        info = QLabel("This is the source of truth showing required vs installed versions:")
-        info.setAlignment(Qt.AlignCenter)
-        info.setStyleSheet("background: transparent; color: #888; font-size: 11pt; margin-bottom: 20px;")
-        layout.addWidget(info)
-        
-        # IMPORTANT: This tab must be non-blocking.
-        # Do NOT call SmartInstaller.get_installation_checklist() here because it runs subprocess checks and can freeze UI.
-        
-        # Get installed versions using target Python
+        # Get the target venv Python (LLM/.venv, not bootstrap/.venv)
         try:
-            from importlib.metadata import version, PackageNotFoundError
-        except ImportError:
-            from importlib_metadata import version, PackageNotFoundError
+            target_python = self._get_target_venv_python()
+        except Exception:
+            # If we can't find target venv, fall back to current Python (bootstrap)
+            # This is not ideal but better than crashing
+            target_python = sys.executable
         
-        # Parse requirements.txt
-        requirements_file = Path(__file__).parent.parent / "requirements.txt"
-        required_packages = {}
-        if requirements_file.exists():
-            with open(requirements_file, 'r', encoding='utf-8') as f:
-                for line in f:
-                    line = line.strip()
-                    if not line or line.startswith('#'):
-                        continue
-                    # Parse package name and version spec
-                    # Handle formats like: "package==1.0.0", "package>=1.0.0", "package>=1.0.0,<2.0.0"
-                    parts = line.split(';')
-                    pkg_line = parts[0].strip()
-                    # Extract package name and version
-                    if '>=' in pkg_line or '==' in pkg_line or '<=' in pkg_line or '!=' in pkg_line or '<' in pkg_line or '>' in pkg_line:
-                        # Has version spec
-                        import re
-                        match = re.match(r'^([a-zA-Z0-9_-]+(?:\[[^\]]+\])?)(.*)$', pkg_line)
-                        if match:
-                            pkg_name = match.group(1).split('[')[0]  # Remove extras like package[extra]
-                            version_spec = match.group(2).strip()
-                            required_packages[pkg_name] = version_spec
-                        else:
-                            # Fallback: just use the line as-is
-                            pkg_name = pkg_line.split()[0]
-                            required_packages[pkg_name] = ""
-                    else:
-                        # No version spec
-                        required_packages[pkg_line] = ""
+        import subprocess
         
-        # Add PyTorch packages (from SmartInstaller, not in requirements.txt)
-        required_packages["torch"] = "==2.5.1+cu118"
-        required_packages["torchvision"] = "==0.20.1+cu118"
-        required_packages["torchaudio"] = "==2.5.1+cu118"
-        required_packages["triton-windows"] = "==3.0.0"  # Note: Windows uses triton-windows but module is triton
-        required_packages["PySide6"] = "==6.8.1"
-        required_packages["PySide6-Essentials"] = "==6.8.1"
-        required_packages["PySide6-Addons"] = "==6.8.1"
-        required_packages["shiboken6"] = "==6.8.1"
-        
-        # Package list in scrollable area
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.NoFrame)
-        
-        content = QWidget()
-        content_layout = QVBoxLayout(content)
-        content_layout.setSpacing(15)
-        
-        # Organize packages into categories with descriptions
-        categories = {
-            "Core ML Libraries": ["numpy", "transformers", "tokenizers", "accelerate", "datasets", "peft", "safetensors"],
-            "Tokenization": ["sentencepiece"],
-            "Quantization & Optimization": ["bitsandbytes"],
-            "Utilities": ["evaluate", "filelock", "tqdm"],
-            "GUI & Visualization": ["streamlit", "pandas", "PySide6", "PySide6-Essentials", "PySide6-Addons", "shiboken6"],
-            "Hugging Face Integration": ["huggingface_hub"],
-            "Vision Model Support": ["psutil", "timm", "einops", "open-clip-torch", "Pillow"],
-            "PyTorch Ecosystem (SmartInstaller)": ["torch", "torchvision", "torchaudio", "triton-windows"],
-            "Fast Fine-tuning": ["unsloth"],
-        }
-        
-        descriptions = {
-            "numpy": "Pinned for Windows/PyTorch compatibility",
-            "transformers": "Required by unsloth 2025.12.9 (min version: >=4.51.3)",
-            "tokenizers": "Required by transformers 4.51.3",
-            "accelerate": "Distributed training",
-            "datasets": "Dataset loading (upper bound per unsloth requirements)",
-            "peft": "LoRA and efficient training",
-            "safetensors": "Safe model serialization",
-            "sentencepiece": "Text tokenization",
-            "bitsandbytes": "4-bit/8-bit quantization (Python 3.8+)",
-            "evaluate": "Model evaluation metrics",
-            "filelock": "File locking",
-            "tqdm": "Progress bars",
-            "streamlit": "Web interface (optional)",
-            "pandas": "Data manipulation",
-            "PySide6": "Qt desktop GUI (ALL components must match)",
-            "PySide6-Essentials": "PySide6 essentials (must match PySide6 version)",
-            "PySide6-Addons": "PySide6 addons (must match PySide6 version)",
-            "shiboken6": "PySide6 binding generator (must match PySide6 version)",
-            "huggingface_hub": "Model download/upload",
-            "psutil": "System monitoring",
-            "timm": "Vision models",
-            "einops": "Tensor operations",
-            "open-clip-torch": "CLIP models",
-            "Pillow": "Image processing",
-            "torch": "Deep learning framework (CUDA 11.8)",
-            "torchvision": "Computer vision",
-            "torchaudio": "Audio processing",
-            "triton-windows": "GPU programming (Windows)",
-            "unsloth": "2x faster LLM fine-tuning",
-        }
-        
-        # Version comparison helper
         try:
-            from packaging import version as pkg_version
+            if pkg_name == "torch":
+                # Check torch in target venv
+                code = """
+import torch
+import sys
+has_cuda = hasattr(torch, 'cuda')
+has_tensor = hasattr(torch, 'Tensor')
+if has_cuda and has_tensor:
+    print('OK')
+else:
+    print('BROKEN')
+"""
+                result = subprocess.run(
+                    [target_python, "-c", code],
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                    creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
+                )
+                return result.returncode == 0 and 'OK' in result.stdout
+                
+            elif pkg_name == "triton-windows":
+                # Check triton in target venv (package name is triton-windows but module is triton)
+                # Note: triton-windows may not have triton.ops (Windows port limitation),
+                # so we only check if triton itself can be imported
+                code = """
+try:
+    import triton
+    # Check if triton has basic functionality
+    has_version = hasattr(triton, '__version__')
+    has_compile = hasattr(triton, 'compile')
+    if has_version and has_compile:
+        print('OK')
+    else:
+        print('BROKEN')
+except ImportError:
+    print('NOT_INSTALLED')
+except Exception as e:
+    print('BROKEN')
+"""
+                result = subprocess.run(
+                    [target_python, "-c", code],
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                    creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
+                )
+                return result.returncode == 0 and 'OK' in result.stdout
+                
+            elif pkg_name == "bitsandbytes":
+                # Check bitsandbytes in target venv
+                code = """
+try:
+    import bitsandbytes
+    from bitsandbytes.nn import Linear8bitLt
+    print('OK')
+except Exception:
+    print('BROKEN')
+"""
+                result = subprocess.run(
+                    [target_python, "-c", code],
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                    creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
+                )
+                return result.returncode == 0 and 'OK' in result.stdout
+        except Exception:
+            return False
+        return True
+    
+    def _check_version_mismatch(self, pkg_name: str, installed_version: str, requirement_spec: str) -> bool:
+        """
+        Check if installed version mismatches the profile requirement.
+        
+        Args:
+            pkg_name: Package name
+            installed_version: Currently installed version
+            requirement_spec: Requirement specifier (e.g., "==4.51.3" or ">=4.51.3,!=4.52.*")
+        
+        Returns:
+            True if version mismatch detected, False if OK
+        """
+        try:
             from packaging.specifiers import SpecifierSet
-            has_packaging = True
-        except ImportError:
-            has_packaging = False
-        
-        def check_version_match(installed_ver, required_spec):
-            """Check if installed version matches required spec"""
-            if not installed_ver or not required_spec:
-                return None  # Can't check
-            if not has_packaging:
-                # Simple check for == cases
-                if required_spec.startswith("=="):
-                    expected = required_spec[2:].strip()
-                    return installed_ver == expected
-                return None
-            try:
-                installed = pkg_version.parse(installed_ver)
-                spec = SpecifierSet(required_spec)
-                return installed in spec
-            except:
-                return None
-        
-        for category, package_names in categories.items():
-            # Category header
-            cat_label = QLabel(category)
-            cat_label.setStyleSheet("background: transparent; color: #667eea; font-size: 16pt; font-weight: bold; text-decoration: none;")
-            content_layout.addWidget(cat_label)
+            from packaging import version as pkg_version
             
-            # Packages in this category
-            for pkg_name in package_names:
-                if pkg_name not in required_packages:
-                    continue
-                
-                required_version = required_packages[pkg_name]
-                
-                # Get installed version quickly from current environment (no subprocess)
-                installed_version = None
-                dist_candidates = [pkg_name]
-                if pkg_name == "triton-windows":
-                    dist_candidates = ["triton", "triton-windows"]
-                for dist in dist_candidates:
-                    try:
-                        installed_version = version(dist)
-                        break
-                    except PackageNotFoundError:
-                        continue
-                    except Exception:
-                        continue
+            # Handle exact version specs
+            if requirement_spec.startswith("=="):
+                required = requirement_spec[2:].strip()
+                # Strip build tags for comparison
+                inst_base = installed_version.split("+")[0]
+                req_base = required.split("+")[0]
+                return inst_base != req_base
+            
+            # Handle complex specs
+            spec = SpecifierSet(requirement_spec)
+            base_version = installed_version.split("+")[0]
+            return not spec.contains(pkg_version.parse(base_version))
+        except Exception:
+            # If we can't validate, assume OK
+            return False
+    
+    def _get_profile_requirements(self) -> dict:
+        """
+        Get package requirements from the current hardware profile.
+        
+        Returns:
+            Dict of {package_name: version_spec}
+        """
+        try:
+            import sys
+            from pathlib import Path
+            
+            # Add LLM directory to path if not already there
+            llm_dir = Path(__file__).parent.parent
+            if str(llm_dir) not in sys.path:
+                sys.path.insert(0, str(llm_dir))
+            
+            # Import modules - system_detector is in root, profile_selector is in core/
+            # Match the import style used at the top of the file
+            try:
+                # system_detector is in LLM root (same as top-level import)
+                from system_detector import SystemDetector
+                # profile_selector is in core/ (same as top-level import)
+                from core.profile_selector import ProfileSelector
+            except ImportError as e:
+                print(f"[GUI] ERROR: Failed to import SystemDetector/ProfileSelector: {e}")
+                print(f"[GUI] LLM dir: {llm_dir}")
+                print(f"[GUI] sys.path: {sys.path[:3]}...")
+                import traceback
+                traceback.print_exc()
+                return {}
+            
+            # Detect hardware
+            detector = SystemDetector()
+            hw_profile = detector.get_hardware_profile()
+            
+            # Select profile
+            compat_matrix_path = llm_dir / "metadata" / "compatibility_matrix.json"
+            if not compat_matrix_path.exists():
+                print(f"[GUI] Warning: compatibility_matrix.json not found at {compat_matrix_path}")
+                return {}
+            
+            selector = ProfileSelector(compat_matrix_path)
+            profile_name, package_versions, warnings = selector.select_profile(hw_profile)
+            
+            print(f"[GUI] Loaded profile: {profile_name}")
+            print(f"[GUI] Profile versions: {list(package_versions.keys())}")
+            if 'bitsandbytes' in package_versions:
+                print(f"[GUI] bitsandbytes required version: {package_versions['bitsandbytes']}")
+            
+            # Convert to requirement specs
+            # Profile versions may be ranges (e.g., ">=0.13.0,<0.16.0") or exact (e.g., "0.14.0")
+            requirements = {}
+            for pkg_name, version in package_versions.items():
+                # Check if version is already a range specifier
+                if any(op in str(version) for op in [">=", "<=", ">", "<", "!=", ","]):
+                    # It's already a range - use as-is
+                    requirements[pkg_name] = str(version)
+                else:
+                    # Exact version - add == prefix
+                    requirements[pkg_name] = f"=={version}"
+            
+            return requirements
+        except Exception as e:
+            # Log the error but don't crash
+            print(f"[GUI] Failed to load profile requirements: {type(e).__name__}: {e}")
+            import traceback
+            traceback.print_exc()
+            # Fallback: Try to load from profile JSON files directly
+            try:
+                print("[GUI] Attempting fallback: loading profile directly from JSON files")
+                profiles_dir = llm_dir / "profiles"
+                if profiles_dir.exists():
+                    # Try to find a profile file with bitsandbytes
+                    profile_files = list(profiles_dir.glob("*.json"))
+                    for profile_file in profile_files:
+                        try:
+                            with open(profile_file, 'r', encoding='utf-8') as f:
+                                profile_data = json.load(f)
+                                if "packages" in profile_data:
+                                    # Load all packages from this profile
+                                    # Profile versions may be ranges or exact versions
+                                    fallback_requirements = {}
+                                    for pkg_name, pkg_version in profile_data["packages"].items():
+                                        # Check if version is already a range specifier
+                                        if any(op in str(pkg_version) for op in [">=", "<=", ">", "<", "!=", ","]):
+                                            # It's already a range - use as-is
+                                            fallback_requirements[pkg_name] = str(pkg_version)
+                                        else:
+                                            # Exact version - add == prefix
+                                            fallback_requirements[pkg_name] = f"=={pkg_version}"
+                                    print(f"[GUI] Fallback loaded {len(fallback_requirements)} packages from {profile_file.name}")
+                                    if 'bitsandbytes' in fallback_requirements:
+                                        print(f"[GUI] Fallback bitsandbytes: {fallback_requirements['bitsandbytes']}")
+                                    return fallback_requirements
+                        except Exception as profile_error:
+                            print(f"[GUI] Failed to load {profile_file.name}: {profile_error}")
+                            continue
+            except Exception as fallback_error:
+                print(f"[GUI] Fallback also failed: {fallback_error}")
+                import traceback
+                traceback.print_exc()
+            # Final fallback to empty dict
+            print("[GUI] ERROR: All profile loading methods failed. Profiles are the ONLY source of truth.")
+            print("[GUI] Cannot fall back to requirements.txt - profiles must work!")
+            return {}
 
-                is_installed = bool(installed_version)
-                
-                # Determine status and color
-                status = "unknown"
-                status_color = "#888"
-                status_text = ""
-                
-                if not is_installed:
-                    status = "missing"
-                    status_color = "#f44336"  # Red
-                    status_text = "❌ NOT INSTALLED"
-                elif installed_version and required_version:
-                    matches = check_version_match(installed_version, required_version)
-                    if matches is True:
-                        status = "ok"
-                        status_color = "#4CAF50"  # Green
-                        status_text = "✅ OK"
-                    elif matches is False:
-                        status = "mismatch"
-                        status_color = "#FF9800"  # Yellow/Orange
-                        status_text = "⚠️ VERSION MISMATCH"
-                    else:
-                        status = "unknown"
-                        status_color = "#888"
-                        status_text = "❓ CANNOT VERIFY"
-                elif installed_version:
-                    status = "installed"
-                    status_color = "#4CAF50"  # Green (installed but no version requirement)
-                    status_text = "✅ INSTALLED"
-                else:
-                    status = "unknown"
-                    status_color = "#888"
-                    status_text = "❓ UNKNOWN"
-                
-                pkg_frame = QFrame()
-                pkg_frame.setFrameShape(QFrame.StyledPanel)
-                pkg_frame.setStyleSheet(f"""
-                    QFrame {{
-                        background: rgba(60, 60, 80, 0.3);
-                        border: 2px solid {status_color};
-                        border-radius: 6px;
-                        padding: 8px;
-                    }}
-                """)
-                pkg_layout = QVBoxLayout(pkg_frame)
-                pkg_layout.setSpacing(4)
-                
-                # Package name and status
-                name_status = QLabel(f"<b>{pkg_name}</b> <span style='color: {status_color};'>{status_text}</span>")
-                name_status.setStyleSheet("background: transparent; font-size: 12pt; color: white;")
-                pkg_layout.addWidget(name_status)
-                
-                # Required version
-                req_label = QLabel(f"<b>Required:</b> {required_version if required_version else 'any'}")
-                req_label.setStyleSheet("background: transparent; font-size: 10pt; color: #aaa;")
-                pkg_layout.addWidget(req_label)
-                
-                # Installed version
-                if is_installed and installed_version:
-                    inst_label = QLabel(f"<b>Installed:</b> {installed_version}")
-                    inst_label.setStyleSheet(f"background: transparent; font-size: 10pt; color: {status_color};")
-                    pkg_layout.addWidget(inst_label)
-                elif is_installed:
-                    inst_label = QLabel("<b>Installed:</b> (version unknown)")
-                    inst_label.setStyleSheet("background: transparent; font-size: 10pt; color: #888;")
-                    pkg_layout.addWidget(inst_label)
-                else:
-                    inst_label = QLabel("<b>Installed:</b> NOT INSTALLED")
-                    inst_label.setStyleSheet("background: transparent; font-size: 10pt; color: #f44336;")
-                    pkg_layout.addWidget(inst_label)
-                
-                # Description
-                if pkg_name in descriptions:
-                    desc = QLabel(descriptions[pkg_name])
-                    desc.setStyleSheet("background: transparent; font-size: 9pt; color: #888;")
-                    desc.setWordWrap(True)
-                    pkg_layout.addWidget(desc)
-                
-                content_layout.addWidget(pkg_frame)
+    def _build_requirements_tab(self) -> QWidget:
+        """Build Requirements tab in 3 equal columns (1/3 each)."""
+        w = QWidget()
+        main_layout = QHBoxLayout(w)
+        main_layout.setContentsMargins(20, 20, 20, 20)
+        main_layout.setSpacing(0)  # Spacing handled by columns
         
-        content_layout.addStretch(1)
-        scroll.setWidget(content)
-        layout.addWidget(scroll)
+        # Use a splitter for fixed 1/3 divisions
+        splitter = QSplitter(Qt.Horizontal)
+        splitter.setStyleSheet("QSplitter::handle { background: rgba(102, 126, 234, 0.15); width: 2px; }")
+        # Disable manual resizing - maintain fixed 1/3 ratio
+        splitter.setChildrenCollapsible(False)
         
-        # Last updated timestamp
-        from datetime import datetime
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        timestamp_label = QLabel(f"<i>Last updated: {timestamp}</i>")
-        timestamp_label.setAlignment(Qt.AlignCenter)
-        timestamp_label.setStyleSheet("background: transparent; color: #666; font-size: 9pt; margin-top: 10px;")
-        layout.addWidget(timestamp_label)
+        # Column 1 (Scroll Area)
+        col1_scroll = QScrollArea()
+        col1_scroll.setWidgetResizable(True)
+        col1_scroll.setFrameShape(QFrame.NoFrame)
+        col1_scroll.setStyleSheet("QScrollArea { background: transparent; border: none; }")
+        col1_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        
+        col1_container = QWidget()
+        col1_layout = QVBoxLayout(col1_container)
+        col1_layout.setContentsMargins(15, 10, 15, 10)
+        
+        col1_title = QLabel("ML CORE")
+        col1_title.setStyleSheet("""
+            color: #667eea; 
+            font-weight: 700; 
+            font-size: 11pt; 
+            letter-spacing: 3px;
+            padding-bottom: 12px;
+            border-bottom: 2px solid rgba(102, 126, 234, 0.2);
+            margin-bottom: 8px;
+        """)
+        col1_layout.addWidget(col1_title)
+        
+        self.requirements_col1 = QVBoxLayout()
+        self.requirements_col1.setSpacing(12)
+        col1_layout.addLayout(self.requirements_col1)
+        col1_layout.addStretch()
+        
+        col1_scroll.setWidget(col1_container)
+        
+        # Column 2 (Scroll Area)
+        col2_scroll = QScrollArea()
+        col2_scroll.setWidgetResizable(True)
+        col2_scroll.setFrameShape(QFrame.NoFrame)
+        col2_scroll.setStyleSheet("QScrollArea { background: transparent; border: none; }")
+        col2_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        
+        col2_container = QWidget()
+        col2_layout = QVBoxLayout(col2_container)
+        col2_layout.setContentsMargins(15, 10, 15, 10)
+        
+        col2_title = QLabel("OPTIMIZATION & TOOLS")
+        col2_title.setStyleSheet("""
+            color: #667eea; 
+            font-weight: 700; 
+            font-size: 11pt; 
+            letter-spacing: 3px;
+            padding-bottom: 12px;
+            border-bottom: 2px solid rgba(102, 126, 234, 0.2);
+            margin-bottom: 8px;
+        """)
+        col2_layout.addWidget(col2_title)
+        
+        self.requirements_col2 = QVBoxLayout()
+        self.requirements_col2.setSpacing(12)
+        col2_layout.addLayout(self.requirements_col2)
+        col2_layout.addStretch()
+        
+        col2_scroll.setWidget(col2_container)
+        
+        # Column 3 (Details Panel)
+        self.col3_details = QWidget()
+        col3_layout = QVBoxLayout(self.col3_details)
+        col3_layout.setContentsMargins(20, 0, 10, 0)
+        col3_layout.setSpacing(15)
+        
+        # Add Refresh Button at the top
+        refresh_btn = QPushButton("🔄 Refresh Status")
+        refresh_btn.setStyleSheet("""
+            QPushButton {
+                background: rgba(102, 126, 234, 0.2);
+                color: #667eea;
+                border: 1px solid rgba(102, 126, 234, 0.5);
+                padding: 8px 16px;
+                border-radius: 6px;
+                font-weight: 600;
+                font-size: 10pt;
+                text-align: center;
+            }
+            QPushButton:hover {
+                background: rgba(102, 126, 234, 0.3);
+                border: 1px solid #667eea;
+            }
+            QPushButton:pressed {
+                background: rgba(102, 126, 234, 0.4);
+            }
+        """)
+        refresh_btn.clicked.connect(self._refresh_requirements_grid)
+        col3_layout.addWidget(refresh_btn)
+        
+        # Title section with divider
+        title_section = QWidget()
+        title_layout = QVBoxLayout(title_section)
+        title_layout.setContentsMargins(0, 0, 0, 0)
+        title_layout.setSpacing(8)
+        
+        self.selected_pkg_title = QLabel("Select a Requirement")
+        self.selected_pkg_title.setStyleSheet("""
+            font-size: 20pt; 
+            font-weight: 700; 
+            color: #ffffff;
+            letter-spacing: 0.5px;
+            padding-bottom: 12px;
+            border-bottom: 2px solid rgba(102, 126, 234, 0.3);
+        """)
+        title_layout.addWidget(self.selected_pkg_title)
+        
+        self.selected_pkg_desc = QLabel("Click a card on the left to see details and management tools.")
+        self.selected_pkg_desc.setWordWrap(True)
+        self.selected_pkg_desc.setStyleSheet("""
+            color: #b0b0b0; 
+            font-size: 11pt;
+            line-height: 1.5;
+            padding-top: 8px;
+        """)
+        title_layout.addWidget(self.selected_pkg_desc)
+        
+        col3_layout.addWidget(title_section)
+        
+        # Action Buttons Container (Hidden by default)
+        self.pkg_actions_widget = QWidget()
+        actions_layout = QVBoxLayout(self.pkg_actions_widget)
+        actions_layout.setContentsMargins(0, 0, 0, 0)
+        actions_layout.setSpacing(10)
+        
+        self.install_btn = QPushButton("📥 Install / Update")
+        self.install_btn.setStyleSheet("""
+            QPushButton {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 rgba(76, 175, 80, 0.6), stop:1 rgba(102, 126, 234, 0.6));
+                color: #ffffff;
+                border: 1px solid rgba(76, 175, 80, 0.8);
+                padding: 12px;
+                border-radius: 8px;
+                font-weight: 600;
+                font-size: 11pt;
+            }
+            QPushButton:hover {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 rgba(76, 175, 80, 0.9), stop:1 rgba(102, 126, 234, 0.9));
+                border: 1px solid rgba(76, 175, 80, 1.0);
+            }
+            QPushButton:disabled {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 rgba(76, 175, 80, 0.3), stop:1 rgba(102, 126, 234, 0.3));
+                color: rgba(255, 255, 255, 0.4);
+                border: 1px solid rgba(76, 175, 80, 0.45);
+            }
+        """)
+
+        self.repair_btn = QPushButton("🔧 Repair Component")
+        self.repair_btn.setStyleSheet("""
+            QPushButton {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 rgba(255, 152, 0, 0.6), stop:1 rgba(255, 193, 7, 0.6));
+                color: #ffffff;
+                border: 1px solid rgba(255, 152, 0, 0.8);
+                padding: 12px;
+                border-radius: 8px;
+                font-weight: 600;
+                font-size: 11pt;
+            }
+            QPushButton:hover {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 rgba(255, 152, 0, 0.9), stop:1 rgba(255, 193, 7, 0.9));
+                border: 1px solid rgba(255, 152, 0, 1.0);
+            }
+            QPushButton:disabled {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 rgba(255, 152, 0, 0.3), stop:1 rgba(255, 193, 7, 0.3));
+                color: rgba(255, 255, 255, 0.4);
+                border: 1px solid rgba(255, 152, 0, 0.45);
+            }
+        """)
+
+        self.uninstall_btn = QPushButton("🗑️ Uninstall Component")
+        self.uninstall_btn.setStyleSheet("""
+            QPushButton {
+                background: rgba(244, 67, 54, 0.6);
+                color: #ffffff;
+                border: 1px solid rgba(244, 67, 54, 0.8);
+                padding: 12px;
+                border-radius: 8px;
+                font-weight: 600;
+                font-size: 11pt;
+            }
+            QPushButton:hover {
+                background: rgba(244, 67, 54, 0.9);
+                border: 1px solid rgba(244, 67, 54, 1.0);
+            }
+            QPushButton:disabled {
+                background: rgba(244, 67, 54, 0.3);
+                color: rgba(255, 255, 255, 0.4);
+                border: 1px solid rgba(244, 67, 54, 0.45);
+            }
+        """)
+
+        # Selected package for the per-package action buttons.
+        # The buttons are connected ONCE; clicking a card just changes this value.
+        self._selected_requirements_pkg: str | None = None
+        self.install_btn.clicked.connect(self._on_selected_pkg_install)
+        self.repair_btn.clicked.connect(self._on_selected_pkg_repair)
+        self.uninstall_btn.clicked.connect(self._on_selected_pkg_uninstall)
+        
+        actions_layout.addWidget(self.install_btn)
+        actions_layout.addWidget(self.repair_btn)
+        actions_layout.addWidget(self.uninstall_btn)
+        col3_layout.addWidget(self.pkg_actions_widget)
+        self.pkg_actions_widget.setVisible(False)
+        
+        # Log Section (Always visible)
+        log_section = QWidget()
+        log_section_layout = QVBoxLayout(log_section)
+        log_section_layout.setContentsMargins(0, 0, 0, 0)
+        log_section_layout.setSpacing(8)
+        
+        log_label = QLabel("ACTIVITY LOG")
+        log_label.setStyleSheet("""
+            color: #667eea; 
+            font-weight: 700; 
+            font-size: 11pt; 
+            letter-spacing: 2px;
+            padding-bottom: 8px;
+            border-bottom: 2px solid rgba(102, 126, 234, 0.2);
+        """)
+        log_section_layout.addWidget(log_label)
+        
+        self.requirements_log = QTextEdit()
+        self.requirements_log.setReadOnly(True)
+        self.requirements_log.setStyleSheet("""
+            QTextEdit {
+                background: rgba(0, 0, 0, 0.4);
+                color: #4ade80;
+                font-family: 'Consolas', 'Courier New', monospace;
+                font-size: 10pt;
+                border: 1px solid rgba(102, 126, 234, 0.2);
+                border-radius: 8px;
+                padding: 12px;
+            }
+        """)
+        log_section_layout.addWidget(self.requirements_log, 1)
+        
+        col3_layout.addWidget(log_section, 1)
+        
+        # Add to splitter and set equal widths
+        splitter.addWidget(col1_scroll)
+        splitter.addWidget(col2_scroll)
+        splitter.addWidget(self.col3_details)
+        
+        # Set stretch factors to 1 for all to make them equal
+        splitter.setStretchFactor(0, 1)
+        splitter.setStretchFactor(1, 1)
+        splitter.setStretchFactor(2, 1)
+        
+        # Store splitter reference
+        self.requirements_splitter = splitter
+        
+        # Force fixed 1/3 ratio - maintain equal sizes on any resize
+        def maintain_fixed_ratio():
+            width = splitter.width()
+            if width > 0:
+                third = width // 3
+                current = splitter.sizes()
+                # Only update if not already equal (avoid infinite loops)
+                if len(current) == 3 and (current[0] != third or current[1] != third or current[2] != third):
+                    splitter.setSizes([third, third, third])
+        
+        # Use event filter to catch all resize events
+        class FixedRatioFilter(QObject):
+            def eventFilter(self, obj, event):
+                if event.type() == QEvent.Resize and obj is splitter:
+                    QTimer.singleShot(1, maintain_fixed_ratio)
+                return False
+        
+        filter_obj = FixedRatioFilter()
+        splitter.installEventFilter(filter_obj)
+        if not hasattr(self, '_requirements_splitter_filter'):
+            self._requirements_splitter_filter = filter_obj  # Keep reference
+        
+        # Set initial sizes
+        QTimer.singleShot(100, maintain_fixed_ratio)
+        
+        # Also check periodically (backup in case events are missed)
+        if not hasattr(self, '_requirements_ratio_timer'):
+            self._requirements_ratio_timer = QTimer()
+            self._requirements_ratio_timer.timeout.connect(maintain_fixed_ratio)
+            self._requirements_ratio_timer.start(100)  # Check every 100ms
+        
+        main_layout.addWidget(splitter)
+        
+        self.package_cards = {}
+        self._refresh_requirements_grid()
         
         return w
-    
+
+    def _refresh_requirements_grid(self):
+        """Populate the requirements columns with package cards."""
+        # Clear existing
+        for layout in [self.requirements_col1, self.requirements_col2]:
+            while layout.count():
+                item = layout.takeAt(0)
+                if item.widget(): item.widget().deleteLater()
+        
+        self.package_cards = {}
+        
+        # Get target venv Python for checking installed versions
+        # IMPORTANT: Check packages in LLM/.venv, not bootstrap/.venv
+        try:
+            target_python = self._get_target_venv_python()
+        except Exception as e:
+            print(f"[GUI] WARNING: Could not get target venv Python: {e}")
+            target_python = None
+        
+        # Helper function to get installed version from target venv
+        def get_installed_version(pkg_name: str) -> Optional[str]:
+            """Get installed version from target venv (LLM/.venv), not bootstrap"""
+            if target_python is None:
+                return None
+            try:
+                import subprocess
+                code = f"""
+try:
+    from importlib.metadata import version, PackageNotFoundError
+except ImportError:
+    from importlib_metadata import version, PackageNotFoundError
+
+try:
+    print(version('{pkg_name}'))
+except PackageNotFoundError:
+    print('NOT_FOUND')
+"""
+                result = subprocess.run(
+                    [target_python, "-c", code],
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                    creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
+                )
+                if result.returncode == 0:
+                    output = result.stdout.strip()
+                    if output and output != "NOT_FOUND":
+                        return output
+            except Exception:
+                pass
+            return None
+        
+        # PROFILE IS THE ONLY SOURCE OF TRUTH - NO requirements.txt FALLBACK
+        profile_requirements = self._get_profile_requirements()
+        
+        if not profile_requirements:
+            print("[GUI] ERROR: Failed to load profile requirements! This is a critical error.")
+            print("[GUI] Profiles are the ONLY source of truth. Cannot proceed without profile.")
+            # Show error to user
+            QMessageBox.critical(
+                self,
+                "Profile Loading Failed",
+                "Failed to load hardware profile requirements.\n\n"
+                "Profiles are the only source of truth for package versions.\n"
+                "Please check:\n"
+                "- metadata/compatibility_matrix.json exists\n"
+                "- profiles/*.json files exist\n"
+                "- System detection is working correctly"
+            )
+            # Return empty - GUI will show packages as missing
+            required_packages = {}
+        else:
+            print(f"[GUI] Loaded {len(profile_requirements)} packages from profile (ONLY SOURCE OF TRUTH)")
+            if 'bitsandbytes' in profile_requirements:
+                print(f"[GUI] Profile requires bitsandbytes: {profile_requirements['bitsandbytes']}")
+            required_packages = profile_requirements
+        
+        # Add any remaining defaults for packages not in profile
+        defaults = {
+            "triton-windows": ">=3.0.0",
+            "PySide6": "==6.8.1",
+            "unsloth": "Latest"
+        }
+        for pkg, ver in defaults.items():
+            if pkg not in required_packages:
+                required_packages[pkg] = ver
+        
+        col1_pkgs = ["torch", "transformers", "peft", "datasets", "accelerate", "bitsandbytes"]
+        col2_pkgs = ["triton-windows", "unsloth", "PySide6", "numpy", "pandas", "huggingface_hub"]
+        
+        descriptions = {
+            "torch": "Foundational deep learning framework. Required for all model operations.",
+            "transformers": "HuggingFace library providing model architectures and loading utilities.",
+            "peft": "Parameter-Efficient Fine-Tuning. Enables LoRA and QLoRA training.",
+            "datasets": "Utilities for loading and processing training data efficiently.",
+            "accelerate": "Handles multi-GPU and mixed-precision training orchestration.",
+            "bitsandbytes": "Enables 4-bit and 8-bit quantization for low-VRAM training.",
+            "triton-windows": "GPU programming language. Required for Unsloth optimizations on Windows.",
+            "unsloth": "Advanced training optimizer that provides 2x speedup and 70% less VRAM usage.",
+            "PySide6": "The Qt-based GUI framework used to build this desktop application.",
+            "numpy": "Numerical computing library. Essential for tensor and array operations.",
+            "pandas": "Data manipulation library used for dataset analysis and visualization.",
+            "huggingface_hub": "Client library for interacting with the Hugging Face Model Hub."
+        }
+        
+        for pkg_list, layout in [(col1_pkgs, self.requirements_col1), (col2_pkgs, self.requirements_col2)]:
+            for pkg_name in pkg_list:
+                req_ver = required_packages.get(pkg_name, "")
+                inst_ver = None
+                
+                # Check installed version in target venv (LLM/.venv), not bootstrap
+                if pkg_name == "triton-windows":
+                    # triton-windows often isn't available for some Python versions on Windows.
+                    # We treat it as optional/unavailable rather than a hard "missing".
+                    # Package name is "triton-windows" but module is "triton", so check both.
+                    inst_ver = get_installed_version("triton-windows")
+                    if inst_ver is None:
+                        inst_ver = get_installed_version("triton")
+                else:
+                    inst_ver = get_installed_version(pkg_name)
+                
+                is_installed = bool(inst_ver)
+                is_functional = self._is_package_functional(pkg_name) if is_installed else True
+                
+                # Check for version mismatch (wrong version installed)
+                # Always check version if installed and requirement is specified, regardless of functional status
+                # This ensures we detect wrong versions even if the package appears functional
+                version_mismatch = False
+                if is_installed and req_ver:
+                    version_mismatch = self._check_version_mismatch(pkg_name, inst_ver, req_ver)
+                
+                if is_installed:
+                    if not is_functional:
+                        status_text = "BROKEN"
+                        status_color = "#f44336"
+                    elif version_mismatch:
+                        status_text = "WRONG VERSION"
+                        status_color = "#ff9800"  # Orange for version mismatch
+                    else:
+                        status_text = "OK"
+                        status_color = "#4CAF50"
+                else:
+                    if pkg_name == "triton-windows" and sys.platform == "win32":
+                        status_text = "OPTIONAL"
+                        status_color = "#9e9e9e"
+                    else:
+                        status_text = "MISSING"
+                        status_color = "#f44336"
+                
+                card = PackageCard(
+                    pkg_name, req_ver, inst_ver, is_installed, 
+                    "ok" if (is_installed and is_functional and not version_mismatch) else ("mismatch" if version_mismatch else "missing"),
+                    status_color, status_text, descriptions.get(pkg_name, "")
+                )
+                card.clicked.connect(self._on_package_card_clicked)
+                layout.addWidget(card)
+                self.package_cards[pkg_name] = card
+        
+        # Add stretches to keep cards at the top
+        self.requirements_col1.addStretch()
+        self.requirements_col2.addStretch()
+
+    def _on_package_card_clicked(self, pkg_name):
+        # Update selection state
+        for name, card in self.package_cards.items():
+            card.set_selected(name == pkg_name)
+            
+        pkg_card = self.package_cards[pkg_name]
+        self.selected_pkg_title.setText(pkg_name.upper())
+        
+        status_info = f"<span style='color: {pkg_card.status_color}; font-weight: bold;'>{pkg_card.status_text}</span>"
+        details = f"Status: {status_info}<br>"
+        details += f"Required: {pkg_card.required_version if pkg_card.required_version else 'Any'}<br>"
+        details += f"Installed: {pkg_card.installed_version if pkg_card.installed_version else 'Not installed'}<br><br>"
+        details += pkg_card.description
+        
+        self.selected_pkg_desc.setText(details)
+        self.pkg_actions_widget.setVisible(True)
+
+        # Select package for action buttons
+        self._selected_requirements_pkg = pkg_name
+
+        # Get package status
+        status = pkg_card.status_text
+
+        # Configure buttons based on package status
+        # Note: Repair now uses smart repair mode - only fixes broken packages, doesn't reinstall everything
+        if status == "OK":
+            self.install_btn.setEnabled(False)
+            self.repair_btn.setEnabled(False)
+            self.uninstall_btn.setEnabled(True)
+            self.install_btn.setToolTip("Package already installed")
+            self.repair_btn.setToolTip("Package is working correctly")
+        elif status == "MISSING":
+            self.install_btn.setEnabled(True)
+            self.repair_btn.setEnabled(False)
+            self.uninstall_btn.setEnabled(False)
+            self.install_btn.setToolTip("Install this package")
+            self.repair_btn.setToolTip("Package not installed")
+        elif status == "WRONG VERSION":
+            self.install_btn.setEnabled(True)
+            self.repair_btn.setEnabled(True)
+            self.uninstall_btn.setEnabled(True)
+            self.install_btn.setToolTip("Update to correct version")
+            self.repair_btn.setToolTip("Repair will uninstall wrong version and install correct version")
+        else:  # BROKEN or other issues
+            self.install_btn.setEnabled(True)
+            self.repair_btn.setEnabled(True)
+            self.uninstall_btn.setEnabled(True)
+            self.install_btn.setToolTip("Update this package")
+            self.repair_btn.setToolTip("Repair environment (fixes broken/wrong packages)")
+
+    def _run_pkg_task(self, pkg_name, action, checked=False):
+        """Execute a package-specific task (install/repair/uninstall)."""
+        # Visible feedback in the UI immediately.
+        self.requirements_log.clear()
+        self.requirements_log.append(f"<b>Executing {action} for {pkg_name}...</b>\n")
+
+        # IMPORTANT:
+        # - Per-package install/uninstall must NOT trigger a full requirements install.
+        # - Repair is environment-level (uses InstallerV2 targeted repair).
+        if action == "repair":
+            self._run_installer_task("repair", f"Repairing environment (from {pkg_name})...")
+            return
+
+        # For install/uninstall, run a single pip operation for just this package.
+        pkg_card = self.package_cards.get(pkg_name)
+        version_spec = getattr(pkg_card, "required_version", "") if pkg_card else ""
+
+        # "Latest" means no pin.
+        if isinstance(version_spec, str) and version_spec and version_spec.lower() != "latest":
+            package_spec = f"{pkg_name}{version_spec}"
+        else:
+            package_spec = pkg_name
+
+        # Disable all cards during task
+        for card in self.package_cards.values():
+            card.setEnabled(False)
+        self.install_btn.setEnabled(False)
+        self.repair_btn.setEnabled(False)
+        self.uninstall_btn.setEnabled(False)
+
+        pip_action = "uninstall" if action == "uninstall" else "install"
+        self.pip_thread = PipPackageThread(pip_action, package_spec)
+        self.pip_thread.log_output.connect(lambda m: self.requirements_log.append(m))
+        self.pip_thread.finished_signal.connect(self._on_pip_task_finished)
+        self.pip_thread.start()
+
+    def _on_pip_task_finished(self, success: bool):
+        for card in self.package_cards.values():
+            card.setEnabled(True)
+        msg = "✅ Task completed successfully!" if success else "❌ Task failed. Check log for details."
+        self.requirements_log.append(f"\n<b>{msg}</b>")
+        self._refresh_requirements_grid()
+
+    def _on_selected_pkg_install(self, checked=False):
+        if not self._selected_requirements_pkg:
+            return
+        self._run_pkg_task(self._selected_requirements_pkg, "install", checked)
+
+    def _on_selected_pkg_repair(self, checked=False):
+        if not self._selected_requirements_pkg:
+            return
+        self._run_pkg_task(self._selected_requirements_pkg, "repair", checked)
+
+    def _on_selected_pkg_uninstall(self, checked=False):
+        if not self._selected_requirements_pkg:
+            return
+        self._run_pkg_task(self._selected_requirements_pkg, "uninstall", checked)
+
+    def _on_install_requirements(self):
+        self._run_installer_task("dependencies", "Installing requirements...")
+
+    def _on_repair_environment(self):
+        self._run_installer_task("repair", "Repairing environment...")
+
+    def _on_uninstall_requirements(self):
+        confirm = QMessageBox.question(self, "Confirm Uninstall", "Are you sure you want to uninstall all managed packages?", QMessageBox.Yes | QMessageBox.No)
+        if confirm == QMessageBox.Yes:
+            self._run_installer_task("uninstall", "Uninstalling packages...")
+
+    def _run_installer_task(self, task_type, start_msg):
+        self.requirements_log.append(f"<b>{start_msg}</b>\n")
+        
+        # Disable all cards during task
+        for card in self.package_cards.values(): card.setEnabled(False)
+        
+        self.installer_thread = InstallerThread(task_type)
+        self.installer_thread.log_output.connect(lambda m: self.requirements_log.append(m))
+        self.installer_thread.finished_signal.connect(self._on_installer_task_finished)
+        self.installer_thread.start()
+
+    def _on_installer_task_finished(self, success):
+        for card in self.package_cards.values(): card.setEnabled(True)
+        msg = "✅ Task completed successfully!" if success else "❌ Task failed. Check log for details."
+        self.requirements_log.append(f"\n<b>{msg}</b>")
+        self._refresh_requirements_grid()
+
     def _build_info_tab(self) -> QWidget:
         w = QWidget()
         layout = QVBoxLayout(w)
@@ -4918,10 +6854,19 @@ class MainWindow(QMainWindow):
         layout.setSpacing(20)
         
         # Title
+        title_container = QWidget()
+        title_container.setStyleSheet("background: transparent;")
+        title_layout = QHBoxLayout(title_container)
+        title_layout.setContentsMargins(0, 0, 0, 0)
+        title_layout.setSpacing(0)
+        
+        # Title text (centered)
         title = QLabel("ℹ️ About LLM Fine-tuning Studio")
         title.setAlignment(Qt.AlignCenter)
         title.setStyleSheet("font-size: 24pt; font-weight: bold; text-decoration: none;")
-        layout.addWidget(title)
+        title_layout.addWidget(title)
+        
+        layout.addWidget(title_container)
         
         # Two-column layout using QSplitter for fixed 50/50 split
         splitter = QSplitter(Qt.Horizontal)
@@ -4940,8 +6885,10 @@ class MainWindow(QMainWindow):
         credits_inner = QVBoxLayout(credits_frame)
         credits_inner.setSpacing(12)
         
+        # Credits title
         credits_title = QLabel("💝 Credits")
-        credits_title.setStyleSheet("font-size: 18pt; font-weight: bold; text-decoration: none;")
+        credits_title.setAlignment(Qt.AlignLeft)
+        credits_title.setStyleSheet("font-size: 18pt; font-weight: bold; text-decoration: none; margin: 0; padding: 0;")
         credits_inner.addWidget(credits_title)
         
         credits_text = QLabel("""
@@ -5076,6 +7023,94 @@ respective package directories or official repositories.
         
         layout.addWidget(splitter)
         
+        # Note: Corner bottom-right image is handled by hybrid_frame system via _update_frame_corner_br()
+        # which uses corner_br_owl_info for Info tab (index 8) and sizes it to 150px width (height adaptable)
+        
+        # Get asset path for owl_credits.webp and add as overlay in top-left corner
+        owl_credits_path = None
+        if hasattr(self, '_get_frame_asset_path'):
+            owl_credits_path = self._get_frame_asset_path("owl_credits")
+        else:
+            # Fallback: construct path directly
+            llm_dir = Path(__file__).parent.parent
+            root_dir = llm_dir.parent
+            assets_dir = root_dir / "hybrid_frame_module" / "assets"
+            webp_path = assets_dir / "owl_credits.webp"
+            if webp_path.exists():
+                owl_credits_path = str(webp_path)
+        
+        # Add owl_credits image as overlay - align BOTTOM edge with BOTTOM edge of Credits title line
+        if owl_credits_path:
+            owl_label = QLabel(credits_frame)  # Parent is credits_frame for simpler coordinate system
+            owl_label.setAttribute(Qt.WA_TransparentForMouseEvents)  # Don't block mouse events
+            pixmap = QPixmap(owl_credits_path)
+            if not pixmap.isNull():
+                # Scale to width 150, height adaptable
+                scaled_pixmap = pixmap.scaled(150, 150, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                owl_label.setPixmap(scaled_pixmap)
+                owl_label.setFixedSize(scaled_pixmap.size())
+                owl_label.setStyleSheet("background: transparent; border: none;")
+                owl_label.raise_()  # Make sure it's on top
+                owl_label.show()  # Make sure it's visible
+                
+                # Position overlay: align BOTTOM edge of image with BOTTOM edge of Credits title text line
+                def update_owl_position():
+                    if not credits_frame.isVisible() or not credits_title.isVisible():
+                        return
+                    
+                    # Ensure widgets have valid geometry
+                    if credits_title.width() <= 0 or credits_title.height() <= 0:
+                        return
+                    
+                    # Get credits_title position relative to credits_frame (parent of owl_label)
+                    title_rect = credits_title.geometry()  # This is relative to credits_frame
+                    if title_rect.width() <= 0 or title_rect.height() <= 0:
+                        return
+                    
+                    # Get the BOTTOM edge of the Credits title text line
+                    title_bottom_y = title_rect.y() + title_rect.height()
+                    
+                    label_width = owl_label.width()
+                    label_height = owl_label.height()
+                    
+                    if label_width > 0 and label_height > 0:
+                        # Position: left side of Credits title, BOTTOM of image aligned with BOTTOM of text line
+                        x = title_rect.x() - label_width - 12  # 12px spacing before text
+                        y = title_bottom_y - label_height  # Image BOTTOM edge = text line BOTTOM edge
+                        
+                        # Ensure we don't go outside the widget bounds
+                        if y < 0:
+                            y = 0
+                        if x < 0:
+                            x = 0
+                        
+                        owl_label.setGeometry(int(x), int(y), label_width, label_height)
+                        owl_label.show()
+                        owl_label.raise_()
+                
+                # Use event filter to catch resize events
+                class OwlResizeFilter(QObject):
+                    def eventFilter(self, obj, event):
+                        if (obj == credits_frame or obj == credits_title) and (event.type() == QEvent.Type.Resize or event.type() == QEvent.Type.Move):
+                            QTimer.singleShot(0, update_owl_position)
+                        elif (obj == credits_frame or obj == credits_title) and event.type() == QEvent.Type.Show:
+                            QTimer.singleShot(0, update_owl_position)
+                            QTimer.singleShot(50, update_owl_position)
+                            QTimer.singleShot(200, update_owl_position)
+                        return False
+                
+                owl_resize_filter = OwlResizeFilter()
+                credits_frame.installEventFilter(owl_resize_filter)
+                credits_title.installEventFilter(owl_resize_filter)
+                
+                # Update position initially and after delays to ensure layout is complete
+                QTimer.singleShot(0, update_owl_position)
+                QTimer.singleShot(50, update_owl_position)
+                QTimer.singleShot(100, update_owl_position)
+                QTimer.singleShot(300, update_owl_position)
+                QTimer.singleShot(500, update_owl_position)
+                QTimer.singleShot(1000, update_owl_position)
+        
         return w
     
     # ---------------- Logs tab ----------------
@@ -5115,7 +7150,167 @@ respective package directories or official repositories.
             self.logs_view.setPlainText(f"[ERROR] Could not read {path}: {e}")
 
     # ---------------- Helpers ----------------
+    def _append_training_output(self, proc: QProcess) -> None:
+        """Parse training output and update dashboard metrics + filtered logs"""
+        # Read ALL available data immediately for real-time updates
+        all_data = b""
+        while proc.bytesAvailable() > 0:
+            chunk = proc.readAllStandardOutput().data()
+            if chunk:
+                all_data += chunk
+            else:
+                break
+        
+        if not all_data:
+            return
+        
+        # Decode text
+        text = all_data.decode("utf-8", errors="replace")
+        
+        # Parse metrics from training output
+        self._parse_training_metrics(text)
+        
+        # Filter and append to log (reduce noise from progress bars)
+        lines = text.split('\n')
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            
+            # Filter out excessive progress bar updates and tqdm noise
+            # Skip lines that are just noise
+            skip_patterns = [
+                '🦥 Unsloth Zoo will now patch',  # Repeated unsloth messages
+                'Unsloth: Tokenizing',  # Tokenization progress bars
+                '%|' in line,  # Any tqdm progress bar
+                'examples/s' in line or 'it/s' in line,  # Progress bar speed indicators
+                line.strip() and line.strip()[0].isdigit() and '%|' in line,  # Progress bar lines starting with numbers
+                '[' in line and ']' in line and ('examples/s' in line or 'it/s' in line),  # tqdm format
+            ]
+            
+            if any(skip_patterns):
+                continue
+            
+            # Only show: important messages, errors, warnings, and training summaries
+            should_show = (
+                # Important markers
+                '[INFO]' in line or '[WARNING]' in line or '[ERROR]' in line or
+                'Starting training' in line or 'Saving' in line or 'Complete' in line or
+                # Training step updates (JSON format with loss/epoch)
+                ('{' in line and 'loss' in line.lower() and ('epoch' in line.lower() or 'step' in line.lower())) or
+                # Epoch/step boundaries (but not progress bars)
+                ('epoch' in line.lower() or 'step' in line.lower()) and ('/' in line or 'of' in line) and '%|' not in line or
+                # Errors and warnings
+                'error' in line.lower() or 'warning' in line.lower() or 'failed' in line.lower() or
+                'traceback' in line.lower() or 'exception' in line.lower() or
+                # Important recommendations
+                'recommended' in line.lower() and 'attention' in line.lower()
+            )
+            
+            if should_show:
+                self.train_log.appendPlainText(line.rstrip('\r'))
+    
+    def _parse_training_metrics(self, text: str) -> None:
+        """Parse training output to extract and update dashboard metrics"""
+        import re
+        import json
+        
+        lines = text.split('\n')
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            
+            # Try to parse as JSON first (transformers logs metrics as JSON)
+            try:
+                # Look for JSON-like dict in the line
+                json_match = re.search(r'\{[^}]+\}', line)
+                if json_match:
+                    metrics = json.loads(json_match.group(0))
+                    
+                    # Update epoch
+                    if 'epoch' in metrics and hasattr(self, 'epoch_card'):
+                        epoch_val = float(metrics['epoch'])
+                        total_epochs = self.train_epochs.value() if hasattr(self, 'train_epochs') else 1
+                        self._update_metric_card(self.epoch_card, f"{int(epoch_val)}/{total_epochs}")
+                    
+                    # Update step
+                    if 'step' in metrics and hasattr(self, 'steps_card'):
+                        step_val = int(metrics['step'])
+                        # Try to get total steps from training args or estimate
+                        total_steps = metrics.get('total_steps', '?')
+                        if total_steps == '?':
+                            # Estimate: steps per epoch * num_epochs
+                            if hasattr(self, 'train_epochs') and hasattr(self, 'train_batch'):
+                                # Rough estimate
+                                total_steps = '?'
+                        self._update_metric_card(self.steps_card, f"{step_val}/{total_steps}")
+                    
+                    # Update loss
+                    if 'loss' in metrics and hasattr(self, 'loss_card'):
+                        loss_val = float(metrics['loss'])
+                        self._update_metric_card(self.loss_card, f"{loss_val:.4f}")
+                    
+                    # Update learning rate
+                    if 'learning_rate' in metrics and hasattr(self, 'learning_rate_card'):
+                        lr_val = float(metrics['learning_rate'])
+                        self._update_metric_card(self.learning_rate_card, f"{lr_val:.2e}")
+                    
+                    continue
+            except (json.JSONDecodeError, ValueError, KeyError):
+                pass
+            
+            # Fallback: regex patterns for non-JSON formats
+            # Parse epoch: "epoch 1/5" or "Epoch 1/5"
+            epoch_match = re.search(r"[Ee]poch\s+(\d+)/(\d+)", line)
+            if epoch_match:
+                current, total = epoch_match.groups()
+                if hasattr(self, 'epoch_card'):
+                    self._update_metric_card(self.epoch_card, f"{current}/{total}")
+            
+            # Parse step: "step 100/500" or "Step 100/500"
+            step_match = re.search(r"[Ss]tep\s+(\d+)/(\d+)", line)
+            if step_match:
+                current, total = step_match.groups()
+                if hasattr(self, 'steps_card'):
+                    self._update_metric_card(self.steps_card, f"{current}/{total}")
+            
+            # Parse loss: "loss: 0.1234" or "Loss: 0.1234"
+            loss_match = re.search(r"[Ll]oss[:\s=]+([\d.]+)", line)
+            if loss_match:
+                loss_val = float(loss_match.group(1))
+                if hasattr(self, 'loss_card'):
+                    self._update_metric_card(self.loss_card, f"{loss_val:.4f}")
+            
+            # Parse learning rate: "learning_rate: 0.0002" or "lr: 0.0002"
+            lr_match = re.search(r"(?:learning_rate|lr)[:\s=]+([\d.e-]+)", line, re.IGNORECASE)
+            if lr_match:
+                lr_val = float(lr_match.group(1))
+                if hasattr(self, 'learning_rate_card'):
+                    self._update_metric_card(self.learning_rate_card, f"{lr_val:.2e}")
+            
+            # Parse speed: "X.XX it/s" or "X.XX samples/s"
+            speed_match = re.search(r"([\d.]+)\s*(?:it|sample)s?/s", line, re.IGNORECASE)
+            if speed_match:
+                speed_val = float(speed_match.group(1))
+                if hasattr(self, 'speed_card'):
+                    self._update_metric_card(self.speed_card, f"{speed_val:.2f} s/s")
+    
+    def _update_metric_card(self, card: QWidget, value: str) -> None:
+        """Update the value displayed in a metric card"""
+        # Use the set_value method stored on the card
+        if hasattr(card, 'set_value'):
+            card.set_value(value)
+        else:
+            # Fallback: find value label manually
+            labels = card.findChildren(QLabel)
+            for label in labels:
+                if "18pt" in label.styleSheet():
+                    label.setText(value)
+                    return
+    
     def _append_proc_output(self, proc: QProcess, widget: QPlainTextEdit) -> None:
+        """Generic output appender for non-training processes"""
         data = proc.readAllStandardOutput().data().decode("utf-8", errors="replace")
         if data:
             widget.appendPlainText(data.rstrip("\n"))
@@ -5129,7 +7324,17 @@ respective package directories or official repositories.
         try:
             logs_dir = self.root / "logs"
             logs_dir.mkdir(parents=True, exist_ok=True)
-            log_path = logs_dir / "app.log"
+            
+            # Use timestamped session log name if available
+            if hasattr(self, 'session_log_name'):
+                log_path = logs_dir / self.session_log_name
+            else:
+                from datetime import datetime
+                timestamp = datetime.now().strftime("%y%m%d")
+                time_str = datetime.now().strftime("%H%M")
+                log_path = logs_dir / f"[{timestamp}][app][{time_str}].log"
+                self.session_log_name = log_path.name
+                
             with log_path.open("a", encoding="utf-8", errors="replace") as f:
                 f.write(message.rstrip() + "\n")
         except Exception:
@@ -5156,15 +7361,19 @@ respective package directories or official repositories.
                 self.system_info.update(system_info)
                 self._update_header_system_info()
 
-                # Refresh Home tab (System Status + Requirements) to show real detected values
+                # Refresh Home tab to show detected values (deferred to avoid blocking)
                 try:
                     if hasattr(self, "tabs") and self.tabs is not None and self.tabs.count() > 0:
+                        # Only rebuild if Home tab is currently visible to avoid unnecessary work
                         current_index = self.tabs.currentIndex()
-                        self.tabs.removeTab(0)
-                        self.tabs.insertTab(0, self._build_home_tab(), "🏠 Home")
-                        self.tabs.setCurrentIndex(current_index)
+                        if current_index == 0:
+                            # Defer rebuild to next event loop cycle
+                            QTimer.singleShot(100, self._rebuild_home_tab)
+                        else:
+                            # Home tab not visible, just mark it as needing update
+                            self._home_tab_needs_update = True
                 except Exception as e:
-                    self._log_to_app_log(f"[BACKGROUND] Failed to rebuild Home tab: {e}")
+                    self._log_to_app_log(f"[BACKGROUND] Failed to schedule Home tab update: {e}")
 
                 # Refresh GPU dropdowns (Train/Test)
                 try:
@@ -5282,12 +7491,13 @@ respective package directories or official repositories.
         if models_dir.exists():
             for model_dir in sorted(models_dir.iterdir()):
                 if model_dir.is_dir():
-                    # Check if it has actual model weights (not just config files)
+                    # Check if it has config.json AND actual model weights
+                    has_config = (model_dir / "config.json").exists()
                     has_weights = any(
                         (model_dir / f).exists() 
-                        for f in ["model.safetensors", "pytorch_model.bin", "model.safetensors.index.json"]
+                        for f in ["model.safetensors", "pytorch_model.bin", "model.safetensors.index.json", "adapter_model.safetensors", "adapter_model.bin"]
                     )
-                    if has_weights or len(list(model_dir.glob("*.safetensors"))) > 0:
+                    if has_config and (has_weights or len(list(model_dir.glob("*.safetensors"))) > 0 or len(list(model_dir.glob("*.bin"))) > 0):
                         downloaded_models.append(model_dir.name)
         
         # Update Train tab: Select Base Model dropdown with downloaded models
@@ -5308,24 +7518,16 @@ respective package directories or official repositories.
         # Update Test tab Model A dropdown with downloaded models + trained adapters
         current_a = self.test_model_a.currentText()
         self.test_model_a.clear()
-        self.test_model_a.addItem("None")
         
         # Add base models from models folder
         if downloaded_models:
             for model_name in downloaded_models:
-                self.test_model_a.addItem(f"📦 {model_name}", str(models_dir / model_name))
-        
-        # Also check hf_models folder for downloaded base models
-        hf_models_dir = self.root / "hf_models"
-        if hf_models_dir.exists():
-            hf_downloaded = sorted([d.name for d in hf_models_dir.iterdir() if d.is_dir()])
-            for model_name in hf_downloaded:
                 # Convert directory name to HuggingFace format (org__model -> org/model)
                 display_name = model_name.replace("__", "/")
-                self.test_model_a.addItem(f"📦 {display_name}", str(hf_models_dir / model_name))
+                self.test_model_a.addItem(f"📦 {display_name}", str(models_dir / model_name))
         
         # Add trained adapters (only if they have actual model weights)
-        adapter_dir = self.root / "fine_tuned_adapter"
+        adapter_dir = self.root / "fine_tuned"
         if adapter_dir.exists():
             # Check for COMPLETE adapters (with model weights, not just config)
             trained_adapters = []
@@ -5348,7 +7550,7 @@ respective package directories or official repositories.
                     self.test_model_a.addItem(f"🎯 {adapter_name} (adapter)", str(adapter_path))
         
         # Show message if no models available at all
-        total_models_a = self.test_model_a.count() - 1  # Exclude "None" item
+        total_models_a = self.test_model_a.count()
         if total_models_a == 0:
             self.test_model_a.addItem("(No models available - download from Models tab)")
         
@@ -5360,20 +7562,13 @@ respective package directories or official repositories.
         # Update Model B dropdown
         current_b = self.test_model_b.currentText()
         self.test_model_b.clear()
-        self.test_model_b.addItem("None")
         
         # Add base models from models folder
         if downloaded_models:
             for model_name in downloaded_models:
-                self.test_model_b.addItem(f"📦 {model_name}", str(models_dir / model_name))
-        
-        # Also check hf_models folder for downloaded base models
-        if hf_models_dir.exists():
-            hf_downloaded = sorted([d.name for d in hf_models_dir.iterdir() if d.is_dir()])
-            for model_name in hf_downloaded:
                 # Convert directory name to HuggingFace format (org__model -> org/model)
                 display_name = model_name.replace("__", "/")
-                self.test_model_b.addItem(f"📦 {display_name}", str(hf_models_dir / model_name))
+                self.test_model_b.addItem(f"📦 {display_name}", str(models_dir / model_name))
         
         # Add trained adapters (only if they have actual model weights)
         if adapter_dir.exists():
@@ -5398,7 +7593,7 @@ respective package directories or official repositories.
                     self.test_model_b.addItem(f"🎯 {adapter_name} (adapter)", str(adapter_path))
         
         # Show message if no models available at all
-        total_models_b = self.test_model_b.count() - 1  # Exclude "None" item
+        total_models_b = self.test_model_b.count()
         if total_models_b == 0:
             self.test_model_b.addItem("(No models available - download from Models tab)")
         
@@ -5406,6 +7601,50 @@ respective package directories or official repositories.
             idx = self.test_model_b.findText(current_b)
             if idx >= 0:
                 self.test_model_b.setCurrentIndex(idx)
+        
+        # Update Model C dropdown (if it exists)
+        if hasattr(self, 'test_model_c'):
+            current_c = self.test_model_c.currentText()
+            self.test_model_c.clear()
+            
+            # Add base models from models folder
+            if downloaded_models:
+                for model_name in downloaded_models:
+                    # Convert directory name to HuggingFace format (org__model -> org/model)
+                    display_name = model_name.replace("__", "/")
+                    self.test_model_c.addItem(f"📦 {display_name}", str(models_dir / model_name))
+            
+            # Add trained adapters (only if they have actual model weights)
+            if adapter_dir.exists():
+                # Check for COMPLETE adapters (with model weights, not just config)
+                trained_adapters = []
+                for d in adapter_dir.iterdir():
+                    if not d.is_dir():
+                        continue
+                    # Check for actual model weight files
+                    has_weights = any([
+                        (d / "adapter_model.safetensors").exists(),
+                        (d / "adapter_model.bin").exists(),
+                        (d / "pytorch_model.bin").exists(),
+                        (d / "model.safetensors").exists()
+                    ])
+                    if has_weights:
+                        trained_adapters.append(d)
+                
+                if trained_adapters:
+                    for adapter_path in sorted(trained_adapters):
+                        adapter_name = adapter_path.name
+                        self.test_model_c.addItem(f"🎯 {adapter_name} (adapter)", str(adapter_path))
+            
+            # Show message if no models available at all
+            total_models_c = self.test_model_c.count()
+            if total_models_c == 0:
+                self.test_model_c.addItem("(No models available - download from Models tab)")
+            
+            if current_c and current_c != "None":
+                idx = self.test_model_c.findText(current_c)
+                if idx >= 0:
+                    self.test_model_c.setCurrentIndex(idx)
 
         # log list from repo root and logs directory
         self.logs_list.clear()
@@ -5433,8 +7672,14 @@ def main() -> int:
     # Setup error logging FIRST before anything else
     logs_dir = get_app_root() / "logs"
     logs_dir.mkdir(parents=True, exist_ok=True)
-    app_log_path = logs_dir / "app.log"
-    startup_error_log = logs_dir / "startup_error.log"
+    
+    # Use timestamped name format: [yymmdd][name][hhmm]
+    from datetime import datetime
+    timestamp = datetime.now().strftime("%y%m%d")
+    time_str = datetime.now().strftime("%H%M")
+    session_log_name = f"[{timestamp}][app][{time_str}].log"
+    app_log_path = logs_dir / session_log_name
+    startup_error_log = logs_dir / f"[{timestamp}][startup_error][{time_str}].log"
     
     def write_startup_error(error_msg: str, traceback_str: str = ""):
         """Write startup error to log file"""

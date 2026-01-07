@@ -60,8 +60,18 @@ class WheelhouseManager:
             }
     
     def log(self, message: str):
-        """Log message to console"""
-        print(f"[WHEELHOUSE] {message}")
+        """Log message to console with encoding safety"""
+        try:
+            print(f"[WHEELHOUSE] {message}")
+        except UnicodeEncodeError:
+            # Fallback for Windows consoles that don't support UTF-8
+            safe_message = message.replace('✓', '[OK]').replace('✗', '[FAIL]').replace('⚠', '[WARN]')
+            try:
+                print(f"[WHEELHOUSE] {safe_message}")
+            except Exception:
+                # Last resort: ASCII only
+                ascii_message = message.encode('ascii', 'replace').decode('ascii')
+                print(f"[WHEELHOUSE] {ascii_message}")
     
     def _extract_version_from_wheel(self, wheel_path: Path) -> Optional[str]:
         """
@@ -155,6 +165,56 @@ class WheelhouseManager:
                     return self._extract_version_from_wheel(wheel)
         
         return None
+
+    def _get_all_wheel_versions(self, package_name: str) -> List[str]:
+        """
+        Get ALL versions present in the wheelhouse for a given package.
+
+        Args:
+            package_name: Package name (normalized)
+
+        Returns:
+            List of version strings (may be empty). Duplicates removed.
+        """
+        pkg_normalized = package_name.lower().replace("_", "-")
+        versions = []
+        for wheel in self.wheelhouse.glob("*.whl"):
+            wheel_name_parts = wheel.stem.split("-")
+            if not wheel_name_parts:
+                continue
+            wheel_pkg = wheel_name_parts[0].lower().replace("_", "-")
+            if wheel_pkg != pkg_normalized:
+                continue
+            ver = self._extract_version_from_wheel(wheel)
+            if ver:
+                versions.append(ver)
+        # De-dupe while preserving order
+        seen = set()
+        uniq = []
+        for v in versions:
+            if v in seen:
+                continue
+            seen.add(v)
+            uniq.append(v)
+        return uniq
+
+    def _remove_nonmatching_package_wheels(self, package_name: str, expected_version: str) -> int:
+        """
+        Remove wheels for a package that do NOT match expected_version.
+        Returns number of removed wheels.
+        """
+        pkg_normalized = package_name.lower().replace("_", "-")
+        removed = 0
+        for wheel in list(self.wheelhouse.glob(f"{pkg_normalized}-*.whl")):
+            ver = self._extract_version_from_wheel(wheel)
+            if ver and ver != expected_version:
+                try:
+                    wheel.unlink()
+                    self.log(f"  Removed outdated wheel: {wheel.name}")
+                    removed += 1
+                except Exception as e:
+                    self.log(f"  Warning: Could not remove {wheel.name}: {e}")
+        return removed
     
     def _validate_wheelhouse_requirements(self, package_versions: dict = None) -> Tuple[bool, str]:
         """
@@ -168,34 +228,73 @@ class WheelhouseManager:
             Tuple of (is_valid: bool, error_message: str)
         """
         validation_errors = []
+        packages_to_remove = []  # Track which packages need wheel removal
         
         if package_versions:
             # Profile-based mode: validate against exact profile versions
             # Also check if wheels satisfy flexible requirements from manifest if they exist
-            critical_packages = ["torch", "transformers", "tokenizers", "numpy", "peft", "accelerate"]
-            
-            for pkg_name in critical_packages:
-                if pkg_name in package_versions:
+            # Validate ALL packages from profile, not just a hardcoded list
+            # Profile is the single source of truth - every package must match exactly
+            for pkg_name in package_versions.keys():
                     expected_version = package_versions[pkg_name]
-                    wheel_version = self._get_wheel_version(pkg_name)
-                    
-                    if not wheel_version:
-                        validation_errors.append(f"{pkg_name}: wheel not found")
+                    wheel_versions = self._get_all_wheel_versions(pkg_name)
+
+                    if not wheel_versions:
+                        # Wheel missing - will be downloaded in prepare phase
+                        # Don't add error - this is expected after removing wrong versions
                         continue
+
+                    # Check if expected_version is a range (contains >=, <, etc.) or exact version
+                    is_version_range = any(op in expected_version for op in [">=", "<=", ">", "<", "!=", ","])
                     
-                    # Check exact match first (profile requirement)
-                    if wheel_version != expected_version:
-                        # Check if it satisfies flexible requirement from manifest
-                        dep = next((d for d in self.manifest["core_dependencies"] if d["name"] == pkg_name), None)
-                        if dep and dep.get("version") != "FROM_CUDA_CONFIG":
-                            requirement_spec = dep["version"]
-                            # If requirement is flexible (not ==), validate against it
-                            if not requirement_spec.startswith("=="):
-                                if self._validate_wheel_against_requirement(pkg_name, wheel_version, requirement_spec):
-                                    # Wheel satisfies flexible requirement, that's OK
-                                    continue
+                    if is_version_range:
+                        # Version range: check if any wheel version satisfies the range
+                        if PACKAGING_AVAILABLE:
+                            try:
+                                spec = SpecifierSet(expected_version)
+                                # Check if any wheel version satisfies the range
+                                matching_versions = [
+                                    v for v in wheel_versions 
+                                    if spec.contains(pkg_version.parse(v))
+                                ]
+                                
+                                if not matching_versions:
+                                    # No wheel version satisfies the range - mark for removal
+                                    packages_to_remove.append((pkg_name, wheel_versions[0] if wheel_versions else "none", expected_version))
+                                    validation_errors.append(
+                                        f"{pkg_name}: wheel version(s) {wheel_versions} do not satisfy range {expected_version}"
+                                    )
+                                elif len(matching_versions) < len(wheel_versions):
+                                    # Some versions don't match - remove non-matching ones
+                                    for wheel_ver in wheel_versions:
+                                        if wheel_ver not in matching_versions:
+                                            # Remove this specific version wheel
+                                            self._remove_package_wheels(pkg_name, specific_version=wheel_ver)
+                                    # Refresh list after cleanup
+                                    wheel_versions = self._get_all_wheel_versions(pkg_name)
+                            except Exception as e:
+                                # If range parsing fails, log warning but don't fail validation
+                                self.log(f"  ⚠ Could not parse version range {expected_version} for {pkg_name}: {e}")
+                        else:
+                            # Packaging not available - fall back to simple string check
+                            # This is not ideal but better than failing
+                            self.log(f"  ⚠ Packaging library not available - cannot validate version range for {pkg_name}")
+                    else:
+                        # Exact version: check if it matches
+                        # STRICT: if multiple versions exist, remove everything except the expected version.
+                        if len(wheel_versions) > 1:
+                            removed = self._remove_nonmatching_package_wheels(pkg_name, expected_version)
+                            if removed > 0:
+                                # Refresh list after cleanup
+                                wheel_versions = self._get_all_wheel_versions(pkg_name)
                         
-                        validation_errors.append(f"{pkg_name}: wheel version {wheel_version} != expected {expected_version}")
+                        # After cleanup, the ONLY acceptable wheel version is the expected one.
+                        if expected_version not in wheel_versions:
+                            # Mark for removal - wrong version detected
+                            packages_to_remove.append((pkg_name, wheel_versions[0] if wheel_versions else "none", expected_version))
+                            validation_errors.append(
+                                f"{pkg_name}: wheel version(s) {wheel_versions} do not include expected {expected_version}"
+                            )
         else:
             # Manifest-based mode: validate against requirements from dependencies.json
             deps = sorted(self.manifest["core_dependencies"], key=lambda x: x["order"])
@@ -226,6 +325,13 @@ class WheelhouseManager:
                 if not self._validate_wheel_against_requirement(pkg_name, wheel_version, version_spec):
                     validation_errors.append(f"{pkg_name}: wheel version {wheel_version} does not satisfy {version_spec}")
         
+        # Remove wrong version wheels BEFORE returning
+        if packages_to_remove:
+            self.log(f"Removing {len(packages_to_remove)} outdated wheels...")
+            for pkg_name, old_ver, new_ver in packages_to_remove:
+                self.log(f"  {pkg_name}: {old_ver} -> {new_ver} (removing old)")
+                self._remove_package_wheels(pkg_name)
+        
         if validation_errors:
             error_msg = "Wheelhouse validation failed:\n  " + "\n  ".join(validation_errors)
             return False, error_msg
@@ -249,7 +355,8 @@ class WheelhouseManager:
         # Known compatibility rules (package -> required dependency version)
         known_requirements = {
             "transformers": {
-                "4.51.3": {"tokenizers": ">=0.22.0,<=0.23.0"},
+                # NOTE: requirements must match transformers' own dependency_versions_table.py
+                "4.51.3": {"tokenizers": ">=0.21,<0.22"},
                 "4.57.3": {"tokenizers": ">=0.22.0,<=0.23.0"},
                 # Add more as needed
             }
@@ -285,19 +392,19 @@ class WheelhouseManager:
             
             # Check if transformers version requires tokenizers>=0.22.0
             if min_transformers_ver:
-                # Transformers 4.51.3+ requires tokenizers>=0.22.0,<=0.23.0
+                # Transformers 4.57+ requires tokenizers>=0.22.0,<=0.23.0
                 requires_tokenizers_022 = False
                 if PACKAGING_AVAILABLE:
                     try:
-                        if pkg_version.parse(min_transformers_ver) >= pkg_version.parse("4.51.3"):
+                        if pkg_version.parse(min_transformers_ver) >= pkg_version.parse("4.57.0"):
                             requires_tokenizers_022 = True
                     except Exception:
                         # Fallback: string comparison
-                        if "4.51" in min_transformers_ver or "4.57" in min_transformers_ver:
+                        if "4.57" in min_transformers_ver:
                             requires_tokenizers_022 = True
                 else:
                     # Fallback: simple string check
-                    if "4.51" in min_transformers_ver or "4.57" in min_transformers_ver:
+                    if "4.57" in min_transformers_ver:
                         requires_tokenizers_022 = True
                 
                 if requires_tokenizers_022:
@@ -459,8 +566,9 @@ class WheelhouseManager:
                     for line in error_msg.split("\n"):
                         if line.strip():
                             self.log(f"  {line}")
-                    self.log("Clearing wheelhouse and re-downloading with correct versions...")
-                    self._clear_wheelhouse()
+                    self.log("Wrong version wheels removed. Re-downloading missing/correct versions...")
+                    # Don't clear entire wheelhouse - validation already removed wrong wheels
+                    # Just continue to download phase to get missing packages
                 else:
                     self.log(f"✓ Wheelhouse validation passed - {len(existing_wheels)} wheels satisfy current requirements")
                     self.log("Skipping re-download (use force_redownload=True to force)")
@@ -548,8 +656,18 @@ class WheelhouseManager:
             self.log("✓ Wheelhouse preparation complete")
             return True, ""
             
+        except UnicodeEncodeError as e:
+            # Handle encoding errors separately
+            return False, f"Wheelhouse preparation failed due to encoding error. Please ensure console supports UTF-8."
         except Exception as e:
-            return False, f"Wheelhouse preparation exception: {str(e)}"
+            error_msg = str(e)
+            # Handle Unicode in error messages
+            try:
+                if not error_msg.isascii():
+                    error_msg = error_msg.encode('ascii', 'replace').decode('ascii')
+            except:
+                error_msg = "Unknown error (encoding issue)"
+            return False, f"Wheelhouse preparation exception: {error_msg}"
     
     def _prepare_from_profile(self, cuda_config: str, python_version: Tuple[int, int], package_versions: dict) -> Tuple[bool, str]:
         """
@@ -616,22 +734,11 @@ class WheelhouseManager:
                 success, error = self._download_wheel(
                     package=f"{pkg_name}=={pkg_version}",
                     index_url=None,  # Use PyPI
-                    no_deps=False,  # Allow deps for non-torch packages
+                    # Profile mode must be deterministic: never let pip resolve/download dependencies,
+                    # otherwise it can pull a newer compatible-but-unwanted version (e.g. transformers 4.57.3).
+                    no_deps=True,
                     python_version=python_version
                 )
-                
-                # Fallback for transformers: if exact version fails, try flexible specifier
-                if not success and pkg_name == "transformers" and pkg_version == "4.51.3":
-                    self.log(f"  ⚠ Exact version {pkg_version} not available, trying flexible specifier...")
-                    flexible_spec = "transformers>=4.51.3,!=4.52.*,!=4.53.*,!=4.54.*,!=4.55.*,!=4.57.0,<4.58"
-                    success, error = self._download_wheel(
-                        package=flexible_spec,
-                        index_url=None,
-                        no_deps=False,
-                        python_version=python_version
-                    )
-                    if success:
-                        self.log(f"  ✓ Downloaded transformers with flexible version specifier")
                 
                 if not success:
                     # Check if it's critical
@@ -731,15 +838,56 @@ class WheelhouseManager:
             return True, ""
             
         except Exception as e:
-            return False, f"Manifest-based preparation failed: {str(e)}"
+            error_msg = str(e)
+            # Handle Unicode encoding issues in error messages
+            try:
+                error_msg = error_msg.encode('ascii', 'replace').decode('ascii') if not error_msg.isascii() else error_msg
+            except:
+                error_msg = "Wheelhouse preparation exception (encoding error in message)"
+            return False, f"Wheelhouse preparation exception: {error_msg}"
     
     def _clear_wheelhouse(self):
         """Clear existing wheelhouse"""
         if self.wheelhouse.exists():
             for item in self.wheelhouse.glob("*"):
                 if item.is_file():
-                    item.unlink()
+                    try:
+                        item.unlink()
+                    except Exception as e:
+                        self.log(f"Warning: Could not delete {item.name}: {e}")
             self.log("Existing wheelhouse cleared")
+    
+    def _remove_package_wheels(self, package_name: str, specific_version: Optional[str] = None):
+        """Remove wheels for a specific package from wheelhouse.
+        
+        Args:
+            package_name: Package name to remove
+            specific_version: If provided, only remove this specific version. 
+                            If None, remove all versions of the package.
+        """
+        pkg_normalized = package_name.lower().replace("_", "-")
+        removed_count = 0
+        
+        for wheel in self.wheelhouse.glob("*.whl"):
+            wheel_name_parts = wheel.stem.split("-")
+            if len(wheel_name_parts) >= 1:
+                wheel_pkg = wheel_name_parts[0].lower().replace("_", "-")
+                if wheel_pkg == pkg_normalized:
+                    # If specific_version is provided, check if this wheel matches
+                    if specific_version is not None:
+                        # Extract version from wheel name (typically second part)
+                        if len(wheel_name_parts) >= 2:
+                            wheel_version = wheel_name_parts[1]
+                            if wheel_version != specific_version:
+                                continue  # Skip this wheel - not the version we want to remove
+                    try:
+                        self.log(f"  Removing outdated wheel: {wheel.name}")
+                        wheel.unlink()
+                        removed_count += 1
+                    except Exception as e:
+                        self.log(f"  Warning: Could not delete {wheel.name}: {e}")
+        
+        return removed_count
     
     def _download_wheel(
         self, 

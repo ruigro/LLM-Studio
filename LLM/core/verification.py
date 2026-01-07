@@ -47,8 +47,15 @@ class VerificationSystem:
             }
     
     def log(self, message: str):
-        """Log message to console"""
-        print(f"[VERIFY] {message}")
+        """Log message to console with encoding safety"""
+        try:
+            print(f"[VERIFY] {message}")
+        except UnicodeEncodeError:
+            safe_message = message.replace('✓', '[OK]').replace('✗', '[FAIL]').replace('⚠', '[WARN]')
+            try:
+                print(f"[VERIFY] {safe_message}")
+            except Exception:
+                pass
     
     def verify_all(self) -> Tuple[bool, List[str]]:
         """

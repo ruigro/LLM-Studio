@@ -24,9 +24,13 @@ class InstallerV2:
     Orchestrates detection, wheel download, and atomic installation.
     """
     
-    def __init__(self):
-        """Initialize installer coordinator"""
-        self.root = Path(__file__).parent
+    def __init__(self, root_dir: Path = None):
+        """Initialize installer coordinator
+        
+        Args:
+            root_dir: Root directory containing .venv, metadata, etc. Defaults to script directory.
+        """
+        self.root = root_dir if root_dir else Path(__file__).parent
         self.manifest_path = self.root / "metadata" / "dependencies.json"
         self.compat_matrix_path = self.root / "metadata" / "compatibility_matrix.json"
         self.wheelhouse = self.root / "wheelhouse"
@@ -45,8 +49,16 @@ class InstallerV2:
             self.log("⚠ Compatibility matrix not found. Using legacy fixed-version mode.")
     
     def log(self, message: str):
-        """Log message to console"""
-        print(f"[INSTALLER-V2] {message}")
+        """Log message to console with encoding safety"""
+        try:
+            print(f"[INSTALLER-V2] {message}")
+        except UnicodeEncodeError:
+            # Fallback for Windows consoles that don't support UTF-8 characters
+            safe_message = message.replace('✓', '[OK]').replace('✗', '[FAIL]').replace('⚠', '[WARN]').replace('🎯', '[TARGET]')
+            try:
+                print(f"[INSTALLER-V2] {safe_message}")
+            except Exception:
+                pass # Give up if even safe message fails
     
     def install(self, skip_wheelhouse: bool = False) -> bool:
         """
@@ -162,7 +174,7 @@ class InstallerV2:
             self.log("-" * 60)
             
             installer = ImmutableInstaller(self.venv, self.wheelhouse, self.manifest_path)
-            success, error = installer.install(cuda_config)
+            success, error = installer.install(cuda_config, package_versions=package_versions)
             
             if not success:
                 self.log(f"\n✗ Installation failed:")
@@ -217,7 +229,7 @@ class InstallerV2:
                             
                             # Retry with resume mode (don't clear venv or wheelhouse)
                             installer = ImmutableInstaller(self.venv, self.wheelhouse, self.manifest_path)
-                            success, error = installer.install(cuda_config)
+                            success, error = installer.install(cuda_config, package_versions=package_versions)
                             
                             if success:
                                 self.log("\n✓ Installation succeeded after resume!")
@@ -271,7 +283,7 @@ class InstallerV2:
                     self.log("-" * 60)
                     
                     installer = ImmutableInstaller(self.venv, self.wheelhouse, self.manifest_path)
-                    success, error = installer.install(cuda_config)
+                    success, error = installer.install(cuda_config, package_versions=package_versions)
                     
                     if not success:
                         self.log(f"\n✗ Installation still failed after retry:")
@@ -297,6 +309,155 @@ class InstallerV2:
             return False
         except Exception as e:
             self.log(f"\n✗ Installation failed with exception:")
+            self.log(f"  {type(e).__name__}: {str(e)}")
+            
+            import traceback
+            self.log("\nFull traceback:")
+            self.log(traceback.format_exc())
+            
+            return False
+    
+    def repair(self) -> bool:
+        """
+        Repair mode: Only fix broken/missing packages without destroying venv.
+        Reuses existing wheelhouse and preserves working packages.
+        
+        Returns:
+            True if repair successful, False otherwise
+        """
+        try:
+            self.log("=" * 60)
+            self.log("LLM Fine-tuning Studio - Repair Mode")
+            self.log("=" * 60)
+            
+            # Check if venv exists
+            if not self.venv.exists():
+                self.log("\n✗ Virtual environment not found.")
+                self.log("  Use install() for fresh installation.")
+                return False
+            
+            # Get the target venv Python executable (not sys.executable which may be bootstrap)
+            if sys.platform == 'win32':
+                target_python = self.venv / "Scripts" / "python.exe"
+            else:
+                target_python = self.venv / "bin" / "python"
+            
+            if not target_python.exists():
+                self.log(f"\n✗ Target Python not found: {target_python}")
+                self.log("  Use install() for fresh installation.")
+                return False
+            
+            self.log(f"\nTarget environment: {self.venv}")
+            self.log(f"Target Python: {target_python}")
+            
+            # Check if wheelhouse exists (but always validate it against profile)
+            if not self.wheelhouse.exists() or len(list(self.wheelhouse.glob("*.whl"))) == 0:
+                self.log("\n⚠ Wheelhouse not found or empty.")
+                self.log("  Will prepare wheelhouse first...")
+            else:
+                wheel_count = len(list(self.wheelhouse.glob("*.whl")))
+                self.log(f"\n✓ Found existing wheelhouse with {wheel_count} wheels")
+                self.log("  Validating against profile requirements...")
+            
+            # PHASE 0: Detection (using target Python, not current runtime)
+            self.log("\nPHASE 0: Hardware and Platform Detection")
+            self.log("-" * 60)
+            
+            # Use SystemDetector but get Python info from target
+            detector = SystemDetector()
+            results = detector.detect_all()
+            
+            # Override Python detection with target venv Python
+            results['python'] = {
+                'found': True,
+                'version': f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}",
+                'executable': str(target_python),
+                'path': str(target_python.parent),
+                'pip_available': True
+            }
+            
+            # Display detection results
+            self._display_detection_results(results)
+            
+            # Validate Python version
+            python_version = (sys.version_info.major, sys.version_info.minor)
+            min_py = tuple(map(int, self.manifest["python_min"].split('.')))
+            max_py = tuple(map(int, self.manifest["python_max"].split('.')))
+            
+            if python_version < min_py or python_version > max_py:
+                raise ValueError(
+                    f"\n✗ Python {python_version[0]}.{python_version[1]} is not supported.\n"
+                    f"  Required: Python {self.manifest['python_min']} - {self.manifest['python_max']}"
+                )
+            
+            # Determine CUDA config
+            if self.use_adaptive:
+                self.log("\n🎯 Using hardware-adaptive repair")
+                from core.profile_selector import ProfileSelector
+                hw_profile = detector.get_hardware_profile()
+                selector = ProfileSelector(self.compat_matrix_path)
+                try:
+                    profile_name, package_versions, warnings = selector.select_profile(hw_profile)
+                    self.log(f"\n✓ Selected profile: {profile_name}")
+                    cuda_config = self._extract_cuda_config(package_versions.get("torch", ""))
+                except Exception as e:
+                    raise ValueError(f"Profile selection failed: {str(e)}")
+            else:
+                self.log("\n⚠ Using legacy fixed-version repair")
+                cuda_config = self._determine_cuda_config(results)
+                package_versions = None
+            
+            self.log(f"\n✓ Target configuration: {cuda_config}")
+            
+            # PHASE 1: Prepare wheelhouse (ALWAYS - includes validation)
+            self.log("\nPHASE 1: Wheelhouse Preparation & Validation")
+            self.log("-" * 60)
+            
+            wheelhouse_mgr = WheelhouseManager(self.manifest_path, self.wheelhouse)
+            python_version = (sys.version_info.major, sys.version_info.minor)
+            success, error = wheelhouse_mgr.prepare_wheelhouse(
+                cuda_config, 
+                python_version,
+                package_versions,
+                force_redownload=False  # Will auto-detect mismatches and redownload only if needed
+            )
+            
+            if not success:
+                self.log(f"\n✗ Wheelhouse preparation failed:")
+                self.log(f"  {error}")
+                return False
+            
+            self.log("\n✓ Wheelhouse ready and validated")
+            
+            # PHASE 2-6: Repair (resume mode - only install broken/missing packages)
+            self.log("\nPHASE 2-6: Repair Installation (resume mode)")
+            self.log("-" * 60)
+            self.log("  Preserving all working packages")
+            self.log("  Starting installation engine...")
+            
+            installer = ImmutableInstaller(self.venv, self.wheelhouse, self.manifest_path)
+            self.log("  Engine initialized. Executing install pass...")
+            success, error = installer.install(cuda_config, package_versions=package_versions)
+            
+            if not success:
+                self.log(f"\n✗ Repair failed:")
+                self.log(f"  {error}")
+                return False
+            
+            self.log("\n" + "=" * 60)
+            self.log("✓ Repair complete!")
+            self.log("=" * 60)
+            self.log(f"\nVirtual environment: {self.venv}")
+            self.log(f"Python executable: {self.venv / 'Scripts' / 'python.exe' if sys.platform == 'win32' else self.venv / 'bin' / 'python'}")
+            self.log("\nYou can now launch the application.")
+            
+            return True
+            
+        except KeyboardInterrupt:
+            self.log("\n\nRepair interrupted by user")
+            return False
+        except Exception as e:
+            self.log(f"\n✗ Repair failed with exception:")
             self.log(f"  {type(e).__name__}: {str(e)}")
             
             import traceback
@@ -514,7 +675,10 @@ Examples:
         sys.exit(0 if success else 1)
         
     except Exception as e:
-        print(f"\nFATAL ERROR: {str(e)}")
+        try:
+            print(f"\nFATAL ERROR: {str(e)}")
+        except Exception:
+            pass
         import traceback
         traceback.print_exc()
         sys.exit(1)

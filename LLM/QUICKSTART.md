@@ -23,7 +23,8 @@ The app will automatically:
    - Training takes ~20-30 seconds for small datasets
 
 3. **Use Your Model**
-   - Trained model saved to `./fine_tuned_adapter`
+   - Trained model saved to `./fine_tuned`
+   - Meaningful naming: `base_model-task-vN` (e.g., `gemma-2-2b-it-beauty-v1`)
    - Ready to use for inference
 
 ## 🛠️ Manual Launch
@@ -48,7 +49,7 @@ Then open http://localhost:8501
 2. Launch the GUI
 3. Click "Start Training"
 4. Wait for completion (progress shown in real-time)
-5. Model saved to `./fine_tuned_adapter`
+5. Model saved to `./fine_tuned`
 
 ## ⚡ Direct Training (No GUI)
 

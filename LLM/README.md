@@ -110,43 +110,27 @@ Save one example per line to `train_data.jsonl`:
 {"instruction": "Translate the following sentence into French:", "output": "Bonjour le monde"}
 ```
 
-Using the recommended helper: `workflow.py` (run inside `LLM`)
----------------------------------------
-
-```bash
-# Train only
-cd LLM
-python workflow.py train --data-path train_data.jsonl --output-dir ./fine_tuned_adapter --epochs 3 --batch-size 1
-
-# Validate only
-python workflow.py validate --adapter-dir ./fine_tuned_adapter/M1Checkpoint1
-
-# Run inference
-python workflow.py run --adapter-dir ./fine_tuned_adapter/M1Checkpoint1 --prompt "### Instruction:\nSummarize this paragraph.\n\n### Response:\n"
-
-# Full pipeline (train -> validate -> run)
-python workflow.py all --epochs 3 --prompt "Test prompt"
-```
-
 Manual commands (run inside `LLM`)
 ---------------
 
 ```bash
 # Train (manual)
 cd LLM
-python finetune.py --data-path train_data.jsonl --output-dir ./fine_tuned_adapter --epochs 3 --batch-size 1
+python finetune.py --data-path train_data.jsonl --output-dir ./fine_tuned --epochs 3 --batch-size 1
 
 # Validate (manual)
-python validate_prompts.py --adapter-dir ./fine_tuned_adapter/M1Checkpoint1 --base-model unsloth/llama-3.2-3b-instruct-unsloth-bnb-4bit --prompts validation_prompts.jsonl --out validation_results.jsonl
+# Note: replace with your actual adapter name
+python validate_prompts.py --adapter-dir ./fine_tuned/gemma-2-2b-it-custom-v1 --base-model unsloth/llama-3.2-3b-instruct-unsloth-bnb-4bit --prompts validation_prompts.jsonl --out validation_results.jsonl
 
 # Run (manual)
-python run_adapter.py --adapter-dir ./fine_tuned_adapter/M1Checkpoint1 --prompt "### Instruction:\nSummarize this paragraph.\n\n### Response:\n"
+# Note: replace with your actual adapter name
+python run_adapter.py --adapter-dir ./fine_tuned/gemma-2-2b-it-custom-v1 --prompt "### Instruction:\nSummarize this paragraph.\n\n### Response:\n"
 ```
 
 Notes
 -----
 
-- Checkpoints are saved as `M{n}Checkpoint{m}` under your `--output-dir` (e.g. `fine_tuned_adapter/M1Checkpoint1`).
+- Adapters are saved as `base_model-task-vN` under your `--output-dir` (e.g. `fine_tuned/gemma-2-2b-it-beauty-v1`).
 - W&B is offline by default. To enable online W&B, install `wandb` and run `workflow.py` with `--enable-wandb`.
 - Preview cleanup with `bash cleanup_generated.sh` and delete with `bash cleanup_generated.sh --yes`.
 
