@@ -6,6 +6,7 @@ import re
 import torch
 import io
 import shutil
+import time
 from pathlib import Path
 from datetime import datetime
 
@@ -85,15 +86,17 @@ try:
     import unsloth
     from unsloth import FastLanguageModel
     HAS_UNSLOTH = True
-except ImportError:
+except (ImportError, NotImplementedError, Exception) as e:
     HAS_UNSLOTH = False
     FastLanguageModel = None
+    # Don't print error here, we'll handle it in main() if unsloth is requested
 
 # Always import transformers classes - we may need them even if unsloth is available (fallback)
 from transformers import AutoModelForCausalLM, AutoTokenizer, TrainingArguments, BitsAndBytesConfig
 from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
 from trl import SFTTrainer
 from datasets import load_dataset
+from transformers import TrainerCallback, TrainerState, TrainerControl
 
 # Import compatibility module for runtime capability detection
 from core.model_compatibility import (
@@ -243,6 +246,23 @@ def main():
     DATASET_PATH = args.data_path
     OUTPUT_DIR = args.output_dir
 
+    # Log CUDA visibility and selected device
+    try:
+        cuda_vis = os.environ.get("CUDA_VISIBLE_DEVICES", "(not set)")
+        cuda_order = os.environ.get("CUDA_DEVICE_ORDER", "(not set)")
+        print(f"[INFO] CUDA_VISIBLE_DEVICES={cuda_vis} | CUDA_DEVICE_ORDER={cuda_order}")
+        if torch.cuda.is_available():
+            dev_count = torch.cuda.device_count()
+            print(f"[INFO] torch sees {dev_count} CUDA device(s)")
+            for i in range(dev_count):
+                print(f"[INFO]   cuda:{i} -> {torch.cuda.get_device_name(i)}")
+            # Report which device index will be used by default
+            print(f"[INFO] Default torch device: cuda:0 => {torch.cuda.get_device_name(0)}")
+        else:
+            print("[INFO] torch.cuda.is_available() == False")
+    except Exception as e:
+        print(f"[WARN] Failed to log CUDA devices: {e}")
+
     LORA_R = args.lora_r
     LORA_ALPHA = args.lora_alpha
     LORA_DROPOUT = args.lora_dropout
@@ -250,7 +270,11 @@ def main():
     GRADIENT_ACCUMULATION = args.grad_accum
     LEARNING_RATE = args.learning_rate
 
-    print(f"Loading model and tokenizer: {MODEL_NAME}")
+    if not os.path.exists(DATASET_PATH):
+        print(f"[ERROR] Dataset file not found: {DATASET_PATH}")
+        sys.exit(1)
+
+    print(f"[INFO] Loading model and tokenizer: {MODEL_NAME}")
 
     # Use compatibility module to detect model type and capabilities
     model_info = detect_model_type(MODEL_NAME)
@@ -279,13 +303,10 @@ def main():
             if MODEL_NAME != model_info["original_name"]:
                 print(f"[INFO] Using base model: {MODEL_NAME}")
 
-    # Determine if we should try unsloth based on strategy and user preference
-    should_try_unsloth = (
-        args.use_unsloth and 
-        strategy == "unsloth" and 
-        unsloth_caps["functional"] and 
-        peft_caps["available"]
-    )
+    # Disable Unsloth path to avoid FP16 grad-scaler crashes on this setup
+    should_try_unsloth = False
+    if args.use_unsloth and unsloth_caps["functional"]:
+        print("[INFO] Skipping Unsloth path; using standard PEFT (more stable on this system).")
     
     if should_try_unsloth:
         try:
@@ -342,7 +363,7 @@ def main():
         if tokenizer.pad_token is None:
             tokenizer.pad_token = tokenizer.eos_token
         
-        # Try loading with quantization first, fallback to FP16 if bitsandbytes fails
+        # Try loading with quantization first, fallback to FP32 if bitsandbytes fails
         load_kwargs = {
             "device_map": "auto",
             "trust_remote_code": True,
@@ -352,9 +373,9 @@ def main():
         if bnb_config is not None:
             load_kwargs["quantization_config"] = bnb_config
         else:
-            # Use FP16 when quantization is not available
-            load_kwargs["torch_dtype"] = torch.float16
-            print("[WARNING] bitsandbytes not available - using FP16 (requires more VRAM)")
+            # Use FP32 when quantization is not available to avoid AMP/GradScaler issues
+            load_kwargs["torch_dtype"] = torch.float32
+            print("[WARNING] bitsandbytes not available - using FP32 (more VRAM, but stable)")
         
         try:
             model = AutoModelForCausalLM.from_pretrained(MODEL_NAME, **load_kwargs)
@@ -408,7 +429,7 @@ def main():
         if hasattr(model, "gradient_checkpointing_enable"):
             model.gradient_checkpointing_enable()
 
-    print("Preparing dataset...")
+    print(f"[INFO] Preparing dataset...")
     
     # Smart dataset loader - handles JSON and JSONL automatically
     import tempfile
@@ -416,11 +437,11 @@ def main():
     file_format = detect_file_format(DATASET_PATH)
     
     if file_format == 'jsonl' or (file_format == 'auto' and DATASET_PATH.endswith('.jsonl')):
-        print(f"✓ Detected JSONL format")
+        print(f"[INFO] ✓ Detected JSONL format")
         raw_data = load_jsonl(DATASET_PATH, skip_errors=not args.strict_jsonl)
     else:
         # Standard JSON loading
-        print(f"✓ Detected JSON format")
+        print(f"[INFO] ✓ Detected JSON format")
         with open(DATASET_PATH, 'r', encoding='utf-8') as f:
             raw_data = json.load(f)
     
@@ -430,17 +451,17 @@ def main():
         for key in ['data', 'examples', 'train', 'dataset', 'items', 'conversations', 'entries']:
             if key in raw_data and isinstance(raw_data[key], list):
                 raw_data = raw_data[key]
-                print(f"✓ Extracted data from '{key}' field")
+                print(f"[INFO] ✓ Extracted data from '{key}' field")
                 break
         else:
             # If still a dict, treat as single example
             raw_data = [raw_data]
-            print("✓ Converted single dict to list")
+            print("[INFO] ✓ Converted single dict to list")
     
     if not isinstance(raw_data, list):
         raise ValueError(f"Dataset must be a list or dict with data field. Got: {type(raw_data)}")
     
-    print(f"✓ Found {len(raw_data)} examples")
+    print(f"[INFO] ✓ Found {len(raw_data)} examples")
     
     # Step 2: Normalize field names (handle various formats)
     normalized_data = []
@@ -472,7 +493,7 @@ def main():
         
         # Handle chat/messages format (like ShareGPT, OpenAI)
         if 'messages' in first or 'conversations' in first:
-            print("✓ Detected chat/messages format")
+            print("[INFO] ✓ Detected chat/messages format")
             msg_key = 'messages' if 'messages' in first else 'conversations'
             for item in raw_data:
                 messages = item[msg_key]
@@ -491,7 +512,7 @@ def main():
         
         # Handle standard formats
         elif instruction_key and output_key:
-            print(f"✓ Detected format: '{instruction_key}' -> '{output_key}'")
+            print(f"[INFO] ✓ Detected format: '{instruction_key}' -> '{output_key}'")
             for item in raw_data:
                 normalized_data.append({
                     'instruction': str(item.get(instruction_key, '')),
@@ -500,7 +521,7 @@ def main():
         
         # Handle Alpaca format with optional input field
         elif 'instruction' in first:
-            print("✓ Detected Alpaca format (instruction + optional input)")
+            print("[INFO] ✓ Detected Alpaca format (instruction + optional input)")
             for item in raw_data:
                 instruction = item.get('instruction', '')
                 inp = item.get('input', '')
@@ -519,7 +540,7 @@ def main():
     if not normalized_data:
         raise ValueError("No valid examples found in dataset")
     
-    print(f"✓ Normalized {len(normalized_data)} examples")
+    print(f"[INFO] ✓ Normalized {len(normalized_data)} examples")
     
     # Step 3: Write to JSONL format for reliable loading
     temp_file = tempfile.NamedTemporaryFile(mode='w', suffix='.jsonl', delete=False, encoding='utf-8')
@@ -529,7 +550,7 @@ def main():
     
     # Step 4: Load with HuggingFace datasets
     dataset = load_dataset("json", data_files=temp_file.name, split="train")
-    print(f"✓ Loaded dataset with {len(dataset)} examples")
+    print(f"[INFO] ✓ Loaded dataset with {len(dataset)} examples")
     
     if args.max_examples:
         dataset = dataset.select(range(min(args.max_examples, len(dataset))))
@@ -540,7 +561,47 @@ def main():
 
     dataset = dataset.map(formatting_func, remove_columns=dataset.column_names)
 
-    print("Starting training...")
+    # Training bookkeeping for ETA/speed
+    total_samples = len(dataset)
+    num_batches = (total_samples + BATCH_SIZE - 1) // BATCH_SIZE
+    total_steps = ((num_batches + GRADIENT_ACCUMULATION - 1) // GRADIENT_ACCUMULATION) * args.epochs
+    effective_bs = BATCH_SIZE * GRADIENT_ACCUMULATION
+    print(f"[INFO] Training set size: {total_samples} examples | batches/epoch: {num_batches} | total optimizer steps: {total_steps}")
+
+    class DashboardCallback(TrainerCallback):
+        """Emit compact JSON logs for dashboard (step/loss/lr/speed/eta)."""
+        def __init__(self, total_steps: int, effective_bs: int, start_time: float) -> None:
+            self.total_steps = total_steps
+            self.effective_bs = effective_bs
+            self.start_time = start_time
+            self.last_step = 0
+
+        def on_log(self, args, state: TrainerState, control: TrainerControl, logs=None, **kwargs):
+            if logs is None:
+                return
+            step = state.global_step
+            if step <= 0:
+                return
+            elapsed = max(time.time() - self.start_time, 1e-6)
+            samples = step * self.effective_bs
+            samples_per_sec = samples / elapsed
+            remaining_steps = max(self.total_steps - step, 0)
+            eta_sec = remaining_steps * (elapsed / step)
+            payload = {
+                "step": step,
+                "total_steps": self.total_steps,
+                "epoch": logs.get("epoch", state.epoch),
+                "loss": logs.get("loss"),
+                "learning_rate": logs.get("learning_rate"),
+                "samples_per_sec": samples_per_sec,
+                "eta_sec": eta_sec,
+            }
+            try:
+                print(json.dumps(payload))
+            except Exception:
+                pass
+
+    print("[INFO] Starting training...")
     
     # Configure tqdm for real-time progress updates in GUI
     # Set environment variable to ensure tqdm flushes immediately
@@ -559,7 +620,11 @@ def main():
             warmup_steps=5,
             num_train_epochs=args.epochs,
             learning_rate=LEARNING_RATE,  # Use the configurable learning rate
-            fp16=not torch.cuda.is_bf16_supported(),
+            # Run in float32 to avoid GradScaler FP16 unscale errors.
+            fp16=False,
+            bf16=False,
+            half_precision_backend="auto",
+            max_grad_norm=0.0,  # keep clipping disabled
             logging_steps=1,
             output_dir=OUTPUT_DIR,
             optim="adamw_8bit",
@@ -570,6 +635,7 @@ def main():
             save_total_limit=2,
         ),
     )
+    trainer.add_callback(DashboardCallback(total_steps=total_steps, effective_bs=effective_bs, start_time=time.time()))
 
     # Train and capture training state
     print("[INFO] Starting training loop...")
@@ -587,48 +653,67 @@ def main():
         print("[WARNING] Training completed but no metrics were recorded!")
         print("[WARNING] This might indicate training did not actually run.")
 
-    print("Saving LoRA adapter...")
+    print(f"[INFO] Saving LoRA adapter to: {adapter_path.absolute()}")
 
-    # Ensure output directory exists (should be fine_tuned/)
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
-    
-    # Cleanup old adapters before saving new one (keep latest 10)
-    cleanup_old_adapters(Path(OUTPUT_DIR), keep_latest=10)
-    
-    # Generate meaningful adapter name: base_model-task-version
-    # e.g., "gemma-2-2b-it-beauty-v1"
-    base_slug = MODEL_NAME.replace("/", "-").replace("__", "-").replace("_", "-")
-    # Extract task name from dataset filename
-    dataset_name = Path(DATASET_PATH).stem
-    # Clean up dataset name
-    task_name = dataset_name.replace("_dataset", "").replace("_finetune", "").replace("_", "-")
-    if not task_name or task_name == dataset_name:
-        # Fallback: use generic name
-        task_name = "custom"
-    
-    # Find next version number for this base_model-task combination
-    version = 1
-    while True:
-        adapter_name = f"{base_slug}-{task_name}-v{version}"
-        adapter_path = Path(OUTPUT_DIR) / adapter_name
-        if not adapter_path.exists():
-            break
-        version += 1
-    
+    # Ensure adapter_path exists
     adapter_path.mkdir(parents=True, exist_ok=True)
     
-    # Save adapter (this saves adapter_config.json and adapter_model.safetensors/.bin)
-    model.save_pretrained(str(adapter_path))
+    try:
+        # Save adapter (this saves adapter_config.json and adapter_model.safetensors/.bin)
+        # Use a more robust saving method if using unsloth
+        if should_try_unsloth and hasattr(model, "save_pretrained_lora"):
+            print("[INFO] Using unsloth-optimized saving...")
+            model.save_pretrained_lora(str(adapter_path))
+        else:
+            print("[INFO] Using standard PEFT saving...")
+            model.save_pretrained(str(adapter_path))
+            
+        # Explicitly save tokenizer as well to the adapter dir (useful for loading)
+        tokenizer.save_pretrained(str(adapter_path))
+        print("[INFO] Tokenizer saved to adapter directory")
+        
+    except Exception as e:
+        print(f"[ERROR] Failed to save model: {e}")
+        import traceback
+        traceback.print_exc()
+        # Don't stop here, let's see if we can at least save the metadata
     
-    # Remove tokenizer files - base model already has them, no need to duplicate
-    tokenizer_files = [
-        "tokenizer.json", "tokenizer_config.json", "vocab.json", 
-        "merges.txt", "special_tokens_map.json", "tokenizer.model"
-    ]
-    for tokenizer_file in tokenizer_files:
-        tokenizer_path = adapter_path / tokenizer_file
-        if tokenizer_path.exists():
-            tokenizer_path.unlink()
+    # Verify adapter files were saved
+    adapter_config = adapter_path / "adapter_config.json"
+    adapter_model = adapter_path / "adapter_model.safetensors"
+    if not adapter_model.exists():
+        adapter_model = adapter_path / "adapter_model.bin"
+    
+    # If still not found, check for any .safetensors or .bin in the directory
+    if not adapter_model.exists():
+        bin_files = list(adapter_path.glob("*.bin"))
+        safe_files = list(adapter_path.glob("*.safetensors"))
+        if bin_files:
+            adapter_model = bin_files[0]
+        elif safe_files:
+            adapter_model = safe_files[0]
+    
+    if adapter_config.exists() and adapter_model.exists():
+        adapter_size = adapter_model.stat().st_size
+        print(f"[INFO] ✓ LoRA adapter saved successfully ({adapter_size / 1024 / 1024:.2f} MB)")
+        print(f"[INFO] ✓ Adapter location: {adapter_path.absolute()}")
+        
+        # List files for verification in logs
+        print(f"[INFO] Files in adapter directory:")
+        for f in adapter_path.iterdir():
+            print(f"  - {f.name} ({f.stat().st_size / 1024:.1f} KB)")
+    else:
+        print(f"[WARNING] LoRA adapter files not found! Check {adapter_path.absolute()}")
+        if not adapter_config.exists():
+            print(f"[ERROR] Missing: {adapter_config}")
+        if not adapter_model.exists():
+            print(f"[ERROR] Missing: {adapter_model}")
+        
+        # List whatever IS there
+        if adapter_path.exists():
+            print(f"[INFO] Directory {adapter_path} contains:")
+            for f in adapter_path.iterdir():
+                print(f"  - {f.name}")
     
     # Save training metadata
     training_info = {
@@ -651,27 +736,28 @@ def main():
         } if train_result.metrics else None
     }
     
-    with open(adapter_path / "training_info.json", "w", encoding="utf-8") as f:
-        json.dump(training_info, f, indent=2)
+    try:
+        with open(adapter_path / "training_info.json", "w", encoding="utf-8") as f:
+            json.dump(training_info, f, indent=2)
+        print("[INFO] Training metadata saved")
+    except Exception as e:
+        print(f"[WARNING] Failed to save metadata: {e}")
     
-    # Verify adapter files were saved
-    adapter_config = adapter_path / "adapter_config.json"
-    adapter_model = adapter_path / "adapter_model.safetensors"
-    if not adapter_model.exists():
-        adapter_model = adapter_path / "adapter_model.bin"
+    # Remove tokenizer files - base model already has them, no need to duplicate
+    # Only if they were successfully saved elsewhere or if we want to save space
+    # BUT keeping them is safer for loading in some tools
+    """
+    tokenizer_files = [
+        "tokenizer.json", "tokenizer_config.json", "vocab.json", 
+        "merges.txt", "special_tokens_map.json", "tokenizer.model"
+    ]
+    for tokenizer_file in tokenizer_files:
+        tokenizer_path = adapter_path / tokenizer_file
+        if tokenizer_path.exists():
+            tokenizer_path.unlink()
+    """
     
-    if adapter_config.exists() and adapter_model.exists():
-        adapter_size = adapter_model.stat().st_size
-        print(f"[INFO] ✓ LoRA adapter saved successfully ({adapter_size / 1024 / 1024:.2f} MB)")
-        print(f"[INFO] ✓ Adapter location: {adapter_path}")
-    else:
-        print(f"[WARNING] LoRA adapter files not found! Check {adapter_path}")
-        if not adapter_config.exists():
-            print(f"[ERROR] Missing: {adapter_config}")
-        if not adapter_model.exists():
-            print(f"[ERROR] Missing: {adapter_model}")
-    
-    print(f"Finetuning complete! Adapter saved to: {adapter_path}")
+    print(f"[INFO] Finetuning complete! Adapter saved to: {adapter_path.absolute()}")
 
 
 if __name__ == "__main__":

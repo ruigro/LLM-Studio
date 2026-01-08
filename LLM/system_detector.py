@@ -591,6 +591,31 @@ class SystemDetector:
         
         return health
     
+    def get_gpu_memory_usage(self) -> List[Dict]:
+        """Get current GPU memory usage for all detected GPUs"""
+        result = []
+        try:
+            nvidia_smi = subprocess.run(
+                ["nvidia-smi", "--query-gpu=memory.used,memory.total", "--format=csv,noheader,nounits"],
+                capture_output=True, text=True, timeout=5, **self.subprocess_flags
+            )
+            if nvidia_smi.returncode == 0:
+                lines = nvidia_smi.stdout.strip().split('\n')
+                for line in lines:
+                    if line.strip():
+                        parts = line.split(',')
+                        if len(parts) >= 2:
+                            used = float(parts[0].strip())
+                            total = float(parts[1].strip())
+                            result.append({
+                                "used_mb": used,
+                                "total_mb": total,
+                                "percentage": round((used / total) * 100, 1) if total > 0 else 0
+                            })
+        except:
+            pass
+        return result
+
     def detect_hardware(self) -> Dict:
         """Detect hardware capabilities"""
         result = {

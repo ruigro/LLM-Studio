@@ -1566,6 +1566,24 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(2000, self._retry_cuda_detection)
         
         print("=========================\n")
+
+    def _sort_gpus_by_memory(self, gpus: list) -> list:
+        """Sort GPU list by reported memory (descending) while preserving original index."""
+        import re
+
+        enriched = []
+        for idx, gpu in enumerate(gpus or []):
+            gpu_copy = dict(gpu) if isinstance(gpu, dict) else {"name": str(gpu)}
+            gpu_copy["_orig_index"] = idx
+            enriched.append(gpu_copy)
+
+        def mem_gb(mem_str: str) -> float:
+            match = re.search(r"(\d+(?:\.\d+)?)", str(mem_str or ""))
+            if not match:
+                return 0.0
+            return float(match.group(1)) / 1024.0 if "MiB" in str(mem_str) else float(match.group(1))
+
+        return sorted(enriched, key=lambda g: mem_gb(g.get("memory")), reverse=True)
     
     def _retry_cuda_detection(self):
         """Retry CUDA detection after initial failure"""
@@ -2835,7 +2853,7 @@ class MainWindow(QMainWindow):
 
         # Get real GPU info
         cuda_info = self.system_info.get("cuda", {})
-        gpus = cuda_info.get("gpus", [])
+        gpus = self._sort_gpus_by_memory(cuda_info.get("gpus", []))
         
         if gpus:
             status_color = self._get_status_color(True)
@@ -2853,8 +2871,9 @@ class MainWindow(QMainWindow):
                 gpu_row = QHBoxLayout()
                 gpu_name = gpu.get("name", "Unknown GPU")
                 gpu_mem = gpu.get("memory", "Unknown")
+                gpu_display_idx = gpu.get("_orig_index", idx)
                 
-                gpu_label = QLabel(f"<span style='font-weight: bold; text-decoration: none; border: none; border-bottom: none;'>GPU {idx}:</span> <span style='text-decoration: none; border: none; border-bottom: none;'>{gpu_name}</span>")
+                gpu_label = QLabel(f"<span style='font-weight: bold; text-decoration: none; border: none; border-bottom: none;'>GPU {gpu_display_idx}:</span> <span style='text-decoration: none; border: none; border-bottom: none;'>{gpu_name}</span>")
                 gpu_label.setObjectName(f"homeGpuLabel{idx}")
                 gpu_label.setStyleSheet(f"background: transparent; color: {text_color}; text-decoration: none; border: none; border-bottom: none;")
                 font = gpu_label.font()
@@ -4033,7 +4052,7 @@ class MainWindow(QMainWindow):
         
         # GPU status using REAL system detection
         cuda_info = self.system_info.get("cuda", {})
-        gpus = cuda_info.get("gpus", [])
+        gpus = self._sort_gpus_by_memory(cuda_info.get("gpus", []))
         
         if gpus:
             gpu_count = len(gpus)
@@ -4048,10 +4067,13 @@ class MainWindow(QMainWindow):
         # GPU selection dropdown
         self.gpu_select = QComboBox()
         
+        self.gpu_index_map = []
         if gpus:
             for idx, gpu in enumerate(gpus):
                 gpu_name = gpu.get("name", f"GPU {idx}")
-                self.gpu_select.addItem(f"GPU {idx}: {gpu_name}")
+                orig_idx = gpu.get("_orig_index", idx)
+                self.gpu_select.addItem(f"GPU {orig_idx}: {gpu_name}")
+                self.gpu_index_map.append(orig_idx)
             self.training_info_label = QLabel(f"⚡ Training will use: {self.gpu_select.currentText()}")
         else:
             self.gpu_select.addItem("No GPUs available - CPU mode")
@@ -4675,6 +4697,10 @@ class MainWindow(QMainWindow):
             self.train_log.setVisible(True)
             self.logs_expand_btn.setText("▲ Hide Logs")
 
+        # Initialize training output buffer
+        self._train_output_buffer = ""
+        self._train_line_count = 0
+        
         proc = QProcess(self)
         proc.setProgram(cmd[0])
         proc.setArguments(cmd[1:])
@@ -4691,15 +4717,22 @@ class MainWindow(QMainWindow):
         
         # Set GPU selection from Train tab dropdown
         if hasattr(self, 'gpu_select') and self.gpu_select.isEnabled():
-            selected_gpu_idx = self.gpu_select.currentIndex()
-            env.insert("CUDA_VISIBLE_DEVICES", str(selected_gpu_idx))
-            self.train_log.appendPlainText(f"[INFO] Using GPU {selected_gpu_idx}: {self.gpu_select.currentText()}")
+            selected_display_idx = self.gpu_select.currentIndex()
+            # Map displayed index to original CUDA index
+            real_cuda_idx = None
+            if hasattr(self, 'gpu_index_map') and self.gpu_index_map and selected_display_idx < len(self.gpu_index_map):
+                real_cuda_idx = self.gpu_index_map[selected_display_idx]
+            else:
+                real_cuda_idx = selected_display_idx
+            env.insert("CUDA_VISIBLE_DEVICES", str(real_cuda_idx))
+            env.insert("CUDA_DEVICE_ORDER", "PCI_BUS_ID")
+            self.train_log.appendPlainText(f"[INFO] Using GPU {real_cuda_idx}: {self.gpu_select.currentText()}")
         
         proc.setProcessEnvironment(env)
         
         proc.readyReadStandardOutput.connect(lambda: self._append_training_output(proc))
         proc.errorOccurred.connect(lambda err: self._on_training_error(proc, err))
-        proc.finished.connect(self._train_finished)
+        proc.finished.connect(lambda code, status: self._train_finished(code, status))
 
         self.train_log.clear()
         self.train_log.appendPlainText("=== Starting Training ===")
@@ -4713,7 +4746,7 @@ class MainWindow(QMainWindow):
         # Start process
         proc.start()
         
-        if not proc.waitForStarted(3000):
+        if not proc.waitForStarted(5000):
             self.train_log.appendPlainText("\n[ERROR] Failed to start training process!")
             self.train_start.setEnabled(True)
             self.train_stop.setEnabled(False)
@@ -4721,13 +4754,13 @@ class MainWindow(QMainWindow):
             
         self.train_proc = proc
         self.train_log.appendPlainText("[INFO] Training process started successfully")
-        if not proc.waitForStarted(5000):
-            QMessageBox.critical(self, "Training", "Failed to start training process.")
-            return
-
-        self.train_proc = proc
-        self.train_start.setEnabled(False)
-        self.train_stop.setEnabled(True)
+        
+        # Start background timer for GPU stats during training
+        if not hasattr(self, '_train_stats_timer'):
+            self._train_stats_timer = QTimer(self)
+            self._train_stats_timer.timeout.connect(self._update_training_stats_periodic)
+        
+        self._train_stats_timer.start(2000) # Update every 2 seconds
 
     def _on_training_error(self, proc, error):
         """Handle training process errors"""
@@ -4747,13 +4780,32 @@ class MainWindow(QMainWindow):
     def _stop_training(self) -> None:
         if self.train_proc is None:
             return
+        
+        # Stop stats timer
+        if hasattr(self, '_train_stats_timer'):
+            self._train_stats_timer.stop()
+            
         self.train_log.appendPlainText("\n[INFO] Terminating training process...")
         self.train_proc.terminate()
         if not self.train_proc.waitForFinished(5000):
             self.train_proc.kill()
 
-    def _train_finished(self) -> None:
-        self.train_log.appendPlainText("\n[INFO] Training process finished.")
+    def _train_finished(self, exit_code=0, exit_status=QProcess.NormalExit) -> None:
+        # Stop stats timer
+        if hasattr(self, '_train_stats_timer'):
+            self._train_stats_timer.stop()
+            
+        # Flush any remaining output in the buffer
+        if hasattr(self, '_train_output_buffer') and self._train_output_buffer:
+            remaining = self._train_output_buffer.strip()
+            if remaining:
+                # Process the last segment as metrics/logs
+                self._parse_single_line_metrics(remaining)
+                self._filter_and_append_to_train_log(remaining)
+            self._train_output_buffer = ""
+            
+        status_str = "NormalExit" if exit_status == QProcess.NormalExit else "CrashExit"
+        self.train_log.appendPlainText(f"\n[INFO] Training process finished. exit_code={exit_code}, status={status_str}")
         self.train_proc = None
         self.train_start.setEnabled(True)
         self.train_stop.setEnabled(False)
@@ -4804,18 +4856,21 @@ class MainWindow(QMainWindow):
         gpu_layout = QVBoxLayout(gpu_frame)
         
         cuda_info = self.system_info.get("cuda", {})
-        gpus = cuda_info.get("gpus", [])
+        gpus = self._sort_gpus_by_memory(cuda_info.get("gpus", []))
         
         # GPU selection dropdown for test tab
         gpu_row = QHBoxLayout()
         gpu_row.addWidget(QLabel("GPU for Inference:"))
         self.test_gpu_select = QComboBox()
+        self.test_gpu_index_map = []
         
         if gpus:
             for idx, gpu in enumerate(gpus):
                 gpu_name = gpu.get("name", f"GPU {idx}")
                 vram = gpu.get("memory", "N/A")
-                self.test_gpu_select.addItem(f"GPU {idx}: {gpu_name} ({vram})")
+                orig_idx = gpu.get("_orig_index", idx)
+                self.test_gpu_select.addItem(f"GPU {orig_idx}: {gpu_name} ({vram})")
+                self.test_gpu_index_map.append(orig_idx)
             info_text = f"✅ {len(gpus)} GPU(s) detected - select one for inference"
         else:
             self.test_gpu_select.addItem("No GPUs available - CPU mode")
@@ -7152,149 +7207,263 @@ respective package directories or official repositories.
     # ---------------- Helpers ----------------
     def _append_training_output(self, proc: QProcess) -> None:
         """Parse training output and update dashboard metrics + filtered logs"""
-        # Read ALL available data immediately for real-time updates
-        all_data = b""
-        while proc.bytesAvailable() > 0:
-            chunk = proc.readAllStandardOutput().data()
-            if chunk:
-                all_data += chunk
-            else:
-                break
+        # Read available data
+        data = proc.readAllStandardOutput().data()
+        if not data:
+            return
+            
+        # Decode text
+        new_text = data.decode("utf-8", errors="replace")
         
-        if not all_data:
+        # Add to buffer
+        if not hasattr(self, '_train_output_buffer'):
+            self._train_output_buffer = ""
+        self._train_output_buffer += new_text
+        
+        # Process complete lines/segments (tqdm uses \r)
+        import re
+        if '\n' in self._train_output_buffer or '\r' in self._train_output_buffer:
+            # Split by either \n or \r to handle both standard logs and progress bars
+            lines = re.split(r'[\n\r]+', self._train_output_buffer)
+            
+            # The last element is potentially a partial line, keep it in buffer
+            self._train_output_buffer = lines.pop()
+            
+            for line in lines:
+                line = line.strip()
+                if not line:
+                    continue
+                
+                # Parse metrics from this line
+                self._parse_single_line_metrics(line)
+                
+                # Filter and append to log
+                self._filter_and_append_to_train_log(line)
+
+    def _filter_and_append_to_train_log(self, line: str) -> None:
+        """Filter out noise and append important training logs"""
+        # Skip lines that are just noise
+        line_clean = line.strip()
+        if not line_clean:
+            return
+            
+        skip_patterns = [
+            '🦥 Unsloth Zoo will now patch',  # Repeated unsloth messages
+            'Unsloth: Tokenizing',  # Tokenization progress bars
+            '%|' in line,  # Any tqdm progress bar
+            'examples/s' in line or 'it/s' in line,  # Progress bar speed indicators
+            line_clean and line_clean[0].isdigit() and '%|' in line,  # Progress bar lines starting with numbers
+            '[' in line and ']' in line and ('examples/s' in line or 'it/s' in line),  # tqdm format
+        ]
+        
+        if any(skip_patterns):
             return
         
-        # Decode text
-        text = all_data.decode("utf-8", errors="replace")
+        # Only show: important messages, errors, warnings, tracebacks, and training summaries
+        line_lower = line.lower()
+        should_show = (
+            # Important markers
+            '[INFO]' in line or '[WARNING]' in line or '[ERROR]' in line or
+            'traceback' in line_lower or 'error:' in line_lower or 'exception:' in line_lower or
+            'starting' in line_lower or 'saving' in line_lower or 'complete' in line_lower or
+            'loading' in line_lower or 'preparing' in line_lower or
+            # Training step updates (JSON format with loss/epoch)
+            ('{' in line and 'loss' in line_lower and ('epoch' in line_lower or 'step' in line_lower)) or
+            # Epoch/step boundaries (but not progress bars)
+            ('epoch' in line_lower or 'step' in line_lower) and ('/' in line or 'of' in line) and '%|' not in line or
+            # Errors and warnings (more inclusive)
+            'failed' in line_lower or 'not found' in line_lower or 'no such' in line_lower or
+            'invalid' in line_lower or 'missing' in line_lower or
+            # File paths and OS errors
+            'path' in line_lower or 'directory' in line_lower or 'file' in line_lower or
+            # Important recommendations
+            'recommended' in line_lower or 'attention' in line_lower
+        )
         
-        # Parse metrics from training output
-        self._parse_training_metrics(text)
+        # Always show the first few lines of training to confirm it started correctly
+        # or if the line seems to be a real message (not just progress noise)
+        if not hasattr(self, '_train_line_count'):
+            self._train_line_count = 0
+        self._train_line_count += 1
         
-        # Filter and append to log (reduce noise from progress bars)
-        lines = text.split('\n')
-        for line in lines:
-            line = line.strip()
-            if not line:
-                continue
-            
-            # Filter out excessive progress bar updates and tqdm noise
-            # Skip lines that are just noise
-            skip_patterns = [
-                '🦥 Unsloth Zoo will now patch',  # Repeated unsloth messages
-                'Unsloth: Tokenizing',  # Tokenization progress bars
-                '%|' in line,  # Any tqdm progress bar
-                'examples/s' in line or 'it/s' in line,  # Progress bar speed indicators
-                line.strip() and line.strip()[0].isdigit() and '%|' in line,  # Progress bar lines starting with numbers
-                '[' in line and ']' in line and ('examples/s' in line or 'it/s' in line),  # tqdm format
-            ]
-            
-            if any(skip_patterns):
-                continue
-            
-            # Only show: important messages, errors, warnings, and training summaries
-            should_show = (
-                # Important markers
-                '[INFO]' in line or '[WARNING]' in line or '[ERROR]' in line or
-                'Starting training' in line or 'Saving' in line or 'Complete' in line or
-                # Training step updates (JSON format with loss/epoch)
-                ('{' in line and 'loss' in line.lower() and ('epoch' in line.lower() or 'step' in line.lower())) or
-                # Epoch/step boundaries (but not progress bars)
-                ('epoch' in line.lower() or 'step' in line.lower()) and ('/' in line or 'of' in line) and '%|' not in line or
-                # Errors and warnings
-                'error' in line.lower() or 'warning' in line.lower() or 'failed' in line.lower() or
-                'traceback' in line.lower() or 'exception' in line.lower() or
-                # Important recommendations
-                'recommended' in line.lower() and 'attention' in line.lower()
-            )
-            
-            if should_show:
-                self.train_log.appendPlainText(line.rstrip('\r'))
+        if self._train_line_count < 20 or should_show:
+            self.train_log.appendPlainText(line.rstrip('\r'))
     
-    def _parse_training_metrics(self, text: str) -> None:
-        """Parse training output to extract and update dashboard metrics"""
+    def _parse_single_line_metrics(self, line: str) -> None:
+        """Parse a single line of training output for metrics"""
         import re
         import json
+        import ast
         
-        lines = text.split('\n')
-        for line in lines:
-            line = line.strip()
-            if not line:
-                continue
+        line = line.strip()
+        if not line:
+            return
             
-            # Try to parse as JSON first (transformers logs metrics as JSON)
+        # Try to find a JSON-like dictionary in the line
+        # Use a more flexible regex that finds things like {'loss': 1.23} or {"loss": 1.23}
+        dict_match = re.search(r'\{[^{}]+\}', line)
+        if dict_match:
+            dict_str = dict_match.group(0)
+            metrics = None
+            
+            # Try standard JSON first
             try:
-                # Look for JSON-like dict in the line
-                json_match = re.search(r'\{[^}]+\}', line)
-                if json_match:
-                    metrics = json.loads(json_match.group(0))
-                    
-                    # Update epoch
-                    if 'epoch' in metrics and hasattr(self, 'epoch_card'):
-                        epoch_val = float(metrics['epoch'])
-                        total_epochs = self.train_epochs.value() if hasattr(self, 'train_epochs') else 1
+                metrics = json.loads(dict_str)
+            except:
+                # Try ast.literal_eval for Python-style dicts (single quotes)
+                try:
+                    metrics = ast.literal_eval(dict_str)
+                except:
+                    # Last resort: replace ' with " and try JSON
+                    try:
+                        metrics = json.loads(dict_str.replace("'", '"'))
+                    except:
+                        pass
+            
+            if metrics and isinstance(metrics, dict):
+                # Update epoch (float value, e.g., 0.01)
+                if 'epoch' in metrics and hasattr(self, 'epoch_card'):
+                    epoch_val = float(metrics['epoch'])
+                    total_epochs = self.train_epochs.value() if hasattr(self, 'train_epochs') else 1
+                    # Show 2 decimal places if it's a fraction, otherwise int/total
+                    if epoch_val < total_epochs and (epoch_val * 10) % 10 != 0:
+                        self._update_metric_card(self.epoch_card, f"{epoch_val:.2f}/{total_epochs}")
+                    else:
                         self._update_metric_card(self.epoch_card, f"{int(epoch_val)}/{total_epochs}")
-                    
-                    # Update step
-                    if 'step' in metrics and hasattr(self, 'steps_card'):
-                        step_val = int(metrics['step'])
-                        # Try to get total steps from training args or estimate
-                        total_steps = metrics.get('total_steps', '?')
-                        if total_steps == '?':
-                            # Estimate: steps per epoch * num_epochs
-                            if hasattr(self, 'train_epochs') and hasattr(self, 'train_batch'):
-                                # Rough estimate
-                                total_steps = '?'
-                        self._update_metric_card(self.steps_card, f"{step_val}/{total_steps}")
-                    
-                    # Update loss
-                    if 'loss' in metrics and hasattr(self, 'loss_card'):
-                        loss_val = float(metrics['loss'])
-                        self._update_metric_card(self.loss_card, f"{loss_val:.4f}")
-                    
-                    # Update learning rate
-                    if 'learning_rate' in metrics and hasattr(self, 'learning_rate_card'):
-                        lr_val = float(metrics['learning_rate'])
-                        self._update_metric_card(self.learning_rate_card, f"{lr_val:.2e}")
-                    
-                    continue
-            except (json.JSONDecodeError, ValueError, KeyError):
-                pass
-            
-            # Fallback: regex patterns for non-JSON formats
-            # Parse epoch: "epoch 1/5" or "Epoch 1/5"
-            epoch_match = re.search(r"[Ee]poch\s+(\d+)/(\d+)", line)
-            if epoch_match:
-                current, total = epoch_match.groups()
-                if hasattr(self, 'epoch_card'):
-                    self._update_metric_card(self.epoch_card, f"{current}/{total}")
-            
-            # Parse step: "step 100/500" or "Step 100/500"
-            step_match = re.search(r"[Ss]tep\s+(\d+)/(\d+)", line)
-            if step_match:
-                current, total = step_match.groups()
-                if hasattr(self, 'steps_card'):
-                    self._update_metric_card(self.steps_card, f"{current}/{total}")
-            
-            # Parse loss: "loss: 0.1234" or "Loss: 0.1234"
-            loss_match = re.search(r"[Ll]oss[:\s=]+([\d.]+)", line)
-            if loss_match:
-                loss_val = float(loss_match.group(1))
-                if hasattr(self, 'loss_card'):
+                
+                # Update step
+                if 'step' in metrics and hasattr(self, 'steps_card'):
+                    step_val = int(metrics['step'])
+                    # Try to get total steps or estimate
+                    total_steps = metrics.get('total_steps', '?')
+                    self._update_metric_card(self.steps_card, f"{step_val}/{total_steps}")
+                
+                # Update loss
+                if 'loss' in metrics and hasattr(self, 'loss_card'):
+                    loss_val = float(metrics['loss'])
                     self._update_metric_card(self.loss_card, f"{loss_val:.4f}")
-            
-            # Parse learning rate: "learning_rate: 0.0002" or "lr: 0.0002"
-            lr_match = re.search(r"(?:learning_rate|lr)[:\s=]+([\d.e-]+)", line, re.IGNORECASE)
-            if lr_match:
-                lr_val = float(lr_match.group(1))
-                if hasattr(self, 'learning_rate_card'):
+                
+                # Update learning rate
+                if 'learning_rate' in metrics and hasattr(self, 'learning_rate_card'):
+                    lr_val = float(metrics['learning_rate'])
                     self._update_metric_card(self.learning_rate_card, f"{lr_val:.2e}")
-            
-            # Parse speed: "X.XX it/s" or "X.XX samples/s"
-            speed_match = re.search(r"([\d.]+)\s*(?:it|sample)s?/s", line, re.IGNORECASE)
-            if speed_match:
+                elif 'lr' in metrics and hasattr(self, 'learning_rate_card'):
+                    lr_val = float(metrics['lr'])
+                    self._update_metric_card(self.learning_rate_card, f"{lr_val:.2e}")
+                
+                # Update speed
+                if 'samples_per_second' in metrics and hasattr(self, 'speed_card'):
+                    self._update_metric_card(self.speed_card, f"{float(metrics['samples_per_second']):.1f} s/s")
+                elif 'train_samples_per_second' in metrics and hasattr(self, 'speed_card'):
+                    self._update_metric_card(self.speed_card, f"{float(metrics['train_samples_per_second']):.1f} s/s")
+                
+                return # Successfully parsed from dict
+
+        # Fallback: regex patterns for non-JSON/dict formats
+        # Handle formats like "loss: 1.23" or "epoch [1/5]" or "step 100"
+        
+        # Parse epoch: "epoch 1/5" or "Epoch 1/5" or "epoch: 1.23"
+        epoch_match = re.search(r"['\"]?epoch['\"]?[:\s=]+([\d./]+)", line, re.IGNORECASE)
+        if epoch_match:
+            val = epoch_match.group(1)
+            if '/' in val:
+                self._update_metric_card(self.epoch_card, val)
+            else:
+                try:
+                    epoch_val = float(val)
+                    total_epochs = self.train_epochs.value() if hasattr(self, 'train_epochs') else 1
+                    self._update_metric_card(self.epoch_card, f"{epoch_val:.2f}/{total_epochs}")
+                except: pass
+        
+        # Parse step: "step 100/500" or "Step: 100"
+        step_match = re.search(r"['\"]?step['\"]?[:\s=]+([\d/]+)", line, re.IGNORECASE)
+        if step_match:
+            val = step_match.group(1)
+            if hasattr(self, '_total_train_steps') and self._total_train_steps and '/' not in val:
+                val = f"{val}/{self._total_train_steps}"
+            self._update_metric_card(self.steps_card, val)
+        
+        # Parse loss: "loss: 0.1234" or "'loss': 0.1234"
+        loss_match = re.search(r"['\"]?loss['\"]?[:\s=]+([\d.]+)", line, re.IGNORECASE)
+        if loss_match:
+            try:
+                loss_val = float(loss_match.group(1))
+                self._update_metric_card(self.loss_card, f"{loss_val:.4f}")
+            except: pass
+        
+        # Parse learning rate: "lr: 0.0002"
+        lr_match = re.search(r"['\"]?(?:learning_rate|lr)['\"]?[:\s=]+([\d.e-]+)", line, re.IGNORECASE)
+        if lr_match:
+            try:
+                lr_val = float(lr_match.group(1))
+                self._update_metric_card(self.learning_rate_card, f"{lr_val:.2e}")
+            except: pass
+        
+        # Parse speed: "X.XX it/s" or "X.XX samples/s"
+        speed_match = re.search(r"([\d.]+)\s*(?:it|sample|s)s?/s", line, re.IGNORECASE)
+        if speed_match:
+            try:
                 speed_val = float(speed_match.group(1))
-                if hasattr(self, 'speed_card'):
-                    self._update_metric_card(self.speed_card, f"{speed_val:.2f} s/s")
+                self._update_metric_card(self.speed_card, f"{speed_val:.1f} s/s")
+            except: pass
+
+        # Parse samples_per_sec (JSON metric)
+        sps_match = re.search(r"['\"]?(?:samples_per_sec|samples_per_second)['\"]?[:\s=]+([\d.]+)", line, re.IGNORECASE)
+        if sps_match:
+            try:
+                sps_val = float(sps_match.group(1))
+                self._update_metric_card(self.speed_card, f"{sps_val:.1f} s/s")
+            except: pass
+
+        # Parse ETA seconds
+        eta_match = re.search(r"['\"]?eta_sec['\"]?[:\s=]+([\d.]+)", line, re.IGNORECASE)
+        if eta_match:
+            try:
+                eta_val = float(eta_match.group(1))
+                minutes = int(eta_val // 60)
+                seconds = int(eta_val % 60)
+                self._update_metric_card(self.eta_card, f"{minutes}m {seconds}s")
+            except: pass
+
+        # Parse total_steps to improve denominator
+        total_steps_match = re.search(r"['\"]?total_steps['\"]?[:\s=]+([\d]+)", line, re.IGNORECASE)
+        if total_steps_match:
+            try:
+                self._total_train_steps = int(total_steps_match.group(1))
+                # If we already have a current step, refresh display
+                current_step_text = self.steps_card.value_label.text()
+                if '/' in current_step_text:
+                    current_val = current_step_text.split('/')[0]
+                else:
+                    current_val = current_step_text
+                self._update_metric_card(self.steps_card, f"{current_val}/{self._total_train_steps}")
+            except:
+                pass
+
+    def _parse_training_metrics(self, text: str) -> None:
+        """Parse training output text for metrics (legacy, calls _parse_single_line_metrics)"""
+        # This remains for backward compatibility but usually we call _parse_single_line_metrics now
+        lines = text.replace('\r', '\n').split('\n')
+        for line in lines:
+            self._parse_single_line_metrics(line)
+
+    def _update_training_stats_periodic(self) -> None:
+        """Periodic background update for training stats (GPU memory, etc.)"""
+        try:
+            from system_detector import SystemDetector
+            detector = SystemDetector()
+            
+            # Update GPU memory
+            gpu_stats = detector.get_gpu_memory_usage()
+            if gpu_stats and hasattr(self, 'gpu_mem_card'):
+                # For simplicity, if multiple GPUs, show the one with highest usage (usually the one training)
+                # Or if we have CUDA_VISIBLE_DEVICES, we could try to match it.
+                max_gpu = max(gpu_stats, key=lambda x: x['used_mb'])
+                used_gb = max_gpu['used_mb'] / 1024.0
+                total_gb = max_gpu['total_mb'] / 1024.0
+                self._update_metric_card(self.gpu_mem_card, f"{used_gb:.1f}/{total_gb:.1f} GB")
+        except:
+            pass
     
     def _update_metric_card(self, card: QWidget, value: str) -> None:
         """Update the value displayed in a metric card"""
