@@ -64,7 +64,7 @@ echo SUCCESS: Resource compiled
 
 echo.
 echo [2/3] Compiling C++ source with static linking...
-g++ -O2 -s -mwindows launcher.cpp launcher_res.o -o Launcher.exe -static -static-libgcc -static-libstdc++ -lshlwapi -lurlmon
+g++ -O2 -s -mwindows launcher.cpp launcher_res.o -o launcher.exe -static -static-libgcc -static-libstdc++ -lshlwapi -lurlmon
 if errorlevel 1 (
     echo ERROR: Failed to compile launcher
     pause
@@ -81,17 +81,17 @@ echo SUCCESS: Cleanup complete
 
 echo.
 echo =============================================
-echo   Launcher.exe created successfully!
+echo   launcher.exe created successfully!
 echo =============================================
 echo.
 
 REM Show file size
-for %%A in (Launcher.exe) do echo File size: %%~zA bytes (%%~zAKB)
+for %%A in (launcher.exe) do echo File size: %%~zA bytes (%%~zAKB)
 
 echo.
 echo You can now:
-echo 1. Test it: Double-click Launcher.exe
-echo 2. Commit it: git add Launcher.exe
+echo 1. Test it: Double-click launcher.exe
+echo 2. Commit it: git add launcher.exe
 echo.
 pause
 

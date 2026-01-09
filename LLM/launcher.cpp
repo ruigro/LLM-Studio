@@ -35,6 +35,135 @@ void OpenLogInNotepad(const std::wstring& logPath) {
     ShellExecuteW(NULL, L"open", L"notepad.exe", logPath.c_str(), NULL, SW_SHOW);
 }
 
+// Helper to check for self-contained Python runtime
+std::wstring CheckSelfContainedPython(const std::wstring& exeDir) {
+    std::wstring selfContainedPython = exeDir + L"\\python_runtime\\python3.12\\python.exe";
+    if (FileExists(selfContainedPython)) {
+        return selfContainedPython;
+    }
+    return L"";
+}
+
+// Helper to get Python version string from executable
+std::wstring GetPythonVersion(const std::wstring& pythonExe) {
+    // Run python --version and capture output
+    HANDLE hReadPipe, hWritePipe;
+    SECURITY_ATTRIBUTES sa = {sizeof(SECURITY_ATTRIBUTES), NULL, TRUE};
+    
+    if (!CreatePipe(&hReadPipe, &hWritePipe, &sa, 0)) {
+        return L"";
+    }
+    
+    STARTUPINFOW si = {0};
+    si.cb = sizeof(si);
+    si.dwFlags = STARTF_USESTDHANDLES;
+    si.hStdOutput = hWritePipe;
+    si.hStdError = hWritePipe;
+    si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+    
+    PROCESS_INFORMATION pi = {0};
+    std::wstring cmdLine = L"\"" + pythonExe + L"\" --version";
+    
+    BOOL success = CreateProcessW(
+        NULL,
+        &cmdLine[0],
+        NULL,
+        NULL,
+        TRUE,
+        CREATE_NO_WINDOW,
+        NULL,
+        NULL,
+        &si,
+        &pi
+    );
+    
+    CloseHandle(hWritePipe);
+    
+    if (!success) {
+        CloseHandle(hReadPipe);
+        return L"";
+    }
+    
+    // Read output
+    char buffer[256] = {0};
+    DWORD bytesRead = 0;
+    ReadFile(hReadPipe, buffer, sizeof(buffer) - 1, &bytesRead, NULL);
+    
+    CloseHandle(hReadPipe);
+    WaitForSingleObject(pi.hProcess, 5000);
+    CloseHandle(pi.hProcess);
+    CloseHandle(pi.hThread);
+    
+    if (bytesRead > 0) {
+        buffer[bytesRead] = 0;
+        return StringToWString(std::string(buffer));
+    }
+    
+    return L"";
+}
+
+// Helper to check if Python version is supported (3.10-3.12 only)
+// Rejects ALL incompatible versions: too old (<3.10), too new (3.13+), or any future versions
+bool IsPythonVersionSupported(const std::wstring& versionStr) {
+    // Version string format: "Python 3.12.0", "Python 3.13.0", "Python 3.18.0", etc.
+    // Extract major.minor version
+    size_t spacePos = versionStr.find(L' ');
+    if (spacePos == std::wstring::npos) return false;
+    
+    size_t dotPos = versionStr.find(L'.', spacePos + 1);
+    if (dotPos == std::wstring::npos) return false;
+    
+    // Extract major version (should be 3)
+    int major = _wtoi(versionStr.substr(spacePos + 1, 1).c_str());
+    
+    // Extract minor version (find next dot or space)
+    size_t nextDot = versionStr.find(L'.', dotPos + 1);
+    size_t nextSpace = versionStr.find(L' ', dotPos + 1);
+    size_t endPos = versionStr.length();
+    if (nextDot != std::wstring::npos && nextDot < endPos) endPos = nextDot;
+    if (nextSpace != std::wstring::npos && nextSpace < endPos) endPos = nextSpace;
+    
+    int minor = _wtoi(versionStr.substr(dotPos + 1, endPos - dotPos - 1).c_str());
+    
+    // Support Python 3.10, 3.11, 3.12 only
+    if (major == 3) {
+        return (minor >= 10 && minor <= 12);
+    }
+    
+    return false;
+}
+
+// Helper to run bootstrap launcher
+bool RunBootstrapLauncher(const std::wstring& exeDir) {
+    std::wstring bootstrapBat = exeDir + L"\\bootstrap_launcher.bat";
+    if (!FileExists(bootstrapBat)) {
+        return false;
+    }
+    
+    // Run bootstrap launcher
+    SHELLEXECUTEINFOW sei = {0};
+    sei.cbSize = sizeof(sei);
+    sei.fMask = SEE_MASK_NOCLOSEPROCESS;
+    sei.lpFile = bootstrapBat.c_str();
+    sei.lpDirectory = exeDir.c_str();
+    sei.nShow = SW_SHOW;
+    
+    if (!ShellExecuteExW(&sei)) {
+        return false;
+    }
+    
+    // Wait for process to complete (max 5 minutes)
+    if (sei.hProcess) {
+        WaitForSingleObject(sei.hProcess, 300000);  // 5 minutes
+        DWORD exitCode = 0;
+        GetExitCodeProcess(sei.hProcess, &exitCode);
+        CloseHandle(sei.hProcess);
+        return (exitCode == 0);
+    }
+    
+    return false;
+}
+
 // Helper to find Python in PATH or registry
 std::wstring FindSystemPython() {
     // First, try to find python.exe in PATH
@@ -233,15 +362,70 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     // Ensure logs directory exists
     EnsureLogsDirectory(exeDir);
     
-    // Step 1: Check if system Python exists
-    std::wstring systemPython = FindSystemPython();
+    // Step 0: Check for self-contained Python runtime first (NEW)
+    std::wstring selfContainedPython = CheckSelfContainedPython(exeDir);
+    std::wstring systemPython;
+    
+    if (!selfContainedPython.empty()) {
+        // Self-contained Python found - use it directly
+        systemPython = selfContainedPython;
+        goto use_python;  // Skip to venv check
+    }
+    
+    // Step 1: Check if system Python exists and is compatible
+    systemPython = FindSystemPython();
+    
+    if (!systemPython.empty()) {
+        // Check Python version - reject ALL incompatible versions (too old, too new, or any future versions)
+        std::wstring versionStr = GetPythonVersion(systemPython);
+        if (!versionStr.empty() && !IsPythonVersionSupported(versionStr)) {
+            // Python version incompatible (not 3.10-3.12) - use self-contained Python instead
+            systemPython = L"";
+        }
+    }
     
     if (systemPython.empty()) {
-        // Python not found - need to install it
+        // No compatible system Python - try bootstrap launcher
+        std::wstring bootstrapBat = exeDir + L"\\bootstrap_launcher.bat";
+        if (FileExists(bootstrapBat)) {
+            int result = MessageBoxW(NULL,
+                L"Python 3.10-3.12 is required, but your system Python version is incompatible.\n\n"
+                L"Would you like to download a self-contained Python runtime?\n"
+                L"(This will not affect your system Python installation.)",
+                L"Python Version Incompatible",
+                MB_YESNO | MB_ICONQUESTION);
+            
+            if (result == IDYES) {
+                MessageBoxW(NULL,
+                    L"Downloading self-contained Python runtime...\n\n"
+                    L"This may take a few minutes.\n"
+                    L"Please wait...",
+                    L"Downloading",
+                    MB_OK | MB_ICONINFORMATION);
+                
+                if (RunBootstrapLauncher(exeDir)) {
+                    // Check if self-contained Python is now available
+                    selfContainedPython = CheckSelfContainedPython(exeDir);
+                    if (!selfContainedPython.empty()) {
+                        systemPython = selfContainedPython;
+                        goto use_python;
+                    }
+                }
+                
+                MessageBoxW(NULL,
+                    L"Failed to download self-contained Python runtime.\n\n"
+                    L"Please try running bootstrap_launcher.bat manually.",
+                    L"Download Failed",
+                    MB_OK | MB_ICONERROR);
+            }
+        }
+        
+        // Fallback: Offer system Python installation (old behavior)
         int result = MessageBoxW(NULL,
-            L"Python is not installed on this system.\n\n"
-            L"This application requires Python 3.10+ to run.\n\n"
-            L"Would you like to download and install Python now?",
+            L"Python is not installed or has an incompatible version.\n\n"
+            L"This application requires Python 3.10-3.12.\n\n"
+            L"Would you like to download and install Python 3.12 system-wide?\n"
+            L"(Alternatively, you can run bootstrap_launcher.bat for a self-contained installation.)",
             L"Python Required",
             MB_YESNO | MB_ICONQUESTION);
         
@@ -302,6 +486,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
         }
     }
     
+    use_python:
     // Step 2: Check if venv exists, if not, create it or launch installer GUI
     std::wstring pythonwExe = exeDir + L"\\.venv\\Scripts\\pythonw.exe";
     std::wstring pythonExe = exeDir + L"\\.venv\\Scripts\\python.exe";
@@ -319,11 +504,27 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
             ShellExecuteW(NULL, L"open", runInstallerBat.c_str(), NULL, exeDir.c_str(), SW_SHOW);
             return 0;
         } else {
-            // Fallback: try installer_gui.py directly (it has bootstrap guard)
+            // Fallback: try bootstrap_launcher.bat first, then installer_gui.py
+            std::wstring bootstrapBat = exeDir + L"\\bootstrap_launcher.bat";
+            if (FileExists(bootstrapBat)) {
+                ShellExecuteW(NULL, L"open", bootstrapBat.c_str(), NULL, exeDir.c_str(), SW_SHOW);
+                return 0;
+            }
+            
             std::wstring installerGui = exeDir + L"\\installer_gui.py";
             if (FileExists(installerGui)) {
-                ShellExecuteW(NULL, L"open", systemPython.c_str(), installerGui.c_str(), exeDir.c_str(), SW_SHOW);
-                return 0;
+                // Use self-contained Python if available, otherwise system Python
+                std::wstring pythonToUse = systemPython;
+                if (pythonToUse.empty()) {
+                    pythonToUse = CheckSelfContainedPython(exeDir);
+                }
+                if (pythonToUse.empty()) {
+                    pythonToUse = FindSystemPython();
+                }
+                if (!pythonToUse.empty()) {
+                    ShellExecuteW(NULL, L"open", pythonToUse.c_str(), installerGui.c_str(), exeDir.c_str(), SW_SHOW);
+                    return 0;
+                }
             } else {
                 MessageBoxW(NULL,
                     L"Virtual environment not found and installer GUI not available.\n\n"
@@ -352,11 +553,28 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
         if (FileExists(runInstallerBat)) {
             ShellExecuteW(NULL, L"open", runInstallerBat.c_str(), NULL, exeDir.c_str(), SW_SHOW);
             return 0;
-        } else {
-            std::wstring installerGui = exeDir + L"\\installer_gui.py";
-            if (FileExists(installerGui)) {
-                ShellExecuteW(NULL, L"open", systemPython.c_str(), installerGui.c_str(), exeDir.c_str(), SW_SHOW);
-                return 0;
+            } else {
+                // Try bootstrap launcher first
+                std::wstring bootstrapBat = exeDir + L"\\bootstrap_launcher.bat";
+                if (FileExists(bootstrapBat)) {
+                    ShellExecuteW(NULL, L"open", bootstrapBat.c_str(), NULL, exeDir.c_str(), SW_SHOW);
+                    return 0;
+                }
+                
+                std::wstring installerGui = exeDir + L"\\installer_gui.py";
+                if (FileExists(installerGui)) {
+                    // Use self-contained Python if available, otherwise system Python
+                    std::wstring pythonToUse = systemPython;
+                    if (pythonToUse.empty()) {
+                        pythonToUse = CheckSelfContainedPython(exeDir);
+                    }
+                    if (pythonToUse.empty()) {
+                        pythonToUse = FindSystemPython();
+                    }
+                    if (!pythonToUse.empty()) {
+                        ShellExecuteW(NULL, L"open", pythonToUse.c_str(), installerGui.c_str(), exeDir.c_str(), SW_SHOW);
+                        return 0;
+                    }
             } else {
                 MessageBoxW(NULL,
                     L"Critical dependencies are broken and installer GUI is not available.\n\n"
@@ -385,11 +603,27 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
                 ShellExecuteW(NULL, L"open", runInstallerBat.c_str(), NULL, exeDir.c_str(), SW_SHOW);
                 return 0;  // Exit - installer GUI will handle repair
             } else {
-                // Fallback: try installer_gui.py directly (it has bootstrap guard)
+                // Fallback: try bootstrap_launcher.bat first, then installer_gui.py
+                std::wstring bootstrapBat = exeDir + L"\\bootstrap_launcher.bat";
+                if (FileExists(bootstrapBat)) {
+                    ShellExecuteW(NULL, L"open", bootstrapBat.c_str(), NULL, exeDir.c_str(), SW_SHOW);
+                    return 0;
+                }
+                
                 std::wstring installerGui = exeDir + L"\\installer_gui.py";
                 if (FileExists(installerGui)) {
-                    ShellExecuteW(NULL, L"open", systemPython.c_str(), installerGui.c_str(), exeDir.c_str(), SW_SHOW);
-                    return 0;
+                    // Use self-contained Python if available, otherwise system Python
+                    std::wstring pythonToUse = systemPython;
+                    if (pythonToUse.empty()) {
+                        pythonToUse = CheckSelfContainedPython(exeDir);
+                    }
+                    if (pythonToUse.empty()) {
+                        pythonToUse = FindSystemPython();
+                    }
+                    if (!pythonToUse.empty()) {
+                        ShellExecuteW(NULL, L"open", pythonToUse.c_str(), installerGui.c_str(), exeDir.c_str(), SW_SHOW);
+                        return 0;
+                    }
                 } else {
                     MessageBoxW(NULL,
                         L"Critical dependencies are missing or have wrong versions.\n\n"
