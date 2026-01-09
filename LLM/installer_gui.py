@@ -143,6 +143,9 @@ def _ensure_bootstrap():
         # Exit current process
         sys.exit(0)
 
+# Check for self-contained Python runtime first
+python_runtime = _ensure_python_runtime()
+
 # Execute bootstrap check immediately
 _ensure_bootstrap()
 
@@ -152,6 +155,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 try:
     from system_detector import SystemDetector
     from smart_installer import SmartInstaller
+    from core.python_runtime import PythonRuntimeManager
 except ImportError as e:
     # If imports fail, show error and exit
     root = Tk()
@@ -175,6 +179,7 @@ class InstallerGUI:
         # State
         self.installer = SmartInstaller()
         self.detector = SystemDetector()
+        self.python_runtime_manager = PythonRuntimeManager(Path(__file__).parent)
         self.checklist_data = []
         self.install_thread = None
         self.installing = False
@@ -566,6 +571,14 @@ class InstallerGUI:
             write_log("=" * 60)
             write_log("Starting installation thread with InstallerV2")
             write_log("=" * 60)
+            
+            # Check for self-contained Python runtime
+            write_log("Checking for self-contained Python runtime...")
+            python_runtime = self.python_runtime_manager.get_python_runtime("3.12")
+            if python_runtime:
+                write_log(f"✓ Using self-contained Python: {python_runtime}")
+            else:
+                write_log("⚠ Self-contained Python not available, will use system Python")
             
             # Use new immutable installer
             from installer_v2 import InstallerV2

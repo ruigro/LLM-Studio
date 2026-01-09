@@ -1643,7 +1643,10 @@ print(device_name)
         return False
     
     def install_vcredist(self) -> bool:
-        """Install Visual C++ Redistributables if needed (Windows only)"""
+        """Install Visual C++ Redistributables if needed (Windows only)
+        
+        Tries to use local runtime DLLs first, falls back to system installation if needed.
+        """
         if platform.system() != "Windows":
             return True
         
@@ -1653,6 +1656,20 @@ print(device_name)
             self.log("Visual C++ Redistributables found")
             return True
         
+        # Try to use self-contained runtime DLLs first
+        try:
+            from core.runtime_manager import RuntimeManager
+            runtime_manager = RuntimeManager(self.install_dir)
+            dll_dir = runtime_manager.get_vcredist_dlls()
+            if dll_dir:
+                self.log("Visual C++ DLLs found in local runtime directory")
+                # Setup local PATH for this process
+                runtime_manager.setup_local_path()
+                return True
+        except Exception as e:
+            self.log(f"Could not use local runtime DLLs: {e}")
+        
+        # Fallback to system installation
         self.log("Visual C++ Redistributables not found.")
         self.log("Downloading and installing Visual C++ Redistributables...")
         
@@ -2040,7 +2057,7 @@ print(device_name)
             # Load packages from hardware profile
             self.log("Loading package versions from hardware profile...")
             try:
-                from core.system_detector import SystemDetector
+                from system_detector import SystemDetector
                 from core.profile_selector import ProfileSelector
                 
                 detector = SystemDetector()
@@ -3332,7 +3349,7 @@ if errorlevel 1 (
         
         # PROFILE IS THE ONLY SOURCE OF TRUTH - Load packages from profile
         try:
-            from core.system_detector import SystemDetector
+            from system_detector import SystemDetector
             from core.profile_selector import ProfileSelector
             
             detector = SystemDetector()

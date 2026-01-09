@@ -16,6 +16,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from core.wheelhouse import WheelhouseManager
 from core.immutable_installer import ImmutableInstaller, InstallationFailed
 from system_detector import SystemDetector
+from core.python_runtime import PythonRuntimeManager
 
 
 class InstallerV2:
@@ -35,6 +36,9 @@ class InstallerV2:
         self.compat_matrix_path = self.root / "metadata" / "compatibility_matrix.json"
         self.wheelhouse = self.root / "wheelhouse"
         self.venv = self.root / ".venv"
+        
+        # Initialize Python runtime manager for self-contained Python
+        self.python_runtime_manager = PythonRuntimeManager(self.root)
         
         # Verify manifest exists and load it
         if not self.manifest_path.exists():
@@ -85,20 +89,40 @@ class InstallerV2:
             # Display detection results
             self._display_detection_results(results)
             
-            # Validate Python version BEFORE determining CUDA config
-            python_version = (sys.version_info.major, sys.version_info.minor)
-            min_py = tuple(map(int, self.manifest["python_min"].split('.')))
-            max_py = tuple(map(int, self.manifest["python_max"].split('.')))
+            # Check for self-contained Python runtime first
+            self.log("\nChecking for self-contained Python runtime...")
+            python_runtime = self.python_runtime_manager.get_python_runtime("3.12")
             
-            if python_version < min_py or python_version > max_py:
-                raise ValueError(
-                    f"\n✗ Python {python_version[0]}.{python_version[1]} is not supported.\n"
-                    f"  Required: Python {self.manifest['python_min']} - {self.manifest['python_max']}\n"
-                    f"  Current: Python {sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}\n\n"
-                    f"  Please use a supported Python version.\n"
-                    f"  You can install Python 3.10, 3.11, or 3.12 from:\n"
-                    f"  https://www.python.org/downloads/"
-                )
+            if python_runtime:
+                self.log(f"✓ Using self-contained Python runtime: {python_runtime}")
+                # Use self-contained Python for venv creation
+                self._python_executable = python_runtime
+            else:
+                # Fallback to system Python, but validate version
+                self.log("⚠ Self-contained Python runtime not available, using system Python")
+                python_version = (sys.version_info.major, sys.version_info.minor)
+                min_py = tuple(map(int, self.manifest["python_min"].split('.')))
+                max_py = tuple(map(int, self.manifest["python_max"].split('.')))
+                
+                if python_version < min_py or python_version > max_py:
+                    # Try to download self-contained Python
+                    self.log(f"System Python {python_version[0]}.{python_version[1]} not supported.")
+                    self.log("Attempting to download self-contained Python runtime...")
+                    python_runtime = self.python_runtime_manager.get_python_runtime("3.12")
+                    if python_runtime:
+                        self.log(f"✓ Downloaded and using self-contained Python: {python_runtime}")
+                        self._python_executable = python_runtime
+                    else:
+                        raise ValueError(
+                            f"\n✗ Python {python_version[0]}.{python_version[1]} is not supported.\n"
+                            f"  Required: Python {self.manifest['python_min']} - {self.manifest['python_max']}\n"
+                            f"  Current: Python {sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}\n\n"
+                            f"  Failed to download self-contained Python runtime.\n"
+                            f"  Please install Python 3.10, 3.11, or 3.12 from:\n"
+                            f"  https://www.python.org/downloads/"
+                        )
+                else:
+                    self._python_executable = sys.executable
             
             # Hardware-adaptive mode: Use ProfileSelector
             if self.use_adaptive:
@@ -174,7 +198,14 @@ class InstallerV2:
             self.log("\nPHASE 2-6: Environment Installation")
             self.log("-" * 60)
             
-            installer = ImmutableInstaller(self.venv, self.wheelhouse, self.manifest_path)
+            # Use self-contained Python if available, otherwise use sys.executable
+            python_exe = getattr(self, '_python_executable', None)
+            if python_exe:
+                python_exe = Path(python_exe)
+            else:
+                python_exe = None
+            
+            installer = ImmutableInstaller(self.venv, self.wheelhouse, self.manifest_path, python_executable=python_exe)
             success, error = installer.install(cuda_config, package_versions=package_versions, binary_packages=binary_packages if use_profile else None)
             
             if not success:
@@ -229,7 +260,9 @@ class InstallerV2:
                             self.log("=" * 60)
                             
                             # Retry with resume mode (don't clear venv or wheelhouse)
-                            installer = ImmutableInstaller(self.venv, self.wheelhouse, self.manifest_path)
+                            python_exe = getattr(self, '_python_executable', None)
+                            python_exe = Path(python_exe) if python_exe else None
+                            installer = ImmutableInstaller(self.venv, self.wheelhouse, self.manifest_path, python_executable=python_exe)
                             success, error = installer.install(cuda_config, package_versions=package_versions)
                             
                             if success:
@@ -284,7 +317,9 @@ class InstallerV2:
                     self.log("\nPHASE 2-6 (RETRY): Environment Installation")
                     self.log("-" * 60)
                     
-                    installer = ImmutableInstaller(self.venv, self.wheelhouse, self.manifest_path)
+                    python_exe = getattr(self, '_python_executable', None)
+                    python_exe = Path(python_exe) if python_exe else None
+                    installer = ImmutableInstaller(self.venv, self.wheelhouse, self.manifest_path, python_executable=python_exe)
                     success, error = installer.install(cuda_config, package_versions=package_versions)
                     
                     if not success:
@@ -381,16 +416,42 @@ class InstallerV2:
             # Display detection results
             self._display_detection_results(results)
             
-            # Validate Python version
-            python_version = (sys.version_info.major, sys.version_info.minor)
-            min_py = tuple(map(int, self.manifest["python_min"].split('.')))
-            max_py = tuple(map(int, self.manifest["python_max"].split('.')))
+            # Check for self-contained Python runtime first
+            self.log("\nChecking for self-contained Python runtime...")
+            python_runtime = self.python_runtime_manager.get_python_runtime("3.12")
             
-            if python_version < min_py or python_version > max_py:
-                raise ValueError(
-                    f"\n✗ Python {python_version[0]}.{python_version[1]} is not supported.\n"
-                    f"  Required: Python {self.manifest['python_min']} - {self.manifest['python_max']}"
-                )
+            if python_runtime:
+                self.log(f"✓ Using self-contained Python runtime: {python_runtime}")
+                target_python = python_runtime
+            else:
+                # Fallback to system Python, but validate version
+                self.log("⚠ Self-contained Python runtime not available, using system Python")
+                python_version = (sys.version_info.major, sys.version_info.minor)
+                min_py = tuple(map(int, self.manifest["python_min"].split('.')))
+                max_py = tuple(map(int, self.manifest["python_max"].split('.')))
+                
+                if python_version < min_py or python_version > max_py:
+                    # Try to download self-contained Python
+                    self.log(f"System Python {python_version[0]}.{python_version[1]} not supported.")
+                    self.log("Attempting to download self-contained Python runtime...")
+                    python_runtime = self.python_runtime_manager.get_python_runtime("3.12")
+                    if python_runtime:
+                        self.log(f"✓ Downloaded and using self-contained Python: {python_runtime}")
+                        target_python = python_runtime
+                    else:
+                        raise ValueError(
+                            f"\n✗ Python {python_version[0]}.{python_version[1]} is not supported.\n"
+                            f"  Required: Python {self.manifest['python_min']} - {self.manifest['python_max']}\n"
+                            f"  Failed to download self-contained Python runtime."
+                        )
+                else:
+                    target_python = Path(sys.executable)
+            
+            # Update target_python variable for venv creation
+            if sys.platform == 'win32':
+                target_python = target_python if isinstance(target_python, Path) else Path(target_python)
+            else:
+                target_python = target_python if isinstance(target_python, Path) else Path(target_python)
             
             # Determine CUDA config
             if self.use_adaptive:
@@ -442,7 +503,9 @@ class InstallerV2:
             self.log("  Preserving all working packages")
             self.log("  Starting installation engine...")
             
-            installer = ImmutableInstaller(self.venv, self.wheelhouse, self.manifest_path)
+            python_exe = getattr(self, '_python_executable', None)
+            python_exe = Path(python_exe) if python_exe else None
+            installer = ImmutableInstaller(self.venv, self.wheelhouse, self.manifest_path, python_executable=python_exe)
             self.log("  Engine initialized. Executing install pass...")
             # Pass binary_packages so they get installed during repair
             binary_packages_to_pass = binary_packages if self.use_adaptive else None

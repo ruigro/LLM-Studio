@@ -50,7 +50,7 @@ class ImmutableInstaller:
     Creates new venv, installs from wheelhouse offline, verifies integrity.
     """
     
-    def __init__(self, venv_path: Path, wheelhouse_path: Path, manifest_path: Path):
+    def __init__(self, venv_path: Path, wheelhouse_path: Path, manifest_path: Path, python_executable: Path = None):
         """
         Initialize immutable installer.
         
@@ -58,10 +58,12 @@ class ImmutableInstaller:
             venv_path: Path where venv should be created
             wheelhouse_path: Path to wheelhouse with downloaded wheels
             manifest_path: Path to dependencies.json manifest
+            python_executable: Optional Python executable to use for creating venv (defaults to sys.executable)
         """
         self.venv_path = venv_path
         self.wheelhouse = wheelhouse_path
         self.manifest_path = manifest_path  # Store for use in fallback downloads
+        self.python_executable = Path(python_executable) if python_executable else Path(sys.executable)
         
         with open(manifest_path, 'r', encoding='utf-8') as f:
             self.manifest = json.load(f)
@@ -502,10 +504,11 @@ class ImmutableInstaller:
             Path to venv Python executable
         """
         self.log(f"  Creating venv at: {self.venv_path}")
+        self.log(f"  Using Python: {self.python_executable}")
         
         # Create venv with --clear flag
         result = subprocess.run(
-            [sys.executable, "-m", "venv", str(self.venv_path), "--clear"],
+            [str(self.python_executable), "-m", "venv", str(self.venv_path), "--clear"],
             capture_output=True,
             text=True,
             timeout=120,
