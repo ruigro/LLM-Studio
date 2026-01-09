@@ -61,6 +61,7 @@ class ImmutableInstaller:
         """
         self.venv_path = venv_path
         self.wheelhouse = wheelhouse_path
+        self.manifest_path = manifest_path  # Store for use in fallback downloads
         
         with open(manifest_path, 'r', encoding='utf-8') as f:
             self.manifest = json.load(f)
@@ -90,7 +91,7 @@ class ImmutableInstaller:
             except Exception:
                 pass
     
-    def install(self, cuda_config: str, package_versions: dict = None) -> Tuple[bool, str]:
+    def install(self, cuda_config: str, package_versions: dict = None, binary_packages: dict = None) -> Tuple[bool, str]:
         """
         Perform immutable installation.
         
@@ -98,6 +99,7 @@ class ImmutableInstaller:
             cuda_config: CUDA configuration key (e.g., "cu124")
             package_versions: Optional dict of {package_name: exact_version} from profile.
                             If provided, uses these for version checking instead of manifest.
+            binary_packages: Optional dict of binary packages to install from wheels.
         
         Returns:
             Tuple of (success: bool, error_message: str)
@@ -108,10 +110,23 @@ class ImmutableInstaller:
             self.log(f"  Configuration: {cuda_config}")
             if package_versions:
                 self.log(f"  Using profile versions: {len(package_versions)} packages")
+            if binary_packages:
+                self.log(f"  Binary packages: {len(binary_packages)} packages")
+                for pkg_name in binary_packages.keys():
+                    self.log(f"    - {pkg_name}")
+            else:
+                self.log(f"  Binary packages: None (not provided)")
             self.log("=" * 60)
             
-            # Store profile versions for version checking
+            # Store profile versions and binary packages for installation
             self.profile_versions = package_versions or {}
+            self.binary_packages = binary_packages or {}
+            
+            # DEBUG: Log what we stored
+            if self.binary_packages:
+                self.log(f"[DEBUG] Stored {len(self.binary_packages)} binary packages: {list(self.binary_packages.keys())}")
+            else:
+                self.log(f"[DEBUG] No binary packages stored")
             
             # PHASE 0: Validation
             self.log("[STEP] PHASE 0: Validating environment...")
@@ -267,7 +282,8 @@ class ImmutableInstaller:
                                     self.log("  ✓ Only non-critical packages need installation - will resume")
                                     should_resume = True
                             else:
-                                self.log("  ✓ All packages already installed correctly - skipping installation")
+                                self.log("  ✓ All regular packages already installed correctly")
+                                # Still need to check binary packages
                                 should_resume = True
                                 
                     except Exception as e:
@@ -293,26 +309,26 @@ class ImmutableInstaller:
                     self.log("  No installation needed - skipping to verification")
             
             # PHASE 4: Atomic installation
-            if should_resume and not packages_to_install:
-                # All packages are OK - skip installation phase
-                self.log("PHASE 4: Installing packages atomically (SKIPPED - all packages OK)")
-            else:
-                self.log("PHASE 4: Installing packages atomically")
-                # Pass packages_to_install as-is (empty list will be handled in _install_packages)
-                packages_to_install_param = packages_to_install if should_resume else None
-                self._install_packages(cuda_config, venv_python, skip_installed=should_resume, packages_to_install=packages_to_install_param)
+            # ALWAYS run installation phase to check and install binary packages if needed
+            # This ensures binary packages are installed automatically even when regular packages are OK
+            self.log("[STEP] PHASE 4: Installing packages atomically")
+            
+            # Always run _install_packages - it will handle both regular and binary packages
+            # Pass packages_to_install as-is (empty list will be handled in _install_packages)
+            packages_to_install_param = packages_to_install if should_resume else None
+            self._install_packages(cuda_config, venv_python, skip_installed=should_resume, packages_to_install=packages_to_install_param, binary_packages=self.binary_packages)
             
             # PHASE 5: Clear Python cache
-            self.log("PHASE 5: Clearing Python bytecode cache")
+            self.log("[STEP] PHASE 5: Clearing Python bytecode cache")
             self._clear_pycache()
             
             # PHASE 6: Verification (SKIP in resume mode if only some packages were installed)
+            self.log("[STEP] PHASE 6: Verifying installation")
             if should_resume and packages_to_install:
-                self.log("PHASE 6: Verifying installation (SKIPPED - Partial repair completed)")
+                self.log("  (SKIPPED - Partial repair completed)")
                 self.log("  Full verification would fail due to partial state.")
                 self.log("  Run a full 'Install All' if you need complete environment verification.")
             else:
-                self.log("PHASE 6: Verifying installation")
                 self._verify_installation(venv_python)
             
             self.log("=" * 60)
@@ -527,7 +543,7 @@ class ImmutableInstaller:
         
         return venv_python
     
-    def _install_packages(self, cuda_config: str, venv_python: Path, skip_installed: bool = False, packages_to_install: List[Tuple[str, str]] = None):
+    def _install_packages(self, cuda_config: str, venv_python: Path, skip_installed: bool = False, packages_to_install: List[Tuple[str, str]] = None, binary_packages: dict = None):
         """
         Install all packages from wheelhouse in strict order.
         
@@ -537,6 +553,7 @@ class ImmutableInstaller:
             skip_installed: If True, skip packages that are already installed correctly
             packages_to_install: Optional list of (package_name, version_spec) tuples to install.
                                If provided, only install these packages. If None, install all.
+            binary_packages: Optional dict of binary packages to install from wheels.
         """
         # Get dependencies in order
         deps = sorted(self.manifest["core_dependencies"], key=lambda x: x["order"])
@@ -616,6 +633,123 @@ class ImmutableInstaller:
             # Special handling for torch - create lock
             if pkg_name == "torch":
                 self._create_torch_lock(pkg_version)
+        
+        # Install binary packages (after torch, before other packages)
+        # Use self.binary_packages (stored from install()) instead of parameter
+        # Also check parameter in case it was passed directly
+        binary_packages_to_use = binary_packages if binary_packages else self.binary_packages
+        if binary_packages_to_use:
+            self.log("Installing binary packages from wheels...")
+            self.log(f"  Found {len(binary_packages_to_use)} binary package(s) to install: {list(binary_packages_to_use.keys())}")
+            # During repair, always install binary packages even if skip_installed is True
+            # This ensures they get installed correctly
+            if skip_installed and not packages_to_install:
+                self.log("  Repair mode: Will verify and install binary packages if needed")
+            # Install in correct order: triton -> causal_conv1d -> mamba_ssm
+            binary_order = ["triton", "causal_conv1d", "mamba_ssm"]
+            for pkg_name in binary_order:
+                if pkg_name in binary_packages_to_use:
+                    pkg_info = binary_packages_to_use[pkg_name]
+                    url = pkg_info.get("url")
+                    if url:
+                        # Extract wheel filename from URL
+                        wheel_filename = url.split("/")[-1]
+                        wheel_path = self.wheelhouse / wheel_filename
+                        
+                        if wheel_path.exists():
+                            # For binary packages, always check if they're actually importable
+                            # Don't trust the simple version check - try importing them
+                            # During repair mode (skip_installed=True and no packages_to_install),
+                            # we should ALWAYS reinstall binary packages to ensure they work
+                            should_install = True
+                            # Check if we're in repair mode
+                            is_repair_mode = skip_installed and (packages_to_install is None or len(packages_to_install) == 0)
+                            
+                            # In repair mode, always install binary packages (don't skip)
+                            if is_repair_mode:
+                                self.log(f"  Repair mode: Will force install {pkg_name} to ensure it works")
+                                should_install = True
+                            elif skip_installed:
+                                try:
+                                    # Try to actually import the package to verify it works
+                                    import_cmd = f"import {pkg_name.replace('-', '_')}"
+                                    result = subprocess.run(
+                                        [str(venv_python), "-c", import_cmd],
+                                        capture_output=True,
+                                        text=True,
+                                        timeout=5,
+                                        **self.subprocess_flags
+                                    )
+                                    if result.returncode == 0:
+                                        # Package imports successfully - check version if needed
+                                        if pkg_name == "triton":
+                                            # For triton, also verify version
+                                            version_cmd = "import triton; print(triton.__version__)"
+                                            ver_result = subprocess.run(
+                                                [str(venv_python), "-c", version_cmd],
+                                                capture_output=True,
+                                                text=True,
+                                                timeout=5,
+                                                **self.subprocess_flags
+                                            )
+                                            if ver_result.returncode == 0:
+                                                try:
+                                                    from packaging import version as pkg_version
+                                                    installed_ver = ver_result.stdout.strip()
+                                                    if pkg_version.parse(installed_ver) >= pkg_version.parse("3.0.0"):
+                                                        self.log(f"  ✓ {pkg_name} is already installed and working (v{installed_ver})")
+                                                        should_install = False
+                                                except Exception as ver_err:
+                                                    self.log(f"  Version check failed for {pkg_name}: {ver_err}, will reinstall")
+                                                    should_install = True
+                                        else:
+                                            # For causal_conv1d and mamba_ssm, if import works, it's good
+                                            self.log(f"  ✓ {pkg_name} is already installed and working")
+                                            should_install = False
+                                except Exception as e:
+                                    # If import check fails, we need to install
+                                    self.log(f"  {pkg_name} import check failed: {e}, will install")
+                                    should_install = True
+                                except Exception as e:
+                                    # If import check fails, we need to install
+                                    self.log(f"  {pkg_name} import check failed: {e}, will install")
+                                    should_install = True
+                            
+                            if not should_install:
+                                continue
+                            
+                            self.log(f"  Installing {pkg_name} from {wheel_filename}...")
+                            success, error = self._install_binary_package(venv_python, wheel_path)
+                            if success:
+                                self.log(f"  ✓ {pkg_name} installed successfully")
+                            else:
+                                self.log(f"  WARNING: Failed to install binary package {pkg_name}: {error}")
+                                # Binary packages are optional - continue even if they fail
+                                # They'll be handled at runtime with error messages
+                        else:
+                            self.log(f"  WARNING: Binary package wheel not found: {wheel_filename}")
+                            self.log(f"    Expected at: {wheel_path}")
+                            self.log(f"    This means the wheel was not downloaded during wheelhouse preparation.")
+                            self.log(f"    Please check if the URL is accessible and the wheelhouse preparation succeeded.")
+                            self.log(f"    URL was: {url}")
+                            # Try to download it now as fallback
+                            self.log(f"    Attempting to download now as fallback...")
+                            from core.wheelhouse import WheelhouseManager
+                            wheelhouse_mgr = WheelhouseManager(self.manifest_path, self.wheelhouse)
+                            download_success, download_error = wheelhouse_mgr._download_binary_package(url, pkg_name)
+                            if download_success and wheel_path.exists():
+                                self.log(f"    ✓ Downloaded {wheel_filename}, proceeding with installation")
+                                # Retry installation
+                                success, error = self._install_binary_package(venv_python, wheel_path)
+                                if success:
+                                    self.log(f"  ✓ {pkg_name} installed successfully")
+                                else:
+                                    self.log(f"  WARNING: Failed to install binary package {pkg_name}: {error}")
+                            else:
+                                self.log(f"    ✗ Download failed: {download_error}")
+        else:
+            if not binary_packages and not self.binary_packages:
+                self.log("  No binary packages to install")
         
         # Install core dependencies
         for dep in deps:
@@ -760,6 +894,46 @@ class ImmutableInstaller:
             self.log(f"  ✓ Installation complete: {installed_count} installed, {skipped_count} skipped (already installed)")
         else:
             self.log(f"  ✓ All packages installed ({installed_count} total)")
+    
+    def _install_binary_package(self, venv_python: Path, wheel_path: Path) -> Tuple[bool, str]:
+        """
+        Install a binary package from a wheel file.
+        
+        Args:
+            venv_python: Path to venv Python executable
+            wheel_path: Path to wheel file
+        
+        Returns:
+            Tuple of (success: bool, error_message: str)
+        """
+        cmd = [
+            str(venv_python), "-m", "pip", "install",
+            "--no-index",  # Critical: offline only
+            "--find-links", str(self.wheelhouse),
+            "--no-cache-dir",
+            "--no-deps",  # Critical: prevent pip from resolving dependencies
+            str(wheel_path)
+        ]
+        
+        try:
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=300,  # 5 minutes per package
+                **self.subprocess_flags
+            )
+            
+            if result.returncode != 0:
+                error = result.stderr or result.stdout
+                return False, error[:500]  # Truncate long errors
+            
+            return True, ""
+            
+        except subprocess.TimeoutExpired:
+            return False, f"Installation timeout for {wheel_path.name}"
+        except Exception as e:
+            return False, str(e)
     
     def _install_single_package(
         self, 
@@ -1064,6 +1238,23 @@ except Exception as e:
         
         Args:
             venv_python: Path to venv Python executable
+            package_name: Package name to check (pip package name)
+            version_spec: Version specifier (e.g., "==4.51.3" or ">=4.51.3,!=4.52.*")
+            check_functionality: If True, also check if package is broken (missing critical attributes)
+        
+        Returns:
+            Tuple of (is_installed: bool, version_matches: bool, is_broken: bool)
+            If check_functionality is False, is_broken will always be False
+        """
+        # For binary packages, use the import name (module name) instead of package name
+        import_name = package_name
+        if package_name == "triton-windows":
+            import_name = "triton"  # Package name is triton-windows but module is triton
+        """
+        Check if a package is installed and if its version matches the requirement.
+        
+        Args:
+            venv_python: Path to venv Python executable
             package_name: Package name to check
             version_spec: Version specifier (e.g., "==4.51.3" or ">=4.51.3,!=4.52.*")
             check_functionality: If True, also check if package is broken (missing critical attributes)
@@ -1102,6 +1293,8 @@ except Exception as e:
                 return False, False, False
         
         # Use importlib.metadata to get installed version
+        # For binary packages, use import name instead of package name
+        check_package_name = import_name if import_name != package_name else package_name
         try:
             code = f"""
 import sys
@@ -1112,7 +1305,11 @@ except ImportError:
     from importlib_metadata import version, PackageNotFoundError
 
 try:
-    installed_ver = version('{package_name}')
+    # Try package name first, then import name for binary packages
+    try:
+        installed_ver = version('{package_name}')
+    except PackageNotFoundError:
+        installed_ver = version('{check_package_name}')
     print(installed_ver)
 except PackageNotFoundError:
     print('NOT_FOUND')

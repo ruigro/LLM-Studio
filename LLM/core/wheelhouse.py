@@ -521,7 +521,7 @@ class WheelhouseManager:
             self.log(f"  ⚠ Could not check compatibility: {e} - allowing to proceed")
             return True  # Changed from False to True to be less strict
     
-    def prepare_wheelhouse(self, cuda_config: str, python_version: Tuple[int, int], package_versions: dict = None, force_redownload: bool = False) -> Tuple[bool, str]:
+    def prepare_wheelhouse(self, cuda_config: str, python_version: Tuple[int, int], package_versions: dict = None, binary_packages: dict = None, force_redownload: bool = False) -> Tuple[bool, str]:
         """
         Download all wheels to wheelhouse with exact versions.
         
@@ -571,6 +571,35 @@ class WheelhouseManager:
                     # Just continue to download phase to get missing packages
                 else:
                     self.log(f"✓ Wheelhouse validation passed - {len(existing_wheels)} wheels satisfy current requirements")
+                    # Still need to check and download binary packages if they're missing
+                    if binary_packages:
+                        self.log("Checking binary packages in wheelhouse...")
+                        missing_binary_wheels = []
+                        for pkg_name, pkg_info in binary_packages.items():
+                            url = pkg_info.get("url")
+                            if url:
+                                wheel_filename = url.split("/")[-1]
+                                wheel_path = self.wheelhouse / wheel_filename
+                                if not wheel_path.exists():
+                                    missing_binary_wheels.append((pkg_name, url, wheel_filename))
+                        
+                        if missing_binary_wheels:
+                            self.log(f"  Found {len(missing_binary_wheels)} missing binary package wheel(s)")
+                            self.log("Phase 1.5: Downloading missing binary packages from URLs")
+                            binary_order = ["triton", "causal_conv1d", "mamba_ssm"]
+                            for pkg_name in binary_order:
+                                for missing_pkg, missing_url, missing_filename in missing_binary_wheels:
+                                    if missing_pkg == pkg_name:
+                                        self.log(f"  Downloading {pkg_name} from {missing_url}")
+                                        success, error = self._download_binary_package(missing_url, pkg_name)
+                                        if success:
+                                            self.log(f"  ✓ Downloaded {missing_filename}")
+                                        else:
+                                            self.log(f"  WARNING: Failed to download {pkg_name}: {error}")
+                                        break
+                        else:
+                            self.log("  All binary package wheels are present")
+                    
                     self.log("Skipping re-download (use force_redownload=True to force)")
                     return True, ""
             
@@ -580,7 +609,7 @@ class WheelhouseManager:
             
             # If package_versions provided, use hardware-adaptive installation
             if package_versions:
-                return self._prepare_from_profile(cuda_config, python_version, package_versions)
+                return self._prepare_from_profile(cuda_config, python_version, package_versions, binary_packages)
             
             # Otherwise, use legacy manifest-based installation
             return self._prepare_from_manifest(cuda_config, python_version)
@@ -669,7 +698,7 @@ class WheelhouseManager:
                 error_msg = "Unknown error (encoding issue)"
             return False, f"Wheelhouse preparation exception: {error_msg}"
     
-    def _prepare_from_profile(self, cuda_config: str, python_version: Tuple[int, int], package_versions: dict) -> Tuple[bool, str]:
+    def _prepare_from_profile(self, cuda_config: str, python_version: Tuple[int, int], package_versions: dict, binary_packages: dict = None) -> Tuple[bool, str]:
         """
         Prepare wheelhouse from ProfileSelector package versions (hardware-adaptive).
         
@@ -703,6 +732,34 @@ class WheelhouseManager:
                     )
                     if not success:
                         return False, f"Failed to download {pkg_name}: {error}"
+            
+            # Phase 1.5: Download binary packages (after torch, before other packages)
+            if binary_packages:
+                self.log("Phase 1.5: Downloading binary packages from URLs")
+                self.log(f"  Found {len(binary_packages)} binary package(s) in profile: {list(binary_packages.keys())}")
+                # Install in correct order: triton -> causal_conv1d -> mamba_ssm
+                binary_order = ["triton", "causal_conv1d", "mamba_ssm"]
+                for pkg_name in binary_order:
+                    if pkg_name in binary_packages:
+                        pkg_info = binary_packages[pkg_name]
+                        url = pkg_info.get("url")
+                        if url:
+                            # Check if wheel already exists
+                            wheel_filename = url.split("/")[-1]
+                            wheel_path = self.wheelhouse / wheel_filename
+                            if wheel_path.exists():
+                                self.log(f"  {pkg_name} wheel already exists: {wheel_filename}")
+                            else:
+                                self.log(f"  Downloading {pkg_name} from {url}")
+                                success, error = self._download_binary_package(url, pkg_name)
+                                if not success:
+                                    self.log(f"  WARNING: Failed to download binary package {pkg_name}: {error}")
+                                    # Binary packages are optional - continue even if they fail
+                                    # They'll be handled at runtime with error messages
+                        else:
+                            self.log(f"  WARNING: No URL found for binary package {pkg_name}")
+            else:
+                self.log("Phase 1.5: No binary packages in profile (skipping)")
             
             # Phase 2: Download all other packages
             self.log("Phase 2: Downloading all other packages")
@@ -888,6 +945,69 @@ class WheelhouseManager:
                         self.log(f"  Warning: Could not delete {wheel.name}: {e}")
         
         return removed_count
+    
+    def _download_binary_package(self, url: str, package_name: str) -> Tuple[bool, str]:
+        """
+        Download a binary package wheel from a URL.
+        
+        Args:
+            url: URL to the wheel file
+            package_name: Package name (for logging)
+        
+        Returns:
+            Tuple of (success: bool, error_message: str)
+        """
+        try:
+            import urllib.request
+            import urllib.error
+            
+            # Extract filename from URL
+            filename = url.split("/")[-1]
+            wheel_path = self.wheelhouse / filename
+            
+            # Check if already downloaded
+            if wheel_path.exists():
+                self.log(f"    {package_name} wheel already exists: {filename}")
+                return True, ""
+            
+            self.log(f"    Downloading {filename}...")
+            
+            # Download the file
+            try:
+                urllib.request.urlretrieve(url, wheel_path)
+                self.log(f"    ✓ Downloaded {filename}")
+                return True, ""
+            except urllib.error.HTTPError as e:
+                return False, f"HTTP error {e.code}: {e.reason}"
+            except urllib.error.URLError as e:
+                return False, f"URL error: {e.reason}"
+            except Exception as e:
+                return False, str(e)
+                
+        except ImportError:
+            # Fallback: use requests if available
+            try:
+                import requests
+                filename = url.split("/")[-1]
+                wheel_path = self.wheelhouse / filename
+                
+                if wheel_path.exists():
+                    self.log(f"    {package_name} wheel already exists: {filename}")
+                    return True, ""
+                
+                self.log(f"    Downloading {filename}...")
+                response = requests.get(url, timeout=300)
+                response.raise_for_status()
+                
+                with open(wheel_path, 'wb') as f:
+                    f.write(response.content)
+                
+                self.log(f"    ✓ Downloaded {filename}")
+                return True, ""
+            except ImportError:
+                return False, "Neither urllib nor requests available for downloading binary packages"
+            except Exception as e:
+                return False, str(e)
     
     def _download_wheel(
         self, 

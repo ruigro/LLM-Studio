@@ -139,6 +139,12 @@ def load_model(base_model, adapter_dir, use_4bit=True, offload=True):
                     print(f"❌ Error: CLIP-based model requires 'open-clip-torch' package", file=sys.stderr)
                     print("Please run: pip install open-clip-torch>=2.20.0", file=sys.stderr)
                     raise RuntimeError("Missing dependency: open-clip-torch. Install with: pip install open-clip-torch>=2.20.0")
+                elif "causal_conv1d" in error_str or "mamba_ssm" in error_str:
+                    print(f"❌ Error: Mamba/SSM architecture model requires 'causal_conv1d' and 'mamba_ssm' packages", file=sys.stderr)
+                    print("These packages should have been installed automatically by the installer.", file=sys.stderr)
+                    print("If they are missing, please run the installer again or use a model that doesn't require Mamba/SSM.", file=sys.stderr)
+                    print("Note: These packages are difficult to install manually on Windows and require CUDA toolkit compilation.", file=sys.stderr)
+                    raise RuntimeError("Missing dependency: causal_conv1d/mamba_ssm. These should be installed automatically by the installer. Please run the installer again or use a different model.")
                 raise
             except Exception:
                 # Fallback to non-quantized
@@ -179,6 +185,12 @@ def load_model(base_model, adapter_dir, use_4bit=True, offload=True):
                     print(f"❌ Error: CLIP-based model requires 'open-clip-torch' package", file=sys.stderr)
                     print("Please run: pip install open-clip-torch>=2.20.0", file=sys.stderr)
                     raise RuntimeError("Missing dependency: open-clip-torch. Install with: pip install open-clip-torch>=2.20.0")
+                elif "causal_conv1d" in error_str or "mamba_ssm" in error_str:
+                    print(f"❌ Error: Mamba/SSM architecture model requires 'causal_conv1d' and 'mamba_ssm' packages", file=sys.stderr)
+                    print("These packages should have been installed automatically by the installer.", file=sys.stderr)
+                    print("If they are missing, please run the installer again or use a model that doesn't require Mamba/SSM.", file=sys.stderr)
+                    print("Note: These packages are difficult to install manually on Windows and require CUDA toolkit compilation.", file=sys.stderr)
+                    raise RuntimeError("Missing dependency: causal_conv1d/mamba_ssm. These should be installed automatically by the installer. Please run the installer again or use a different model.")
                 raise
         
         return tokenizer, model

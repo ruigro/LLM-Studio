@@ -224,11 +224,13 @@ class DownloadedModelCard(QFrame):
     
     selected = Signal(str)
     delete_clicked = Signal(str)  # Emits model path
+    repair_clicked = Signal(str)  # Emits model path
     
-    def __init__(self, model_name: str, model_path: str, size: str, icons: str, parent=None):
+    def __init__(self, model_name: str, model_path: str, size: str, icons: str, is_incomplete: bool = False, parent=None):
         super().__init__(parent)
         self.model_path = model_path
         self.model_name = model_name
+        self.is_incomplete = is_incomplete
         self.is_dark = True
         
         self.setMinimumHeight(140)
@@ -240,7 +242,7 @@ class DownloadedModelCard(QFrame):
         layout.setContentsMargins(15, 12, 15, 12)
         layout.setSpacing(6)
         
-        # Top row: Model name + Delete button
+        # Top row: Model name + Delete button (+ optional Repair button)
         top_layout = QHBoxLayout()
         
         name_label = QLabel(model_name)
@@ -250,6 +252,29 @@ class DownloadedModelCard(QFrame):
         name_label.setFont(name_font)
         name_label.setWordWrap(True)
         top_layout.addWidget(name_label, 1)
+        
+        # Repair button for incomplete models
+        if self.is_incomplete:
+            self.repair_btn = QPushButton("🔧 Fix")
+            self.repair_btn.setToolTip("Repair / Resume download for this model")
+            self.repair_btn.setFixedSize(60, 30)
+            self.repair_btn.setCursor(Qt.ArrowCursor)
+            self.repair_btn.setStyleSheet("""
+                QPushButton {
+                    background: rgba(255, 165, 0, 0.1);
+                    border: 1px solid rgba(255, 165, 0, 0.3);
+                    border-radius: 4px;
+                    font-size: 13px;
+                    font-weight: bold;
+                    color: orange;
+                }
+                QPushButton:hover {
+                    background: rgba(255, 165, 0, 0.3);
+                    border: 1px solid rgba(255, 165, 0, 0.5);
+                }
+            """)
+            self.repair_btn.clicked.connect(lambda: self.repair_clicked.emit(self.model_path))
+            top_layout.addWidget(self.repair_btn)
         
         self.delete_btn = QPushButton("🗑️")
         self.delete_btn.setToolTip("Delete this model")
@@ -279,6 +304,9 @@ class DownloadedModelCard(QFrame):
         size_font = QFont()
         size_font.setPointSize(13)
         size_label.setFont(size_font)
+        # If incomplete, color it red
+        if self.is_incomplete:
+            size_label.setStyleSheet("color: #ff6b6b; font-weight: bold;")
         bottom_layout.addWidget(size_label)
         
         bottom_layout.addStretch(1)

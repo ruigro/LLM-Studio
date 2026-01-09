@@ -32,7 +32,7 @@ class ProfileSelector:
         self.cuda_map = self.matrix.get("cuda_version_map", {})
         self.common_packages = self.matrix.get("common_packages", {})
     
-    def select_profile(self, hardware_profile: Dict) -> Tuple[str, Dict, list]:
+    def select_profile(self, hardware_profile: Dict) -> Tuple[str, Dict, list, Dict]:
         """
         Select best profile for the given hardware.
         
@@ -40,7 +40,7 @@ class ProfileSelector:
             hardware_profile: Hardware info from SystemDetector.get_hardware_profile()
         
         Returns:
-            Tuple of (profile_name, package_versions, warnings)
+            Tuple of (profile_name, package_versions, warnings, binary_packages)
         """
         warnings = []
         
@@ -156,7 +156,10 @@ class ProfileSelector:
         # Get package versions
         package_versions = self._get_package_versions(selected_profile)
         
-        return selected_profile, package_versions, warnings
+        # Get binary packages
+        binary_packages = self._get_binary_packages(selected_profile)
+        
+        return selected_profile, package_versions, warnings, binary_packages
     
     def _has_mixed_capabilities(self, gpus: list) -> bool:
         """Check if GPUs have different compute capabilities"""
@@ -221,6 +224,21 @@ class ProfileSelector:
         versions.update(self.common_packages)
         
         return versions
+    
+    def _get_binary_packages(self, profile_name: str) -> Dict[str, Dict]:
+        """
+        Get binary packages dictionary for a profile.
+        
+        Returns:
+            Dict of {package_name: {type, python, url}}
+        """
+        if profile_name not in self.profiles:
+            raise ValueError(f"Profile '{profile_name}' not found in compatibility matrix")
+        
+        profile = self.profiles[profile_name]
+        
+        # Return binary_packages if present, otherwise empty dict
+        return profile.get("binary_packages", {})
     
     def get_profile_description(self, profile_name: str) -> str:
         """Get human-readable description of a profile"""

@@ -10,39 +10,22 @@ import time
 from pathlib import Path
 from datetime import datetime
 
-# Fix Windows console encoding for emojis and ensure COMPLETELY UNBUFFERED output for real-time GUI updates
-# CRITICAL: Force immediate flushing for every write
+# Fix Windows console encoding for emojis and ensure unbuffered output for real-time GUI updates
 if sys.platform == "win32":
-    # Create unbuffered TextIOWrapper - flush on every write
-    class UnbufferedTextIOWrapper(io.TextIOWrapper):
-        def write(self, s):
-            result = super().write(s)
-            self.flush()  # Force flush after every write
-            return result
-        def writelines(self, lines):
-            result = super().writelines(lines)
-            self.flush()  # Force flush after every write
-            return result
-    
-    sys.stdout = UnbufferedTextIOWrapper(
-        sys.stdout.buffer, 
-        encoding="utf-8", 
-        errors="replace",
-        line_buffering=False
-    )
-    sys.stderr = UnbufferedTextIOWrapper(
-        sys.stderr.buffer, 
-        encoding="utf-8", 
-        errors="replace",
-        line_buffering=False
-    )
+    # On Windows, we need to ensure the standard streams are using UTF-8
+    # and we'll use manual flushing in our print function
+    try:
+        # Use reconfigure if available (Python 3.7+)
+        sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+        sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+    except (AttributeError, io.UnsupportedOperation):
+        pass
 else:
     # On Unix, ensure unbuffered output
     try:
         sys.stdout.reconfigure(line_buffering=False)
         sys.stderr.reconfigure(line_buffering=False)
-    except AttributeError:
-        # Python < 3.7 doesn't have reconfigure
+    except (AttributeError, io.UnsupportedOperation):
         pass
 
 # Create a print function that always flushes for real-time GUI updates
@@ -50,9 +33,12 @@ _original_print = print
 def print(*args, **kwargs):
     """Print function that always flushes for real-time GUI updates"""
     _original_print(*args, **kwargs)
-    sys.stdout.flush()
-    if 'file' in kwargs and kwargs['file'] is sys.stderr:
-        sys.stderr.flush()
+    try:
+        sys.stdout.flush()
+        if 'file' in kwargs and kwargs['file'] is sys.stderr:
+            sys.stderr.flush()
+    except (AttributeError, io.UnsupportedOperation):
+        pass
 
 # Check if bitsandbytes can be used
 # Note: bitsandbytes 0.45.5+ fixed the triton.ops compatibility issue
@@ -574,32 +560,49 @@ def main():
             self.total_steps = total_steps
             self.effective_bs = effective_bs
             self.start_time = start_time
-            self.last_step = 0
+            self.last_emitted_step = -1
 
-        def on_log(self, args, state: TrainerState, control: TrainerControl, logs=None, **kwargs):
-            if logs is None:
-                return
+        def _emit(self, state: TrainerState, logs: dict | None):
             step = state.global_step
+            # Only emit for step > 0 to avoid initialization noise in the graph
             if step <= 0:
                 return
+            
+            # Don't emit twice for the same step unless we have new logs (loss)
+            has_loss = logs and "loss" in logs
+            if step == self.last_emitted_step and not has_loss:
+                return
+                
+            self.last_emitted_step = step
             elapsed = max(time.time() - self.start_time, 1e-6)
             samples = step * self.effective_bs
             samples_per_sec = samples / elapsed
             remaining_steps = max(self.total_steps - step, 0)
-            eta_sec = remaining_steps * (elapsed / step)
+            eta_sec = remaining_steps * (elapsed / step) if step > 0 else 0
+            
             payload = {
                 "step": step,
                 "total_steps": self.total_steps,
-                "epoch": logs.get("epoch", state.epoch),
-                "loss": logs.get("loss"),
-                "learning_rate": logs.get("learning_rate"),
+                "epoch": logs.get("epoch") if logs else state.epoch,
+                "loss": logs.get("loss") if logs else None,
+                "learning_rate": logs.get("learning_rate") if logs else None,
                 "samples_per_sec": samples_per_sec,
                 "eta_sec": eta_sec,
             }
             try:
-                print(json.dumps(payload))
+                # Use a prefix to make it easier to identify and harder to mis-parse
+                print(f"DASHBOARD_METRICS: {json.dumps(payload)}")
             except Exception:
                 pass
+
+        def on_log(self, args, state: TrainerState, control: TrainerControl, logs=None, **kwargs):
+            if logs is None:
+                return
+            self._emit(state, logs)
+
+        def on_step_end(self, args, state: TrainerState, control: TrainerControl, **kwargs):
+            # Ensure at least one emit per step even if Trainer log is skipped
+            self._emit(state, logs={})
 
     print("[INFO] Starting training...")
     
@@ -626,6 +629,7 @@ def main():
             half_precision_backend="auto",
             max_grad_norm=0.0,  # keep clipping disabled
             logging_steps=1,
+            logging_strategy="steps",
             output_dir=OUTPUT_DIR,
             optim="adamw_8bit",
             seed=3407,
@@ -653,6 +657,10 @@ def main():
         print("[WARNING] Training completed but no metrics were recorded!")
         print("[WARNING] This might indicate training did not actually run.")
 
+    # Define unique adapter path with timestamp for this run
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    adapter_path = Path(OUTPUT_DIR) / f"adapter_{timestamp}"
+    
     print(f"[INFO] Saving LoRA adapter to: {adapter_path.absolute()}")
 
     # Ensure adapter_path exists
@@ -758,6 +766,12 @@ def main():
     """
     
     print(f"[INFO] Finetuning complete! Adapter saved to: {adapter_path.absolute()}")
+
+    # Clean up old adapters in the output directory (keep latest 10)
+    try:
+        cleanup_old_adapters(Path(OUTPUT_DIR), keep_latest=10)
+    except Exception as e:
+        print(f"[WARNING] Cleanup failed: {e}")
 
 
 if __name__ == "__main__":

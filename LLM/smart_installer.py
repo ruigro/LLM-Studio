@@ -2051,7 +2051,7 @@ print(device_name)
                     raise FileNotFoundError(f"compatibility_matrix.json not found at {compat_matrix_path}")
                 
                 selector = ProfileSelector(compat_matrix_path)
-                profile_name, package_versions, warnings = selector.select_profile(hw_profile)
+                profile_name, package_versions, warnings, binary_packages = selector.select_profile(hw_profile)
                 
                 self.log(f"Selected profile: {profile_name}")
                 for warning in warnings:
@@ -3341,7 +3341,7 @@ if errorlevel 1 (
             compat_matrix_path = Path(__file__).parent / "metadata" / "compatibility_matrix.json"
             if compat_matrix_path.exists():
                 selector = ProfileSelector(compat_matrix_path)
-                profile_name, package_versions, warnings = selector.select_profile(hw_profile)
+                profile_name, package_versions, warnings, binary_packages = selector.select_profile(hw_profile)
                 
                 # Add all packages from profile
                 for pkg_name in package_versions.keys():

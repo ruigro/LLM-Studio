@@ -33,7 +33,13 @@ class ModelIntegrityChecker:
     # Essential files that indicate a valid model
     ESSENTIAL_FILES = [
         'config.json',
+    ]
+    
+    # Alternative tokenizer files (at least one must exist)
+    TOKENIZER_FILES = [
         'tokenizer_config.json',
+        'tokenizer.json',
+        'tokenizer.model',
     ]
     
     # Weight file patterns (at least one must exist)
@@ -41,6 +47,7 @@ class ModelIntegrityChecker:
         'model.safetensors',
         'pytorch_model.bin',
         'model.safetensors.index.json',  # For sharded models
+        'pytorch_model.bin.index.json',  # For sharded models
     ]
     
     def __init__(self, models_dir: Optional[Path] = None):
@@ -101,7 +108,7 @@ class ModelIntegrityChecker:
         
         # Check for weights
         has_weights = any(
-            any(f == pattern or f.startswith(pattern.replace('.safetensors', ''))
+            any(f == pattern or f.startswith(pattern.replace('.safetensors', '').replace('.bin', ''))
                 for pattern in self.WEIGHT_PATTERNS)
             for f in files
         )
@@ -109,6 +116,9 @@ class ModelIntegrityChecker:
         # Check for sharded models (multiple safetensors files)
         if not has_weights:
             has_weights = any('.safetensors' in f or '.bin' in f for f in files)
+            
+        # Check for tokenizer
+        has_tokenizer = any(t in files for t in self.TOKENIZER_FILES)
         
         # Determine missing files
         missing_files = []
@@ -116,11 +126,14 @@ class ModelIntegrityChecker:
             if essential not in files:
                 missing_files.append(essential)
         
+        if not has_tokenizer:
+            missing_files.append("tokenizer (tokenizer_config.json, tokenizer.json, or tokenizer.model)")
+        
         if not has_weights:
             missing_files.append("model weights (*.safetensors or *.bin)")
         
-        # Model is complete if it has config and weights
-        is_complete = has_config and has_weights
+        # Model is complete if it has config, weights, and tokenizer
+        is_complete = has_config and has_weights and has_tokenizer
         
         # Try to extract model ID from README or config
         model_id = self._extract_model_id(model_path, model_name)
@@ -156,8 +169,11 @@ class ModelIntegrityChecker:
                 with open(config_file, 'r', encoding='utf-8') as f:
                     config = json.load(f)
                     # Some configs have _name_or_path
-                    if '_name_or_path' in config:
-                        return config['_name_or_path']
+                    if '_name_or_path' in config and config['_name_or_path'] and not config['_name_or_path'].startswith('.'):
+                        name_or_path = config['_name_or_path']
+                        # Check if it looks like a model ID (contains /)
+                        if '/' in name_or_path:
+                            return name_or_path
             except Exception:
                 pass
         
@@ -179,13 +195,24 @@ class ModelIntegrityChecker:
                 pass
         
         # Fallback: Convert directory name back to model ID
-        # unsloth__llama-3.2-1b-instruct -> unsloth/llama-3.2-1b-instruct
+        # Handle double underscore (most robust)
         if '__' in model_name:
             return model_name.replace('__', '/', 1)
         
+        # Handle single underscore (less robust, but common in older versions)
         # nvidia_Llama-3.1-Nemotron -> nvidia/Llama-3.1-Nemotron
+        # We only do this if it looks like a valid model ID format
         if '_' in model_name and not model_name.startswith('.'):
-            return model_name.replace('_', '/', 1)
+            # Special case for well-known orgs
+            orgs = ['unsloth', 'nvidia', 'meta-llama', 'mistralai', 'google', 'microsoft', 'Qwen', 'deepseek-ai']
+            for org in orgs:
+                if model_name.lower().startswith(org.lower() + '_'):
+                    return org + '/' + model_name[len(org)+1:]
+            
+            # General case: replace first underscore if it contains at least one more character after it
+            parts = model_name.split('_', 1)
+            if len(parts) == 2 and parts[0] and parts[1]:
+                return parts[0] + '/' + parts[1]
         
         return None
     

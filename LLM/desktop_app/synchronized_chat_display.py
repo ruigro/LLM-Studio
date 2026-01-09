@@ -28,10 +28,12 @@ class ChatBubble(QFrame):
         self.text_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         # CRITICAL: Use Expanding so label fills bubble width and wraps properly
         self.text_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        # Align text to top of bubble
+        self.text_label.setAlignment(Qt.AlignTop | Qt.AlignLeft)
         text_font = QFont()
         text_font.setPointSize(14)
         self.text_label.setFont(text_font)
-        layout.addWidget(self.text_label, 0)  # No stretch for label
+        layout.addWidget(self.text_label, 0, Qt.AlignTop)  # Align to top, no stretch
         
         self._apply_style()
     

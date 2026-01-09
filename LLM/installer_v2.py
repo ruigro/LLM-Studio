@@ -112,7 +112,7 @@ class InstallerV2:
                 # Select optimal profile
                 selector = ProfileSelector(self.compat_matrix_path)
                 try:
-                    profile_name, package_versions, warnings = selector.select_profile(hw_profile)
+                    profile_name, package_versions, warnings, binary_packages = selector.select_profile(hw_profile)
                     
                     self.log(f"\n✓ Selected profile: {profile_name}")
                     self.log(f"  {selector.get_profile_description(profile_name)}")
@@ -145,7 +145,8 @@ class InstallerV2:
                 success, error = wheelhouse_mgr.prepare_wheelhouse(
                     cuda_config, 
                     python_version,
-                    package_versions  # Pass hardware-specific versions or None
+                    package_versions,  # Pass hardware-specific versions or None
+                    binary_packages if use_profile else None  # Pass binary packages if using profile
                 )
                 
                 if not success:
@@ -174,7 +175,7 @@ class InstallerV2:
             self.log("-" * 60)
             
             installer = ImmutableInstaller(self.venv, self.wheelhouse, self.manifest_path)
-            success, error = installer.install(cuda_config, package_versions=package_versions)
+            success, error = installer.install(cuda_config, package_versions=package_versions, binary_packages=binary_packages if use_profile else None)
             
             if not success:
                 self.log(f"\n✗ Installation failed:")
@@ -268,6 +269,7 @@ class InstallerV2:
                         cuda_config, 
                         python_version,
                         package_versions,
+                        binary_packages if use_profile else None,  # Pass binary packages if using profile
                         force_redownload=True  # Force fresh download
                     )
                     
@@ -397,8 +399,12 @@ class InstallerV2:
                 hw_profile = detector.get_hardware_profile()
                 selector = ProfileSelector(self.compat_matrix_path)
                 try:
-                    profile_name, package_versions, warnings = selector.select_profile(hw_profile)
+                    profile_name, package_versions, warnings, binary_packages = selector.select_profile(hw_profile)
                     self.log(f"\n✓ Selected profile: {profile_name}")
+                    if binary_packages:
+                        self.log(f"  Binary packages in profile: {list(binary_packages.keys())}")
+                    else:
+                        self.log(f"  No binary packages in profile")
                     cuda_config = self._extract_cuda_config(package_versions.get("torch", ""))
                 except Exception as e:
                     raise ValueError(f"Profile selection failed: {str(e)}")
@@ -419,6 +425,7 @@ class InstallerV2:
                 cuda_config, 
                 python_version,
                 package_versions,
+                binary_packages if self.use_adaptive else None,  # Pass binary packages if using profile
                 force_redownload=False  # Will auto-detect mismatches and redownload only if needed
             )
             
@@ -437,7 +444,17 @@ class InstallerV2:
             
             installer = ImmutableInstaller(self.venv, self.wheelhouse, self.manifest_path)
             self.log("  Engine initialized. Executing install pass...")
-            success, error = installer.install(cuda_config, package_versions=package_versions)
+            # Pass binary_packages so they get installed during repair
+            binary_packages_to_pass = binary_packages if self.use_adaptive else None
+            if binary_packages_to_pass:
+                self.log(f"  Passing {len(binary_packages_to_pass)} binary package(s) to installer: {list(binary_packages_to_pass.keys())}")
+            else:
+                self.log(f"  No binary packages to pass (use_adaptive={self.use_adaptive})")
+            success, error = installer.install(
+                cuda_config, 
+                package_versions=package_versions,
+                binary_packages=binary_packages_to_pass
+            )
             
             if not success:
                 self.log(f"\n✗ Repair failed:")

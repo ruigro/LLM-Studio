@@ -9,13 +9,13 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import Qt, QProcess, QTimer, QThread, Signal, QProcessEnvironment, QRect, QSize, QEvent, QObject, QPoint
+from PySide6.QtCore import Qt, QProcess, QTimer, QThread, Signal, QProcessEnvironment, QRect, QSize, QEvent, QObject, QPoint, QPointF
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QTabWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QLineEdit, QPushButton, QFileDialog, QComboBox, QTextEdit, QPlainTextEdit,
-    QSpinBox, QDoubleSpinBox, QMessageBox, QListWidget, QListWidgetItem, QSplitter, QToolBar, QScrollArea, QGridLayout, QFrame, QProgressBar, QSizePolicy, QTabBar, QStyleOptionTab, QStyle, QStackedWidget, QGroupBox, QInputDialog, QCheckBox
+    QSpinBox, QDoubleSpinBox, QMessageBox, QListWidget, QListWidgetItem, QSplitter, QToolBar, QScrollArea, QGridLayout, QFrame, QProgressBar, QSizePolicy, QTabBar, QStyleOptionTab, QStyle, QStackedWidget, QGroupBox, QInputDialog, QCheckBox, QStyleOptionButton
 )
-from PySide6.QtGui import QAction, QIcon, QFont, QMouseEvent, QCursor, QPixmap
+from PySide6.QtGui import QAction, QIcon, QFont, QMouseEvent, QCursor, QPixmap, QPainter, QPen, QColor
 
 # Feature flag for hybrid frame wrapper (enabled by default)
 # To disable: set USE_HYBRID_FRAME=0 before running
@@ -196,6 +196,75 @@ class SystemDetectThread(QThread):
             self.error.emit(traceback.format_exc())
 
 
+class RepairThread(QThread):
+    """Thread for repairing/resuming incomplete model downloads"""
+    progress = Signal(int)  # 0-100
+    finished = Signal(str)  # destination path
+    error = Signal(str)     # error message
+    
+    def __init__(self, model_id: str, existing_dir: Path):
+        super().__init__()
+        self.model_id = model_id
+        self.existing_dir = existing_dir
+    
+    def run(self):
+        try:
+            from huggingface_hub import snapshot_download, model_info
+            from tqdm import tqdm
+            
+            # Get total size for progress
+            total_size = 0
+            try:
+                self.progress.emit(2)
+                info = model_info(self.model_id)
+                total_size = sum(f.size for f in info.siblings if f.size is not None)
+            except Exception:
+                pass
+            
+            # Progress tracker
+            class ProgressTracker:
+                def __init__(self, total, signal):
+                    self.total = total
+                    self.downloaded = 0
+                    self.signal = signal
+                    self.last_percent = 5
+                
+                def update(self, n):
+                    self.downloaded += n
+                    if self.total > 0:
+                        percent = int(self.downloaded * 100 / self.total)
+                        percent = max(5, min(percent, 99))
+                        if percent > self.last_percent:
+                            self.last_percent = percent
+                            self.signal.emit(percent)
+            
+            tracker = ProgressTracker(total_size, self.progress)
+            
+            class CustomTqdm(tqdm):
+                def __init__(self, *args, **kwargs):
+                    super().__init__(*args, **kwargs)
+                
+                def update(self, n=1):
+                    displayed = super().update(n)
+                    tracker.update(n)
+                    return displayed
+            
+            # Download with resume_download=True to only fetch missing files
+            result = snapshot_download(
+                repo_id=self.model_id,
+                local_dir=str(self.existing_dir),
+                local_dir_use_symlinks=False,
+                resume_download=True,  # CRITICAL: Only download missing files
+                tqdm_class=CustomTqdm
+            )
+            
+            self.progress.emit(100)
+            self.finished.emit(str(self.existing_dir))
+            
+        except Exception as e:
+            self.error.emit(str(e))
+
+
 class DownloadThread(QThread):
     """Thread for downloading models without freezing UI"""
     progress = Signal(int)  # 0-100
@@ -210,20 +279,58 @@ class DownloadThread(QThread):
     def run(self):
         try:
             # Import here to avoid import errors if not installed
-            from huggingface_hub import snapshot_download
+            from huggingface_hub import snapshot_download, model_info
+            from tqdm import tqdm
+            
+            # 1. Try to get total size for accurate progress tracking
+            total_size = 0
+            try:
+                self.progress.emit(2)
+                info = model_info(self.model_id)
+                total_size = sum(f.size for f in info.siblings if f.size is not None)
+            except Exception:
+                pass
+                
+            # Internal tracker for cumulative progress across all files
+            class ProgressTracker:
+                def __init__(self, total, signal):
+                    self.total = total
+                    self.downloaded = 0
+                    self.signal = signal
+                    self.last_percent = 5
+                
+                def update(self, n):
+                    self.downloaded += n
+                    if self.total > 0:
+                        percent = int(self.downloaded * 100 / self.total)
+                        # Clamp and only emit if increased
+                        percent = max(5, min(percent, 99))
+                        if percent > self.last_percent:
+                            self.last_percent = percent
+                            self.signal.emit(percent)
+
+            tracker = ProgressTracker(total_size, self.progress)
+            
+            # Custom TQDM class that redirects updates to our tracker
+            class CustomTqdm(tqdm):
+                def __init__(self, *args, **kwargs):
+                    super().__init__(*args, **kwargs)
+                
+                def update(self, n=1):
+                    displayed = super().update(n)
+                    tracker.update(n)
+                    return displayed
             
             # Convert model ID to directory name (e.g., unsloth/model -> unsloth__model)
             model_slug = self.model_id.replace("/", "__")
             dest = self.target_dir / model_slug
             
-            # Emit initial progress
-            self.progress.emit(5)
-            
-            # Download
+            # Download using the custom tqdm class for real-time updates
             result = snapshot_download(
                 repo_id=self.model_id,
                 local_dir=str(dest),
-                local_dir_use_symlinks=False
+                local_dir_use_symlinks=False,
+                tqdm_class=CustomTqdm
             )
             
             self.progress.emit(100)
@@ -236,8 +343,9 @@ class DownloadThread(QThread):
 class PackageCard(QFrame):
     """Modern, polished card widget for displaying a package with version info and status."""
     clicked = Signal(str)  # Emits package name when clicked
+    checkbox_toggled = Signal(str, bool)  # Emits (package_name, checked) when checkbox toggled
     
-    def __init__(self, pkg_name, required_version, installed_version, is_installed, status, status_color, status_text, description, parent=None):
+    def __init__(self, pkg_name, required_version, installed_version, is_installed, status, status_color, status_text, description, needs_attention=False, parent=None):
         super().__init__(parent)
         self.pkg_name = pkg_name
         self.required_version = required_version
@@ -246,21 +354,114 @@ class PackageCard(QFrame):
         self.status_text = status_text
         self.status_color = status_color
         self.description = description
+        self.needs_attention = needs_attention
         
         self.setFrameShape(QFrame.NoFrame)
         self.setMinimumHeight(140)
         self.setMaximumHeight(250)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
         self.setCursor(Qt.PointingHandCursor)
-        self._setup_style(False)
+        self._setup_style(False, needs_attention)
         
         layout = QVBoxLayout(self)
         layout.setSpacing(8)
         layout.setContentsMargins(18, 16, 18, 16)
         
-        # Header: Name + Status badge
+        # Header: Checkbox + Name + Status badge
         header = QHBoxLayout()
         header.setSpacing(12)
+        
+        # Checkbox for selection (show for all packages so user can select any)
+        self.checkbox = QCheckBox()
+        # Auto-check packages that need attention
+        if needs_attention:
+            self.checkbox.setChecked(True)
+        
+        # Create a custom checkbox with green background
+        # The checkmark will be drawn via custom paint event
+        self.checkbox.setStyleSheet("""
+            QCheckBox {
+                spacing: 8px;
+            }
+            QCheckBox::indicator {
+                width: 22px;
+                height: 22px;
+                border: 2px solid #667eea;
+                border-radius: 4px;
+                background: transparent;
+            }
+            QCheckBox::indicator:checked {
+                background: #4caf50;
+                border: 2px solid #4caf50;
+            }
+            QCheckBox::indicator:hover {
+                border: 2px solid #8b9aff;
+            }
+            QCheckBox::indicator:checked:hover {
+                background: #66bb6a;
+                border: 2px solid #66bb6a;
+            }
+        """)
+        
+        # Override paintEvent to draw the checkmark directly on the indicator
+        original_paint = self.checkbox.paintEvent
+        
+        def paint_with_checkmark(event):
+            # Call original paint to draw the checkbox and indicator background
+            original_paint(event)
+            
+            if self.checkbox.isChecked():
+                # Get the style option to find indicator position
+                opt = QStyleOptionButton()
+                self.checkbox.initStyleOption(opt)
+                
+                # Get indicator rectangle from style
+                indicator_rect = self.checkbox.style().subElementRect(
+                    QStyle.SubElement.SE_CheckBoxIndicator,
+                    opt,
+                    self.checkbox
+                )
+                
+                if indicator_rect.isValid():
+                    painter = QPainter(self.checkbox)
+                    painter.setRenderHint(QPainter.Antialiasing)
+                    
+                    # Draw white checkmark
+                    pen = QPen(QColor("white"))
+                    pen.setWidth(2)
+                    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+                    pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+                    painter.setPen(pen)
+                    
+                    # Draw checkmark: two lines forming a check
+                    # Coordinates relative to indicator rect
+                    x, y, w, h = indicator_rect.x(), indicator_rect.y(), indicator_rect.width(), indicator_rect.height()
+                    # Center of indicator
+                    center_x, center_y = x + w // 2, y + h // 2
+                    # Draw checkmark: from left-middle to center-bottom to right-top
+                    painter.drawLine(
+                        QPointF(center_x - 5, center_y),
+                        QPointF(center_x - 1, center_y + 4)
+                    )
+                    painter.drawLine(
+                        QPointF(center_x - 1, center_y + 4),
+                        QPointF(center_x + 5, center_y - 4)
+                    )
+                    
+                    painter.end()
+        
+        self.checkbox.paintEvent = paint_with_checkmark
+        
+        def on_checkbox_changed(state):
+            checked = (state == Qt.CheckState.Checked)
+            self.checkbox_toggled.emit(self.pkg_name, checked)
+            # Force repaint to show/hide checkmark
+            self.checkbox.update()
+        
+        self.checkbox.stateChanged.connect(on_checkbox_changed)
+        # Prevent checkbox clicks from triggering card click
+        self.checkbox.mousePressEvent = lambda e: QCheckBox.mousePressEvent(self.checkbox, e)
+        header.addWidget(self.checkbox)
         
         name_label = QLabel(pkg_name)
         name_label.setWordWrap(True)
@@ -323,41 +524,71 @@ class PackageCard(QFrame):
         
         layout.addStretch()
 
-    def _setup_style(self, selected=False):
+    def _setup_style(self, selected=False, needs_attention=False):
         if selected:
+            border_color = "#f44336" if needs_attention else self.status_color
             self.setStyleSheet(f"""
                 PackageCard {{
                     background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
                         stop:0 rgba(102, 126, 234, 0.15), stop:1 rgba(118, 75, 162, 0.15));
-                    border: 2px solid {self.status_color};
+                    border: 2px solid {border_color};
                     border-radius: 12px;
                     padding: 0px;
                 }}
             """)
         else:
-            self.setStyleSheet(f"""
-                PackageCard {{
-                    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                        stop:0 rgba(40, 40, 55, 0.6), stop:1 rgba(25, 25, 35, 0.6));
-                    border: 1px solid rgba(102, 126, 234, 0.2);
-                    border-radius: 12px;
-                    padding: 0px;
-                }}
-                PackageCard:hover {{
-                    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                        stop:0 rgba(60, 60, 80, 0.8), stop:1 rgba(40, 40, 55, 0.8));
-                    border: 1px solid rgba(102, 126, 234, 0.5);
-                    transform: translateY(-2px);
-                }}
-            """)
+            if needs_attention:
+                # Red border for packages needing attention
+                self.setStyleSheet(f"""
+                    PackageCard {{
+                        background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                            stop:0 rgba(40, 40, 55, 0.6), stop:1 rgba(25, 25, 35, 0.6));
+                        border: 3px solid #f44336;
+                        border-radius: 12px;
+                        padding: 0px;
+                    }}
+                    PackageCard:hover {{
+                        background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                            stop:0 rgba(60, 60, 80, 0.8), stop:1 rgba(40, 40, 55, 0.8));
+                        border: 3px solid #f44336;
+                        transform: translateY(-2px);
+                    }}
+                """)
+            else:
+                self.setStyleSheet(f"""
+                    PackageCard {{
+                        background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                            stop:0 rgba(40, 40, 55, 0.6), stop:1 rgba(25, 25, 35, 0.6));
+                        border: 1px solid rgba(102, 126, 234, 0.2);
+                        border-radius: 12px;
+                        padding: 0px;
+                    }}
+                    PackageCard:hover {{
+                        background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                            stop:0 rgba(60, 60, 80, 0.8), stop:1 rgba(40, 40, 55, 0.8));
+                        border: 1px solid rgba(102, 126, 234, 0.5);
+                        transform: translateY(-2px);
+                    }}
+                """)
 
     def mousePressEvent(self, event: QMouseEvent):
         if event.button() == Qt.LeftButton:
+            # Don't trigger card click if clicking on checkbox
+            if self.checkbox.geometry().contains(event.pos()):
+                return
             self.clicked.emit(self.pkg_name)
         super().mousePressEvent(event)
 
     def set_selected(self, selected: bool):
-        self._setup_style(selected)
+        self._setup_style(selected, self.needs_attention)
+    
+    def is_checked(self) -> bool:
+        """Check if the package checkbox is checked"""
+        return self.checkbox.isChecked()
+    
+    def set_checked(self, checked: bool):
+        """Set the checkbox state"""
+        self.checkbox.setChecked(checked)
 
 
 # Dark theme stylesheet with gradient accents
@@ -1356,8 +1587,8 @@ class MainWindow(QMainWindow):
         
         # Tab buttons
         self.home_btn = QPushButton("🏠 Home")
+        self.download_btn = QPushButton("📦 Models")
         self.train_btn = QPushButton("🎯 Train")
-        self.download_btn = QPushButton("📥 Download")
         self.test_btn = QPushButton("🧪 Test")
         self.logs_btn = QPushButton("📊 Logs")
         self.server_btn = QPushButton("🖧 Server")
@@ -1376,8 +1607,8 @@ class MainWindow(QMainWindow):
         
         # Add left-side buttons
         navbar_layout.addWidget(self.home_btn)
-        navbar_layout.addWidget(self.train_btn)
         navbar_layout.addWidget(self.download_btn)
+        navbar_layout.addWidget(self.train_btn)
         navbar_layout.addWidget(self.test_btn)
         navbar_layout.addWidget(self.server_btn)
         navbar_layout.addWidget(self.mcp_btn)
@@ -1399,8 +1630,8 @@ class MainWindow(QMainWindow):
         self.tabs = tabs
         
         tabs.addTab(self._build_home_tab(), "Home")
+        tabs.addTab(self._build_models_tab(), "Models")
         tabs.addTab(self._build_train_tab(), "Train")
-        tabs.addTab(self._build_models_tab(), "Download")
         tabs.addTab(self._build_test_tab(), "Test")
         tabs.addTab(self._build_logs_tab(), "Logs")
         self.server_page = ServerPage(self)
@@ -1411,8 +1642,8 @@ class MainWindow(QMainWindow):
         
         # Connect buttons to tab switching
         self.home_btn.clicked.connect(lambda: self._switch_tab(tabs, 0))
-        self.train_btn.clicked.connect(lambda: self._switch_tab(tabs, 1))
-        self.download_btn.clicked.connect(lambda: self._switch_tab(tabs, 2))
+        self.download_btn.clicked.connect(lambda: self._switch_tab(tabs, 1))
+        self.train_btn.clicked.connect(lambda: self._switch_tab(tabs, 2))
         self.test_btn.clicked.connect(lambda: self._switch_tab(tabs, 3))
         self.logs_btn.clicked.connect(lambda: self._switch_tab(tabs, 4))
         self.server_btn.clicked.connect(lambda: self._switch_tab(tabs, 5))
@@ -1861,7 +2092,7 @@ class MainWindow(QMainWindow):
         """
         When user clicks the window X:
         1) trigger server stop
-        2) wait 2.5s
+        2) wait for server to actually stop (or timeout)
         3) close
         """
         # If we're already in the final close pass, allow it.
@@ -1871,23 +2102,33 @@ class MainWindow(QMainWindow):
 
         print("[DEBUG] closeEvent triggered - shutting down server...")
         server_page = getattr(self, "server_page", None)
-        if server_page:
-            try:
-                # Trigger the same logic as the "Stop Server" button
-                server_page.request_stop()
-                print("[DEBUG] Server stop requested")
-            except Exception as e:
-                print(f"[DEBUG] Error requesting server stop: {e}")
-
+        
         # Mark that we are shutting down
         self._shutdown_in_progress = True
         
         # Prevent immediate close
         event.ignore()
         
-        # Wait exactly 2.5s then force close
-        print("[DEBUG] Waiting 2.5s before app exit...")
-        QTimer.singleShot(2500, self.close)
+        def _do_close():
+            """Actually close the window after server has stopped"""
+            print("[DEBUG] Server stopped (or timed out) - closing window...")
+            self._shutdown_in_progress = True  # Ensure flag is set
+            self.close()  # This will trigger closeEvent again, but flag will allow it
+        
+        if server_page:
+            try:
+                # Request stop and wait for it to actually complete (or timeout after 5s)
+                # The callback will be called when server stops OR after timeout
+                print("[DEBUG] Requesting server stop and waiting for completion...")
+                server_page.request_stop(on_done=_do_close, timeout_ms=5000)
+            except Exception as e:
+                print(f"[DEBUG] Error requesting server stop: {e}")
+                # If there's an error, close immediately
+                _do_close()
+        else:
+            # No server page, close immediately
+            print("[DEBUG] No server page found - closing immediately")
+            _do_close()
     
     def eventFilter(self, obj, event) -> bool:
         """Event filter to catch mouse events for window resizing from child widgets"""
@@ -2199,7 +2440,7 @@ class MainWindow(QMainWindow):
         tab_widget.setCurrentIndex(index)
         
         # Update button checked states
-        buttons = [self.home_btn, self.train_btn, self.download_btn, self.test_btn, self.logs_btn, self.server_btn, self.mcp_btn, self.requirements_btn, self.info_btn]
+        buttons = [self.home_btn, self.download_btn, self.train_btn, self.test_btn, self.logs_btn, self.server_btn, self.mcp_btn, self.requirements_btn, self.info_btn]
         for i, btn in enumerate(buttons):
             btn.setChecked(i == index)
         
@@ -2245,8 +2486,8 @@ class MainWindow(QMainWindow):
         # All corner images are sized to 150px width (height adaptable) by hybrid_frame system
         tab_to_image = {
             0: "corner_br_owl_coding",      # Home
-            1: "corner_br_owl_training",     # Train
-            2: "corner_br_owl_models",       # Download
+            1: "corner_br_owl_models",       # Models
+            2: "corner_br_owl_training",     # Train
             3: "corner_br_owl_chat",        # Test
             4: "corner_br_owl_logs",         # Logs
             5: "corner_br_owl_server",       # Server
@@ -3384,10 +3625,12 @@ class MainWindow(QMainWindow):
                             capabilities = detect_model_capabilities(model_name=model_name, model_path=str(model_dir))
                             icons = get_capability_icons(capabilities)
                         
-                        card = DownloadedModelCard(model_name, str(model_dir), size, icons)
+                        card = DownloadedModelCard(model_name, str(model_dir), size, icons, is_incomplete=not status.is_complete)
                         card.set_theme(self.dark_mode)
                         card.selected.connect(self._on_model_selected)
                         card.delete_clicked.connect(self._on_delete_model)
+                        if not status.is_complete:
+                            card.repair_clicked.connect(self._on_repair_model)
                         self.downloaded_layout.addWidget(card, row, col)
                         self.downloaded_model_cards.append(card)
                         
@@ -3457,6 +3700,86 @@ class MainWindow(QMainWindow):
         """Handle downloaded model selection"""
         self._log_models(f"Selected: {model_path}")
     
+    def _on_repair_model(self, model_path: str):
+        """Repair or resume download for an incomplete model"""
+        path = Path(model_path)
+        model_name = path.name
+        
+        # Try to extract model ID
+        status = self.model_checker.check_model(path)
+        model_id = status.model_id
+        
+        if not model_id:
+            QMessageBox.warning(self, "Repair Model", 
+                                f"Could not determine HuggingFace Model ID for: {model_name}\n\n"
+                                "You may need to delete and redownload it manually.")
+            return
+            
+        reply = QMessageBox.question(self, "Repair Model", 
+                                    f"Do you want to repair/resume downloading '{model_id}'?\n\n"
+                                    "This will only fetch missing files and won't redownload existing large weights.",
+                                    QMessageBox.Yes | QMessageBox.No)
+        
+        if reply == QMessageBox.Yes:
+            self._log_models(f"🔧 Repairing {model_id}...")
+            
+            # Find the card to show progress
+            card = None
+            for c in self.downloaded_model_cards:
+                if c.model_path == model_path:
+                    card = c
+                    break
+            
+            if not card:
+                return
+            
+            # Disable repair button
+            if hasattr(card, 'repair_btn'):
+                card.repair_btn.setEnabled(False)
+                card.repair_btn.setText("⏳ Fixing...")
+            
+            # Create progress bar
+            progress_bar = QProgressBar()
+            progress_bar.setMinimum(0)
+            progress_bar.setMaximum(100)
+            progress_bar.setValue(0)
+            progress_bar.setTextVisible(True)
+            progress_bar.setFormat("Repairing... %p%")
+            progress_bar.setStyleSheet("""
+                QProgressBar {
+                    border: none;
+                    border-radius: 4px;
+                    text-align: center;
+                    background-color: #262730;
+                    color: white;
+                    font-weight: bold;
+                    height: 30px;
+                }
+                QProgressBar::chunk {
+                    background: qlineargradient(x1:0, y1:0, x2:1, y2:0, 
+                        stop:0 #ffa500, stop:1 #ff8c00);
+                    border-radius: 4px;
+                }
+            """)
+            
+            # Add progress bar to card layout
+            card.layout().addWidget(progress_bar)
+            
+            # Create repair thread (reuse DownloadThread but point to existing directory)
+            thread = RepairThread(model_id, path)
+            
+            # Mark as active
+            repair_key = f"repair_{model_id}"
+            self.active_downloads[repair_key] = (thread, card)
+            
+            # Connect signals
+            thread.progress.connect(lambda p: progress_bar.setValue(p))
+            thread.finished.connect(lambda dest: self._on_repair_complete(model_id, dest, card, progress_bar, repair_key))
+            thread.error.connect(lambda err: self._on_repair_error(model_id, err, card, progress_bar, repair_key))
+            
+            # Start repair
+            thread.start()
+
     def _on_delete_model(self, model_path: str):
         """Delete a downloaded model directory forcefully"""
         path = Path(model_path)
@@ -3624,6 +3947,49 @@ class MainWindow(QMainWindow):
         self._refresh_models()
         self._refresh_locals()  # This updates the Train tab dropdown
         self._log_models(f"DEBUG: Refresh complete!")
+    
+    def _on_repair_complete(self, model_id: str, dest: str, card, progress_bar, repair_key: str):
+        """Handle successful repair"""
+        self._log_models(f"✓ Repair complete: {dest}")
+        
+        # Clean up thread
+        if repair_key in self.active_downloads:
+            thread, _ = self.active_downloads[repair_key]
+            if thread.isRunning():
+                thread.quit()
+                thread.wait()
+            del self.active_downloads[repair_key]
+        
+        # Remove progress bar
+        if progress_bar:
+            progress_bar.setVisible(False)
+            progress_bar.deleteLater()
+        
+        # Refresh models to update status
+        self._refresh_models()
+        self._refresh_locals()
+    
+    def _on_repair_error(self, model_id: str, error: str, card, progress_bar, repair_key: str):
+        """Handle repair error"""
+        self._log_models(f"✗ Error repairing {model_id}: {error}")
+        
+        # Clean up thread
+        if repair_key in self.active_downloads:
+            thread, _ = self.active_downloads[repair_key]
+            if thread.isRunning():
+                thread.quit()
+                thread.wait()
+            del self.active_downloads[repair_key]
+        
+        # Remove progress bar
+        if progress_bar:
+            progress_bar.setVisible(False)
+            progress_bar.deleteLater()
+        
+        # Restore repair button
+        if hasattr(card, 'repair_btn'):
+            card.repair_btn.setEnabled(True)
+            card.repair_btn.setText("🔧 Fix")
     
     def _on_download_error(self, model_id: str, error: str, card, progress_bar):
         """Handle download error"""
@@ -4700,6 +5066,30 @@ class MainWindow(QMainWindow):
         # Initialize training output buffer
         self._train_output_buffer = ""
         self._train_line_count = 0
+        self.loss_history = []
+        self._total_train_steps = None
+        self._current_train_step = None
+        
+        # SNAPSHOT training parameters so dashboard stays consistent even if user changes GUI values
+        self._active_epochs = int(self.train_epochs.value())
+        self._active_lr = float(self.train_lr.value())
+        
+        # Reset dashboard metrics for fresh run
+        try:
+            self._update_metric_card(self.epoch_card, f"0/{self._active_epochs}")
+            self._update_metric_card(self.steps_card, "0/?")
+            self._update_metric_card(self.loss_card, "--")
+            self._update_metric_card(self.eta_card, "--m --s")
+            self._update_metric_card(self.speed_card, "-- s/s")
+            self._update_metric_card(self.learning_rate_card, f"{self._active_lr:.2e}")
+        except Exception:
+            pass
+        # Clear loss chart
+        try:
+            if hasattr(self, 'loss_chart_label'):
+                self.loss_chart_label.clear()
+        except Exception:
+            pass
         
         proc = QProcess(self)
         proc.setProgram(cmd[0])
@@ -4795,13 +5185,28 @@ class MainWindow(QMainWindow):
         if hasattr(self, '_train_stats_timer'):
             self._train_stats_timer.stop()
             
+        # READ ANY REMAINING DATA from the process
+        if self.train_proc:
+            remaining_data = self.train_proc.readAllStandardOutput().data()
+            if remaining_data:
+                text = remaining_data.decode("utf-8", errors="replace")
+                if not hasattr(self, '_train_output_buffer'):
+                    self._train_output_buffer = ""
+                self._train_output_buffer += text
+
         # Flush any remaining output in the buffer
         if hasattr(self, '_train_output_buffer') and self._train_output_buffer:
             remaining = self._train_output_buffer.strip()
             if remaining:
                 # Process the last segment as metrics/logs
-                self._parse_single_line_metrics(remaining)
-                self._filter_and_append_to_train_log(remaining)
+                # Split by \n or \r to handle final lines
+                import re
+                lines = re.split(r'[\n\r]+', remaining)
+                for line in lines:
+                    line = line.strip()
+                    if line:
+                        self._parse_single_line_metrics(line)
+                        self._filter_and_append_to_train_log(line)
             self._train_output_buffer = ""
             
         status_str = "NormalExit" if exit_status == QProcess.NormalExit else "CrashExit"
@@ -6233,12 +6638,21 @@ except Exception:
                 return {}
             
             selector = ProfileSelector(compat_matrix_path)
-            profile_name, package_versions, warnings = selector.select_profile(hw_profile)
+            profile_name, package_versions, warnings, binary_packages = selector.select_profile(hw_profile)
             
             print(f"[GUI] Loaded profile: {profile_name}")
             print(f"[GUI] Profile versions: {list(package_versions.keys())}")
             if 'bitsandbytes' in package_versions:
                 print(f"[GUI] bitsandbytes required version: {package_versions['bitsandbytes']}")
+            
+            # Log binary packages if present
+            if binary_packages:
+                print(f"[GUI] Binary packages detected: {list(binary_packages.keys())}")
+                for pkg_name, pkg_info in binary_packages.items():
+                    python_tag = pkg_info.get("python", "unknown")
+                    print(f"[GUI]   - {pkg_name} (Python {python_tag}): {pkg_info.get('url', 'no URL')[:80]}...")
+            else:
+                print(f"[GUI] No binary packages in profile (this is normal for some profiles)")
             
             # Convert to requirement specs
             # Profile versions may be ranges (e.g., ">=0.13.0,<0.16.0") or exact (e.g., "0.14.0")
@@ -6429,6 +6843,34 @@ except Exception:
         
         col3_layout.addWidget(title_section)
         
+        # Batch Install Selected Button (always visible at top)
+        self.install_selected_btn = QPushButton("📦 Install Selected Packages")
+        self.install_selected_btn.setStyleSheet("""
+            QPushButton {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 rgba(102, 126, 234, 0.8), stop:1 rgba(118, 75, 162, 0.8));
+                color: #ffffff;
+                border: 2px solid rgba(102, 126, 234, 1.0);
+                padding: 14px;
+                border-radius: 8px;
+                font-weight: 700;
+                font-size: 12pt;
+            }
+            QPushButton:hover {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 rgba(102, 126, 234, 1.0), stop:1 rgba(118, 75, 162, 1.0));
+                border: 2px solid rgba(102, 126, 234, 1.0);
+            }
+            QPushButton:disabled {
+                background: rgba(102, 126, 234, 0.3);
+                color: rgba(255, 255, 255, 0.4);
+                border: 2px solid rgba(102, 126, 234, 0.45);
+            }
+        """)
+        self.install_selected_btn.clicked.connect(self._on_install_selected_packages)
+        self.install_selected_btn.setEnabled(False)  # Disabled until packages are selected
+        col3_layout.addWidget(self.install_selected_btn)
+        
         # Action Buttons Container (Hidden by default)
         self.pkg_actions_widget = QWidget()
         actions_layout = QVBoxLayout(self.pkg_actions_widget)
@@ -6614,6 +7056,11 @@ except Exception:
                 if item.widget(): item.widget().deleteLater()
         
         self.package_cards = {}
+        self.selected_packages = set()  # Track which packages are checked
+        
+        # Initialize binary packages info (will be populated from profile)
+        if not hasattr(self, '_binary_packages_info'):
+            self._binary_packages_info = {}
         
         # Get target venv Python for checking installed versions
         # IMPORTANT: Check packages in LLM/.venv, not bootstrap/.venv
@@ -6659,6 +7106,24 @@ except PackageNotFoundError:
         # PROFILE IS THE ONLY SOURCE OF TRUTH - NO requirements.txt FALLBACK
         profile_requirements = self._get_profile_requirements()
         
+        # Also get binary packages from profile
+        binary_packages = {}
+        try:
+            from pathlib import Path
+            from core.profile_selector import ProfileSelector
+            from system_detector import SystemDetector
+            
+            llm_dir = Path(__file__).parent.parent
+            compat_matrix_path = llm_dir / "metadata" / "compatibility_matrix.json"
+            if compat_matrix_path.exists():
+                detector = SystemDetector()
+                detector.detect_all()
+                hw_profile = detector.get_hardware_profile()
+                selector = ProfileSelector(compat_matrix_path)
+                _, _, _, binary_packages = selector.select_profile(hw_profile)
+        except Exception as e:
+            print(f"[GUI] Could not load binary packages: {e}")
+        
         if not profile_requirements:
             print("[GUI] ERROR: Failed to load profile requirements! This is a critical error.")
             print("[GUI] Profiles are the ONLY source of truth. Cannot proceed without profile.")
@@ -6677,22 +7142,52 @@ except PackageNotFoundError:
             required_packages = {}
         else:
             print(f"[GUI] Loaded {len(profile_requirements)} packages from profile (ONLY SOURCE OF TRUTH)")
+            if binary_packages:
+                print(f"[GUI] Also found {len(binary_packages)} binary package(s) in profile")
             if 'bitsandbytes' in profile_requirements:
                 print(f"[GUI] Profile requires bitsandbytes: {profile_requirements['bitsandbytes']}")
             required_packages = profile_requirements
         
-        # Add any remaining defaults for packages not in profile
+        # Add binary packages to required_packages (they don't have version specs, but should be shown)
+        # Store binary package info separately for installation
+        self._binary_packages_info = binary_packages.copy()
+        for pkg_name, pkg_info in binary_packages.items():
+            if pkg_name not in required_packages:
+                # Binary packages are installed from wheels, mark as "Binary (wheel)" for display
+                required_packages[pkg_name] = "Binary (wheel)"
+        
+        # Add any remaining defaults for packages not in profile (only if really needed)
         defaults = {
-            "triton-windows": ">=3.0.0",
-            "PySide6": "==6.8.1",
-            "unsloth": "Latest"
+            "unsloth": "Latest"  # Only keep unsloth as it's not in profile
         }
         for pkg, ver in defaults.items():
             if pkg not in required_packages:
                 required_packages[pkg] = ver
         
-        col1_pkgs = ["torch", "transformers", "peft", "datasets", "accelerate", "bitsandbytes"]
-        col2_pkgs = ["triton-windows", "unsloth", "PySide6", "numpy", "pandas", "huggingface_hub"]
+        # Sort packages by importance/priority, then alphabetically
+        priority_order = [
+            "torch", "transformers", "peft", "datasets", "accelerate", "bitsandbytes",
+            "triton", "triton-windows", "causal_conv1d", "mamba_ssm",
+            "numpy", "safetensors", "tokenizers", "huggingface-hub", "huggingface_hub",
+            "PySide6", "PySide6-Essentials", "PySide6-Addons",
+            "pandas", "tqdm", "packaging", "requests", "pyyaml",
+            "einops", "timm", "open-clip-torch",
+            "evaluate", "sentencepiece", "sympy", "jinja2", "fsspec", "filelock",
+            "mpmath", "regex", "psutil", "streamlit", "unsloth"
+        ]
+        
+        # Get all package names from profile
+        all_packages = list(required_packages.keys())
+        
+        # Sort: priority first, then alphabetical
+        sorted_packages = []
+        for priority_pkg in priority_order:
+            if priority_pkg in all_packages:
+                sorted_packages.append(priority_pkg)
+        # Add remaining packages alphabetically
+        for pkg in sorted(all_packages):
+            if pkg not in sorted_packages:
+                sorted_packages.append(pkg)
         
         descriptions = {
             "torch": "Foundational deep learning framework. Required for all model operations.",
@@ -6701,64 +7196,134 @@ except PackageNotFoundError:
             "datasets": "Utilities for loading and processing training data efficiently.",
             "accelerate": "Handles multi-GPU and mixed-precision training orchestration.",
             "bitsandbytes": "Enables 4-bit and 8-bit quantization for low-VRAM training.",
+            "triton": "GPU programming language. Required for Unsloth optimizations and Mamba/SSM models.",
             "triton-windows": "GPU programming language. Required for Unsloth optimizations on Windows.",
+            "causal_conv1d": "Required for Mamba/SSM architecture models (e.g., NVIDIA Nemotron). Installed from Windows wheel.",
+            "mamba_ssm": "Required for Mamba/SSM architecture models (e.g., NVIDIA Nemotron). Installed from Windows wheel.",
             "unsloth": "Advanced training optimizer that provides 2x speedup and 70% less VRAM usage.",
             "PySide6": "The Qt-based GUI framework used to build this desktop application.",
+            "PySide6-Essentials": "Essential Qt modules for PySide6.",
+            "PySide6-Addons": "Additional Qt modules for PySide6.",
             "numpy": "Numerical computing library. Essential for tensor and array operations.",
             "pandas": "Data manipulation library used for dataset analysis and visualization.",
-            "huggingface_hub": "Client library for interacting with the Hugging Face Model Hub."
+            "huggingface_hub": "Client library for interacting with the Hugging Face Model Hub.",
+            "huggingface-hub": "Client library for interacting with the Hugging Face Model Hub.",
+            "safetensors": "Fast and safe tensor serialization format.",
+            "tokenizers": "Fast tokenization library used by transformers.",
+            "tqdm": "Progress bar library for Python.",
+            "packaging": "Core utilities for Python packages.",
+            "requests": "HTTP library for Python.",
+            "pyyaml": "YAML parser and emitter for Python.",
+            "einops": "Flexible tensor operations library.",
+            "timm": "PyTorch image models library.",
+            "open-clip-torch": "OpenCLIP models for PyTorch.",
+            "evaluate": "Evaluation metrics library.",
+            "sentencepiece": "Unsupervised text tokenizer.",
+            "sympy": "Symbolic mathematics library.",
+            "jinja2": "Template engine for Python.",
+            "fsspec": "Filesystem specification library.",
+            "filelock": "Platform-independent file locking.",
+            "mpmath": "Arbitrary precision floating-point arithmetic.",
+            "regex": "Alternative regular expression module.",
+            "psutil": "Cross-platform system and process utilities.",
+            "streamlit": "Web framework for machine learning apps.",
+            "typing-extensions": "Backported type hints for older Python versions."
         }
         
+        # First, collect all packages with their status to prioritize those needing attention
+        packages_with_status = []
+        for pkg_name in sorted_packages:
+            req_ver = required_packages.get(pkg_name, "")
+            inst_ver = None
+            
+            # Check installed version in target venv (LLM/.venv), not bootstrap
+            if pkg_name in ["triton", "triton-windows"]:
+                inst_ver = get_installed_version("triton-windows")
+                if inst_ver is None:
+                    inst_ver = get_installed_version("triton")
+            elif pkg_name in ["causal_conv1d", "mamba_ssm"]:
+                inst_ver = get_installed_version(pkg_name)
+                if inst_ver is None:
+                    alt_name = pkg_name.replace("_", "-")
+                    if alt_name != pkg_name:
+                        inst_ver = get_installed_version(alt_name)
+            else:
+                inst_ver = get_installed_version(pkg_name)
+            
+            is_installed = bool(inst_ver)
+            is_functional = self._is_package_functional(pkg_name) if is_installed else True
+            version_mismatch = False
+            if is_installed and req_ver and req_ver != "Binary (wheel)":
+                version_mismatch = self._check_version_mismatch(pkg_name, inst_ver, req_ver)
+            
+            # Determine status and priority
+            needs_attention = False
+            if is_installed:
+                if not is_functional:
+                    status_text = "BROKEN"
+                    status_color = "#f44336"
+                    needs_attention = True
+                elif version_mismatch:
+                    status_text = "WRONG VERSION"
+                    status_color = "#ff9800"
+                    needs_attention = True
+                else:
+                    status_text = "OK"
+                    status_color = "#4CAF50"
+            else:
+                if pkg_name in ["causal_conv1d", "mamba_ssm"]:
+                    status_text = "MISSING"
+                    status_color = "#ff9800"
+                    needs_attention = True
+                elif pkg_name in ["triton", "triton-windows"] and sys.platform == "win32":
+                    status_text = "OPTIONAL"
+                    status_color = "#9e9e9e"
+                else:
+                    status_text = "MISSING"
+                    status_color = "#f44336"
+                    needs_attention = True
+            
+            packages_with_status.append({
+                "name": pkg_name,
+                "req_ver": req_ver,
+                "inst_ver": inst_ver,
+                "is_installed": is_installed,
+                "is_functional": is_functional,
+                "version_mismatch": version_mismatch,
+                "status_text": status_text,
+                "status_color": status_color,
+                "needs_attention": needs_attention
+            })
+        
+        # Sort: packages needing attention first, then by original priority order
+        needs_attention_pkgs = [pkg for pkg in packages_with_status if pkg["needs_attention"]]
+        ok_pkgs = [pkg for pkg in packages_with_status if not pkg["needs_attention"]]
+        # Maintain original order within each group
+        sorted_packages_with_status = needs_attention_pkgs + ok_pkgs
+        
+        # Split into two columns (alternating for better distribution)
+        col1_pkgs = sorted_packages_with_status[::2]  # Even indices
+        col2_pkgs = sorted_packages_with_status[1::2]  # Odd indices
+        
         for pkg_list, layout in [(col1_pkgs, self.requirements_col1), (col2_pkgs, self.requirements_col2)]:
-            for pkg_name in pkg_list:
-                req_ver = required_packages.get(pkg_name, "")
-                inst_ver = None
-                
-                # Check installed version in target venv (LLM/.venv), not bootstrap
-                if pkg_name == "triton-windows":
-                    # triton-windows often isn't available for some Python versions on Windows.
-                    # We treat it as optional/unavailable rather than a hard "missing".
-                    # Package name is "triton-windows" but module is "triton", so check both.
-                    inst_ver = get_installed_version("triton-windows")
-                    if inst_ver is None:
-                        inst_ver = get_installed_version("triton")
-                else:
-                    inst_ver = get_installed_version(pkg_name)
-                
-                is_installed = bool(inst_ver)
-                is_functional = self._is_package_functional(pkg_name) if is_installed else True
-                
-                # Check for version mismatch (wrong version installed)
-                # Always check version if installed and requirement is specified, regardless of functional status
-                # This ensures we detect wrong versions even if the package appears functional
-                version_mismatch = False
-                if is_installed and req_ver:
-                    version_mismatch = self._check_version_mismatch(pkg_name, inst_ver, req_ver)
-                
-                if is_installed:
-                    if not is_functional:
-                        status_text = "BROKEN"
-                        status_color = "#f44336"
-                    elif version_mismatch:
-                        status_text = "WRONG VERSION"
-                        status_color = "#ff9800"  # Orange for version mismatch
-                    else:
-                        status_text = "OK"
-                        status_color = "#4CAF50"
-                else:
-                    if pkg_name == "triton-windows" and sys.platform == "win32":
-                        status_text = "OPTIONAL"
-                        status_color = "#9e9e9e"
-                    else:
-                        status_text = "MISSING"
-                        status_color = "#f44336"
-                
+            for pkg_data in pkg_list:
+                pkg_name = pkg_data["name"]
+                req_ver = pkg_data["req_ver"]
+                inst_ver = pkg_data["inst_ver"]
+                is_installed = pkg_data["is_installed"]
+                is_functional = pkg_data["is_functional"]
+                version_mismatch = pkg_data["version_mismatch"]
+                status_text = pkg_data["status_text"]
+                status_color = pkg_data["status_color"]
+                needs_attention = pkg_data["needs_attention"]
                 card = PackageCard(
                     pkg_name, req_ver, inst_ver, is_installed, 
                     "ok" if (is_installed and is_functional and not version_mismatch) else ("mismatch" if version_mismatch else "missing"),
-                    status_color, status_text, descriptions.get(pkg_name, "")
+                    status_color, status_text, descriptions.get(pkg_name, ""),
+                    needs_attention=needs_attention  # Pass flag to show red border
                 )
                 card.clicked.connect(self._on_package_card_clicked)
+                card.checkbox_toggled.connect(self._on_package_checkbox_toggled)
                 layout.addWidget(card)
                 self.package_cards[pkg_name] = card
         
@@ -6798,11 +7363,20 @@ except PackageNotFoundError:
             self.install_btn.setToolTip("Package already installed")
             self.repair_btn.setToolTip("Package is working correctly")
         elif status == "MISSING":
-            self.install_btn.setEnabled(True)
-            self.repair_btn.setEnabled(False)
+            # Check if it's a binary package
+            binary_packages_info = getattr(self, '_binary_packages_info', {})
+            if pkg_name in binary_packages_info:
+                self.install_btn.setEnabled(False)
+                self.install_btn.setToolTip("Binary packages must be installed via 'Repair Environment' or the installer")
+            else:
+                self.install_btn.setEnabled(True)
+                self.install_btn.setToolTip("Install this package")
+            self.repair_btn.setEnabled(True)  # Repair can install binary packages
             self.uninstall_btn.setEnabled(False)
-            self.install_btn.setToolTip("Install this package")
-            self.repair_btn.setToolTip("Package not installed")
+            if pkg_name not in binary_packages_info:
+                self.repair_btn.setToolTip("Package not installed")
+            else:
+                self.repair_btn.setToolTip("Repair will install binary packages from wheels")
         elif status == "WRONG VERSION":
             self.install_btn.setEnabled(True)
             self.repair_btn.setEnabled(True)
@@ -6829,13 +7403,28 @@ except PackageNotFoundError:
             self._run_installer_task("repair", f"Repairing environment (from {pkg_name})...")
             return
 
+        # Check if this is a binary package that needs special handling
+        binary_packages_info = getattr(self, '_binary_packages_info', {})
+        if pkg_name in binary_packages_info and action == "install":
+            # Binary packages must be installed from wheel files via the installer
+            self.requirements_log.append(f"<b>Binary package detected: {pkg_name}</b>")
+            self.requirements_log.append("Binary packages must be installed via the installer (they come from GitHub wheels).")
+            self.requirements_log.append("Please use 'Repair Environment' or run the installer to install binary packages.")
+            self.requirements_log.append("\n<b>⚠️ Cannot install binary packages directly from this page.</b>")
+            return
+
         # For install/uninstall, run a single pip operation for just this package.
         pkg_card = self.package_cards.get(pkg_name)
         version_spec = getattr(pkg_card, "required_version", "") if pkg_card else ""
 
-        # "Latest" means no pin.
-        if isinstance(version_spec, str) and version_spec and version_spec.lower() != "latest":
-            package_spec = f"{pkg_name}{version_spec}"
+        # Skip "Binary (wheel)" and "Latest" - they're not valid version specs
+        if isinstance(version_spec, str) and version_spec:
+            if version_spec.lower() in ["latest", "binary (wheel)"]:
+                package_spec = pkg_name
+            elif version_spec.startswith("==") or version_spec.startswith(">=") or version_spec.startswith("<"):
+                package_spec = f"{pkg_name}{version_spec}"
+            else:
+                package_spec = pkg_name
         else:
             package_spec = pkg_name
 
@@ -6873,6 +7462,66 @@ except PackageNotFoundError:
         if not self._selected_requirements_pkg:
             return
         self._run_pkg_task(self._selected_requirements_pkg, "uninstall", checked)
+    
+    def _on_package_checkbox_toggled(self, pkg_name: str, checked: bool):
+        """Handle checkbox toggle for package selection"""
+        if checked:
+            self.selected_packages.add(pkg_name)
+        else:
+            self.selected_packages.discard(pkg_name)
+        
+        # Update Install Selected button state
+        self.install_selected_btn.setEnabled(len(self.selected_packages) > 0)
+        if len(self.selected_packages) > 0:
+            self.install_selected_btn.setText(f"📦 Install Selected ({len(self.selected_packages)})")
+        else:
+            self.install_selected_btn.setText("📦 Install Selected Packages")
+    
+    def _on_install_selected_packages(self, checked=False):
+        """Install/repair all selected packages"""
+        if not self.selected_packages:
+            QMessageBox.warning(self, "No Selection", "Please select at least one package to install.")
+            return
+        
+        self.requirements_log.clear()
+        self.requirements_log.append(f"<b>Installing {len(self.selected_packages)} selected package(s)...</b><br>")
+        
+        # Separate binary packages from regular packages
+        binary_packages_info = getattr(self, '_binary_packages_info', {})
+        selected_binary = [pkg for pkg in self.selected_packages if pkg in binary_packages_info]
+        selected_regular = [pkg for pkg in self.selected_packages if pkg not in binary_packages_info]
+        
+        # For binary packages, we need to use the installer (repair mode)
+        # The installer will install all binary packages from the profile, but that's OK
+        # since they're small and needed for Mamba/SSM models
+        if selected_binary:
+            self.requirements_log.append(f"<b>Binary package(s) selected: {', '.join(selected_binary)}</b><br>")
+            self.requirements_log.append("Binary packages require the installer. Running repair...<br>")
+            # Clear selection before starting (will be restored after)
+            temp_selected = list(self.selected_packages)
+            for pkg_name in temp_selected:
+                if pkg_name in self.package_cards:
+                    self.package_cards[pkg_name].checkbox.setChecked(False)
+            self._run_installer_task("repair", f"Installing selected packages: {', '.join(self.selected_packages)}")
+            self.selected_packages.clear()
+            return  # Don't install regular packages yet - wait for repair to complete
+        
+        # Install regular packages individually via pip
+        if selected_regular:
+            self.requirements_log.append(f"<b>Installing {len(selected_regular)} regular package(s): {', '.join(selected_regular)}</b><br>")
+            # Install them sequentially
+            for i, pkg_name in enumerate(selected_regular):
+                if i > 0:
+                    self.requirements_log.append("<br>")
+                self._run_pkg_task(pkg_name, "install", False)
+        
+        # Clear selection after starting installation
+        for pkg_name in list(self.selected_packages):
+            if pkg_name in self.package_cards:
+                self.package_cards[pkg_name].checkbox.setChecked(False)
+        self.selected_packages.clear()
+        self.install_selected_btn.setEnabled(False)
+        self.install_selected_btn.setText("📦 Install Selected Packages")
 
     def _on_install_requirements(self):
         self._run_installer_task("dependencies", "Installing requirements...")
@@ -6897,10 +7546,19 @@ except PackageNotFoundError:
         self.installer_thread.start()
 
     def _on_installer_task_finished(self, success):
-        for card in self.package_cards.values(): card.setEnabled(True)
+        for card in self.package_cards.values(): 
+            card.setEnabled(True)
         msg = "✅ Task completed successfully!" if success else "❌ Task failed. Check log for details."
         self.requirements_log.append(f"\n<b>{msg}</b>")
-        self._refresh_requirements_grid()
+        # Force refresh requirements grid to show updated package status
+        self.requirements_log.append("<b>Refreshing package status...</b>")
+        # Clear package cards cache and selected packages to force fresh check
+        self.package_cards = {}
+        self.selected_packages.clear()
+        # Use QTimer to ensure refresh happens after UI updates and subprocess cleanup
+        # Increased delay to 1500ms to ensure all subprocesses have fully terminated
+        from PySide6.QtCore import QTimer
+        QTimer.singleShot(1500, lambda: self._refresh_requirements_grid())
 
     def _build_info_tab(self) -> QWidget:
         w = QWidget()
@@ -7259,12 +7917,18 @@ respective package directories or official repositories.
         if any(skip_patterns):
             return
         
+        # Always allow JSON metric lines through (dashboard parsing)
+        if ("DASHBOARD_METRICS:" in line) or (line_clean.startswith("{") and ("samples_per_sec" in line_clean or "eta_sec" in line_clean or "\"step\"" in line_clean)):
+            self.train_log.appendPlainText(line.rstrip('\r'))
+            return
+
         # Only show: important messages, errors, warnings, tracebacks, and training summaries
         line_lower = line.lower()
         should_show = (
             # Important markers
             '[INFO]' in line or '[WARNING]' in line or '[ERROR]' in line or
             'traceback' in line_lower or 'error:' in line_lower or 'exception:' in line_lower or
+            'importerror' in line_lower or 'modulenotfounderror' in line_lower or
             'starting' in line_lower or 'saving' in line_lower or 'complete' in line_lower or
             'loading' in line_lower or 'preparing' in line_lower or
             # Training step updates (JSON format with loss/epoch)
@@ -7299,65 +7963,93 @@ respective package directories or official repositories.
         if not line:
             return
             
-        # Try to find a JSON-like dictionary in the line
-        # Use a more flexible regex that finds things like {'loss': 1.23} or {"loss": 1.23}
-        dict_match = re.search(r'\{[^{}]+\}', line)
-        if dict_match:
-            dict_str = dict_match.group(0)
-            metrics = None
-            
-            # Try standard JSON first
+        # Try to find our explicit dashboard prefix or a JSON-like dictionary
+        metrics = None
+        if "DASHBOARD_METRICS:" in line:
             try:
+                dict_str = line.split("DASHBOARD_METRICS:")[1].strip()
                 metrics = json.loads(dict_str)
-            except:
-                # Try ast.literal_eval for Python-style dicts (single quotes)
-                try:
-                    metrics = ast.literal_eval(dict_str)
-                except:
-                    # Last resort: replace ' with " and try JSON
-                    try:
-                        metrics = json.loads(dict_str.replace("'", '"'))
-                    except:
-                        pass
+            except: pass
             
-            if metrics and isinstance(metrics, dict):
-                # Update epoch (float value, e.g., 0.01)
-                if 'epoch' in metrics and hasattr(self, 'epoch_card'):
-                    epoch_val = float(metrics['epoch'])
-                    total_epochs = self.train_epochs.value() if hasattr(self, 'train_epochs') else 1
-                    # Show 2 decimal places if it's a fraction, otherwise int/total
-                    if epoch_val < total_epochs and (epoch_val * 10) % 10 != 0:
-                        self._update_metric_card(self.epoch_card, f"{epoch_val:.2f}/{total_epochs}")
-                    else:
-                        self._update_metric_card(self.epoch_card, f"{int(epoch_val)}/{total_epochs}")
-                
-                # Update step
-                if 'step' in metrics and hasattr(self, 'steps_card'):
-                    step_val = int(metrics['step'])
-                    # Try to get total steps or estimate
-                    total_steps = metrics.get('total_steps', '?')
-                    self._update_metric_card(self.steps_card, f"{step_val}/{total_steps}")
-                
-                # Update loss
-                if 'loss' in metrics and hasattr(self, 'loss_card'):
-                    loss_val = float(metrics['loss'])
-                    self._update_metric_card(self.loss_card, f"{loss_val:.4f}")
-                
-                # Update learning rate
-                if 'learning_rate' in metrics and hasattr(self, 'learning_rate_card'):
-                    lr_val = float(metrics['learning_rate'])
-                    self._update_metric_card(self.learning_rate_card, f"{lr_val:.2e}")
-                elif 'lr' in metrics and hasattr(self, 'learning_rate_card'):
-                    lr_val = float(metrics['lr'])
-                    self._update_metric_card(self.learning_rate_card, f"{lr_val:.2e}")
-                
-                # Update speed
-                if 'samples_per_second' in metrics and hasattr(self, 'speed_card'):
-                    self._update_metric_card(self.speed_card, f"{float(metrics['samples_per_second']):.1f} s/s")
-                elif 'train_samples_per_second' in metrics and hasattr(self, 'speed_card'):
-                    self._update_metric_card(self.speed_card, f"{float(metrics['train_samples_per_second']):.1f} s/s")
-                
-                return # Successfully parsed from dict
+        if not metrics:
+            # Fallback to finding any JSON-like dict in the line
+            dict_match = re.search(r'\{[^{}]+\}', line)
+            if dict_match:
+                dict_str = dict_match.group(0)
+                # Try standard JSON first
+                try:
+                    metrics = json.loads(dict_str)
+                except:
+                    # Try ast.literal_eval for Python-style dicts (single quotes)
+                    try:
+                        metrics = ast.literal_eval(dict_str)
+                    except:
+                        # Last resort: replace ' with " and try JSON
+                        try:
+                            metrics = json.loads(dict_str.replace("'", '"'))
+                        except:
+                            pass
+            
+        if metrics and isinstance(metrics, dict):
+            # Update epoch (float value, e.g., 0.01)
+            if 'epoch' in metrics and hasattr(self, 'epoch_card'):
+                epoch_val = float(metrics['epoch'])
+                total_epochs = getattr(self, '_active_epochs', 1)
+                # Show 2 decimal places if it's a fraction, otherwise int/total
+                if epoch_val < total_epochs and (epoch_val * 10) % 10 != 0:
+                    self._update_metric_card(self.epoch_card, f"{epoch_val:.2f}/{total_epochs}")
+                else:
+                    self._update_metric_card(self.epoch_card, f"{int(epoch_val)}/{total_epochs}")
+            
+            # Update step
+            if 'step' in metrics and hasattr(self, 'steps_card'):
+                step_val = int(metrics['step'])
+                # Try to get total steps or estimate
+                total_steps = metrics.get('total_steps', '?')
+                self._current_train_step = step_val
+                if isinstance(total_steps, int):
+                    self._total_train_steps = total_steps
+                self._update_metric_card(self.steps_card, f"{step_val}/{total_steps}")
+            
+            # Update loss
+            if 'loss' in metrics and hasattr(self, 'loss_card'):
+                loss_val = float(metrics['loss'])
+                self._update_metric_card(self.loss_card, f"{loss_val:.4f}")
+                self._record_loss_point(step_val if 'step' in metrics else None, loss_val)
+            
+            # Update learning rate
+            if 'learning_rate' in metrics and hasattr(self, 'learning_rate_card'):
+                lr_val = float(metrics['learning_rate'])
+                self._update_metric_card(self.learning_rate_card, f"{lr_val:.2e}")
+            elif 'lr' in metrics and hasattr(self, 'learning_rate_card'):
+                lr_val = float(metrics['lr'])
+                self._update_metric_card(self.learning_rate_card, f"{lr_val:.2e}")
+            
+            # Update speed
+            if 'samples_per_sec' in metrics and hasattr(self, 'speed_card'):
+                self._update_metric_card(self.speed_card, f"{float(metrics['samples_per_sec']):.1f} s/s")
+            elif 'samples_per_second' in metrics and hasattr(self, 'speed_card'):
+                self._update_metric_card(self.speed_card, f"{float(metrics['samples_per_second']):.1f} s/s")
+            elif 'train_samples_per_second' in metrics and hasattr(self, 'speed_card'):
+                self._update_metric_card(self.speed_card, f"{float(metrics['train_samples_per_second']):.1f} s/s")
+
+            # Update ETA
+            if 'eta_sec' in metrics and hasattr(self, 'eta_card'):
+                try:
+                    eta_val = float(metrics['eta_sec'])
+                    minutes = int(eta_val // 60)
+                    seconds = int(eta_val % 60)
+                    self._update_metric_card(self.eta_card, f"{minutes}m {seconds}s")
+                except:
+                    pass
+            
+            return # Successfully parsed from dict
+
+        # Ensure tracking fields exist
+        if not hasattr(self, '_total_train_steps'):
+            self._total_train_steps = None
+        if not hasattr(self, '_current_train_step'):
+            self._current_train_step = None
 
         # Fallback: regex patterns for non-JSON/dict formats
         # Handle formats like "loss: 1.23" or "epoch [1/5]" or "step 100"
@@ -7371,7 +8063,7 @@ respective package directories or official repositories.
             else:
                 try:
                     epoch_val = float(val)
-                    total_epochs = self.train_epochs.value() if hasattr(self, 'train_epochs') else 1
+                    total_epochs = getattr(self, '_active_epochs', 1)
                     self._update_metric_card(self.epoch_card, f"{epoch_val:.2f}/{total_epochs}")
                 except: pass
         
@@ -7379,9 +8071,21 @@ respective package directories or official repositories.
         step_match = re.search(r"['\"]?step['\"]?[:\s=]+([\d/]+)", line, re.IGNORECASE)
         if step_match:
             val = step_match.group(1)
-            if hasattr(self, '_total_train_steps') and self._total_train_steps and '/' not in val:
+            if '/' in val:
+                try:
+                    current_val = int(val.split('/')[0])
+                    self._current_train_step = current_val
+                except:
+                    pass
+            else:
+                try:
+                    self._current_train_step = int(val)
+                except:
+                    pass
+            if self._total_train_steps and '/' not in val:
                 val = f"{val}/{self._total_train_steps}"
             self._update_metric_card(self.steps_card, val)
+            self._update_epoch_from_progress()
         
         # Parse loss: "loss: 0.1234" or "'loss': 0.1234"
         loss_match = re.search(r"['\"]?loss['\"]?[:\s=]+([\d.]+)", line, re.IGNORECASE)
@@ -7389,6 +8093,7 @@ respective package directories or official repositories.
             try:
                 loss_val = float(loss_match.group(1))
                 self._update_metric_card(self.loss_card, f"{loss_val:.4f}")
+                self._record_loss_point(self._current_train_step, loss_val)
             except: pass
         
         # Parse learning rate: "lr: 0.0002"
@@ -7405,6 +8110,14 @@ respective package directories or official repositories.
             try:
                 speed_val = float(speed_match.group(1))
                 self._update_metric_card(self.speed_card, f"{speed_val:.1f} s/s")
+            except: pass
+
+        # Parse samples_per_sec (JSON metric)
+        sps_match = re.search(r"['\"]?(?:samples_per_sec|samples_per_second)['\"]?[:\s=]+([\d.]+)", line, re.IGNORECASE)
+        if sps_match:
+            try:
+                sps_val = float(sps_match.group(1))
+                self._update_metric_card(self.speed_card, f"{sps_val:.1f} s/s")
             except: pass
 
         # Parse samples_per_sec (JSON metric)
@@ -7437,6 +8150,7 @@ respective package directories or official repositories.
                 else:
                     current_val = current_step_text
                 self._update_metric_card(self.steps_card, f"{current_val}/{self._total_train_steps}")
+                self._update_epoch_from_progress()
             except:
                 pass
 
@@ -7446,6 +8160,156 @@ respective package directories or official repositories.
         lines = text.replace('\r', '\n').split('\n')
         for line in lines:
             self._parse_single_line_metrics(line)
+
+    def _record_loss_point(self, step: int | None, loss: float) -> None:
+        """Store loss history and refresh the chart. Ensures steps are unique and sorted."""
+        try:
+            if not hasattr(self, 'loss_history'):
+                self.loss_history = []
+            
+            if loss is None or not isinstance(loss, (int, float)):
+                return
+
+            # If step not provided, approximate from last known step
+            if step is None:
+                if self.loss_history:
+                    step = self.loss_history[-1][0] + 1
+                else:
+                    step = 1
+            
+            # Ensure data is sorted by step and avoid duplicates
+            # If we get a new loss for an existing step, we update it
+            step_exists = False
+            for i, (s, l) in enumerate(self.loss_history):
+                if s == step:
+                    # Update existing step with new loss (keep the latest)
+                    self.loss_history[i] = (step, loss)
+                    step_exists = True
+                    break
+            
+            if not step_exists:
+                self.loss_history.append((step, loss))
+                # Keep it sorted by step
+                self.loss_history.sort(key=lambda x: x[0])
+                
+            # Limit memory usage for very long runs (keep last 1000 points)
+            if len(self.loss_history) > 1000:
+                self.loss_history = self.loss_history[-1000:]
+                
+            self._render_loss_chart()
+        except Exception:
+            pass
+
+    def _render_loss_chart(self) -> None:
+        """Render a simple loss-over-time polyline into the loss_chart_label."""
+        try:
+            if not hasattr(self, 'loss_chart_label'):
+                return
+            data = getattr(self, 'loss_history', [])
+            w = max(self.loss_chart_label.width(), 320)
+            h = max(self.loss_chart_label.height(), 200)
+            pix = QPixmap(w, h)
+            pix.fill(Qt.transparent)
+            painter = QPainter(pix)
+            painter.setRenderHint(QPainter.Antialiasing)
+
+            # Background
+            painter.fillRect(0, 0, w, h, QColor(20, 20, 30, 180))
+
+            if len(data) >= 2:
+                # Filter out points with None loss and ensure unique steps (latest wins)
+                clean_data = []
+                seen_steps = {}
+                for s, l in data:
+                    if l is not None:
+                        seen_steps[s] = l
+                
+                # Reconstruct sorted data
+                clean_data = sorted(seen_steps.items())
+                
+                if len(clean_data) < 2:
+                    # Not enough data after cleaning
+                    painter.setPen(QColor(150, 150, 160))
+                    painter.setFont(QFont("Segoe UI", 9))
+                    painter.drawText(12, 24, "Collecting more points...")
+                    painter.end()
+                    self.loss_chart_label.setPixmap(pix)
+                    return
+
+                steps = [p[0] for p in clean_data]
+                losses = [p[1] for p in clean_data]
+                min_loss = min(losses)
+                max_loss = max(losses)
+                if max_loss - min_loss < 1e-7:
+                    max_loss = min_loss + 0.1
+                min_step = min(steps)
+                max_step = max(steps)
+                if max_step == min_step:
+                    max_step += 1
+
+                def x_map(s):
+                    return 10 + int((s - min_step) / (max_step - min_step) * (w - 20))
+
+                def y_map(l):
+                    # Invert Y so lower loss is higher on screen (bottom is h-10, top is 10)
+                    return h - 10 - int((l - min_loss) / (max_loss - min_loss) * (h - 20))
+
+                pen_axis = QPen(QColor(60, 60, 80, 200), 1)
+                painter.setPen(pen_axis)
+                painter.drawRect(10, 10, w - 20, h - 20)
+                
+                # Draw a subtle grid
+                pen_grid = QPen(QColor(40, 40, 60, 100), 1, Qt.DotLine)
+                painter.setPen(pen_grid)
+                for i in range(1, 4):
+                    # Horizontal grid lines
+                    gy = 10 + (i * (h - 20) // 4)
+                    painter.drawLine(10, gy, w - 10, gy)
+
+                # Draw the actual line
+                pen_line = QPen(QColor(102, 126, 234), 2)
+                painter.setPen(pen_line)
+                
+                prev_x, prev_y = None, None
+                for s, l in clean_data:
+                    x = x_map(s)
+                    y = y_map(l)
+                    if prev_x is not None:
+                        painter.drawLine(prev_x, prev_y, x, y)
+                    prev_x, prev_y = x, y
+
+                # Labels (min/max)
+                painter.setPen(QColor(200, 200, 210))
+                painter.setFont(QFont("Segoe UI", 8, QFont.Bold))
+                painter.drawText(12, 22, f"max {max_loss:.4f}")
+                painter.drawText(12, h - 12, f"min {min_loss:.4f}")
+            else:
+                painter.setPen(QColor(150, 150, 160))
+                painter.setFont(QFont("Segoe UI", 9))
+                painter.drawText(12, 24, "Waiting for loss data...")
+
+            painter.end()
+            self.loss_chart_label.setPixmap(pix)
+        except Exception:
+            pass
+
+    def _update_epoch_from_progress(self) -> None:
+        """Update epoch card based on step/total_steps to avoid bogus epoch spikes."""
+        try:
+            if not hasattr(self, '_total_train_steps') or not hasattr(self, '_current_train_step'):
+                return
+            if not self._total_train_steps or self._current_train_step is None:
+                return
+            total_epochs = getattr(self, '_active_epochs', 1)
+            progress = max(0.0, min(1.0, self._current_train_step / float(self._total_train_steps)))
+            epoch_val = progress * total_epochs
+            # Show fractional progress with 2 decimals, clamp to total_epochs
+            if epoch_val < total_epochs:
+                self._update_metric_card(self.epoch_card, f"{epoch_val:.2f}/{total_epochs}")
+            else:
+                self._update_metric_card(self.epoch_card, f"{total_epochs}/{total_epochs}")
+        except Exception:
+            pass
 
     def _update_training_stats_periodic(self) -> None:
         """Periodic background update for training stats (GPU memory, etc.)"""
