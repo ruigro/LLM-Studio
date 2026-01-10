@@ -143,9 +143,6 @@ def _ensure_bootstrap():
         # Exit current process
         sys.exit(0)
 
-# Check for self-contained Python runtime first
-python_runtime = _ensure_python_runtime()
-
 # Execute bootstrap check immediately
 _ensure_bootstrap()
 
@@ -168,6 +165,30 @@ except ImportError as e:
     sys.exit(1)
 
 
+class ChecklistThread(threading.Thread):
+    """Background thread for generating installation checklist"""
+    def __init__(self, installer, check_python, root, callback):
+        super().__init__(daemon=True)
+        self.installer = installer
+        self.check_python = check_python
+        self.root = root
+        self.callback = callback
+        self.checklist = None
+        self.error = None
+    
+    def run(self):
+        try:
+            self.checklist = self.installer.get_installation_checklist(
+                python_executable=self.check_python
+            )
+        except Exception as e:
+            self.error = e
+        finally:
+            # Call callback on main thread using after() (thread-safe tkinter call)
+            if self.callback:
+                self.root.after(0, lambda: self.callback(self.checklist, self.error))
+
+
 class InstallerGUI:
     def __init__(self, root):
         self.root = root
@@ -181,7 +202,9 @@ class InstallerGUI:
         self.detector = SystemDetector()
         self.python_runtime_manager = PythonRuntimeManager(Path(__file__).parent)
         self.checklist_data = []
+        self.checklist_items = {}  # Store checklist item data by component name
         self.install_thread = None
+        self.checklist_thread = None
         self.installing = False
         self._root_destroyed = False
         
@@ -233,9 +256,23 @@ class InstallerGUI:
         self.detection_text.grid(row=1, column=0, sticky="ew", pady=(5, 0))
         self._update_detection_info()
         
-        # Row 2: Installation Checklist Label
-        checklist_label = Label(main_frame, text="Installation Checklist", font=("Arial", 12, "bold"))
-        checklist_label.grid(row=2, column=0, sticky="w", pady=(0, 5))
+        # Row 2: Installation Checklist Label with loading indicator
+        checklist_header_frame = Frame(main_frame)
+        checklist_header_frame.grid(row=2, column=0, sticky="ew", pady=(0, 5))
+        checklist_header_frame.grid_columnconfigure(0, weight=1)
+        
+        checklist_label = Label(checklist_header_frame, text="Installation Checklist", font=("Arial", 12, "bold"))
+        checklist_label.grid(row=0, column=0, sticky="w")
+        
+        # Loading indicator (initially hidden)
+        self.checklist_loading_label = Label(
+            checklist_header_frame, 
+            text="⏳ Loading checklist...", 
+            font=("Arial", 10), 
+            fg="blue"
+        )
+        self.checklist_loading_label.grid(row=0, column=1, sticky="e", padx=(10, 0))
+        self.checklist_loading_label.grid_remove()  # Hide initially
         
         # Row 3: Treeview for checklist (weight=1, can expand but height constrained)
         checklist_frame = Frame(main_frame)
@@ -272,6 +309,9 @@ class InstallerGUI:
         self.checklist_tree.tag_configure("default", foreground="black")
         
         self.checklist_tree.grid(row=0, column=0, sticky="nsew")
+        
+        # Bind selection event to show package info
+        self.checklist_tree.bind("<<TreeviewSelect>>", self._on_checklist_item_selected)
         
         # Row 4: Progress frame
         progress_frame = Frame(main_frame)
@@ -401,7 +441,7 @@ class InstallerGUI:
         self.detection_text.config(state="disabled")
     
     def _populate_checklist(self):
-        """Populate the installation checklist"""
+        """Populate the installation checklist asynchronously"""
         try:
             if self._root_destroyed:
                 return
@@ -410,33 +450,68 @@ class InstallerGUI:
             for item in self.checklist_tree.get_children():
                 self.checklist_tree.delete(item)
             
-            # Get checklist from SmartInstaller - use venv Python if available
-            try:
-                # Determine which Python to use for checking
-                venv_path = Path(__file__).parent / ".venv"
-                check_python = None
-                if venv_path.exists():
-                    if sys.platform == "win32":
-                        venv_python = venv_path / "Scripts" / "python.exe"
-                    else:
-                        venv_python = venv_path / "bin" / "python"
-                    if venv_python.exists():
-                        check_python = str(venv_python)
-                
-                if not check_python:
-                    # Make it explicit in the UI log so it doesn't look like "everything is missing"
-                    self._log("WARNING: Target venv Python not found; checklist will reflect installer (bootstrap) environment.")
-                checklist = self.installer.get_installation_checklist(python_executable=check_python)
-                
-                # Filter out triton-windows since it doesn't exist in wheelhouse and is optional
-                checklist = [item for item in checklist if item.get("component") != "Triton (Windows)"]
-                
-            except Exception as e:
-                import traceback
-                self._log(f"Error getting checklist: {str(e)}")
-                self._log(f"Traceback: {traceback.format_exc()}")
+            # Show loading indicator
+            self.checklist_loading_label.grid()
+            self.checklist_tree.config(state="disabled")
+            self.root.update_idletasks()
+            
+            # Determine which Python to use for checking
+            venv_path = Path(__file__).parent / ".venv"
+            check_python = None
+            if venv_path.exists():
+                if sys.platform == "win32":
+                    venv_python = venv_path / "Scripts" / "python.exe"
+                else:
+                    venv_python = venv_path / "bin" / "python"
+                if venv_python.exists():
+                    check_python = str(venv_python)
+            
+            if not check_python:
+                # Make it explicit in the UI log so it doesn't look like "everything is missing"
+                self._log("WARNING: Target venv Python not found; checklist will reflect installer (bootstrap) environment.")
+            
+            # Start checklist generation in background thread
+            self.checklist_thread = ChecklistThread(
+                self.installer,
+                check_python,
+                self.root,
+                self._on_checklist_ready
+            )
+            self.checklist_thread.start()
+            
+        except Exception as e:
+            import traceback
+            self._log(f"Error starting checklist generation: {str(e)}")
+            self._log(f"Traceback: {traceback.format_exc()}")
+            self.checklist_loading_label.grid_remove()
+            self.checklist_tree.config(state="normal")
+    
+    def _on_checklist_ready(self, checklist, error):
+        """Callback when checklist generation completes"""
+        try:
+            if self._root_destroyed:
                 return
             
+            # Hide loading indicator
+            self.checklist_loading_label.grid_remove()
+            self.checklist_tree.config(state="normal")
+            
+            if error:
+                import traceback
+                self._log(f"Error getting checklist: {str(error)}")
+                self._log(f"Traceback: {traceback.format_exc()}")
+                # Show error in checklist
+                self.checklist_tree.insert("", "end", text="Error", values=("", "Failed to load checklist"))
+                return
+            
+            if not checklist:
+                self._log("Warning: Checklist is empty")
+                return
+            
+            # Filter out triton-windows since it doesn't exist in wheelhouse and is optional
+            checklist = [item for item in checklist if item.get("component") != "Triton (Windows)"]
+            
+            # Populate checklist tree
             for item in checklist:
                 try:
                     component = item.get("component", "Unknown")
@@ -455,6 +530,9 @@ class InstallerGUI:
                     elif "?" in status_text or "Cannot check" in status_text:
                         tag = "default"  # Keep default color for unknown status
                     
+                    # Store item data for later retrieval
+                    self.checklist_items[component] = item
+                    
                     # Add to treeview with tag
                     item_id = self.checklist_tree.insert(
                         "",
@@ -471,9 +549,67 @@ class InstallerGUI:
                         pass
         except Exception as e:
             try:
+                import traceback
                 self._log(f"Error populating checklist: {str(e)}")
+                self._log(f"Traceback: {traceback.format_exc()}")
             except:
-                print(f"Error populating checklist: {e}")
+                try:
+                    print(f"Error populating checklist: {e}")
+                except:
+                    pass
+        finally:
+            # Ensure loading indicator is hidden and tree is enabled
+            try:
+                self.checklist_loading_label.grid_remove()
+                self.checklist_tree.config(state="normal")
+            except:
+                pass
+    
+    def _on_checklist_item_selected(self, event):
+        """Handle checklist item selection - update info display"""
+        try:
+            selection = self.checklist_tree.selection()
+            if not selection:
+                return
+            
+            item_id = selection[0]
+            component = self.checklist_tree.item(item_id, "text")
+            
+            # Get stored item data
+            item_data = self.checklist_items.get(component)
+            if not item_data:
+                return
+            
+            # Build info text
+            info_lines = []
+            info_lines.append(f"📦 Package: {component}")
+            info_lines.append("")
+            
+            version = item_data.get("version", "N/A")
+            status_text = item_data.get("status_text", "? Unknown")
+            status = item_data.get("status", "unknown")
+            
+            info_lines.append(f"Required Version: {version}")
+            info_lines.append(f"Status: {status_text}")
+            info_lines.append("")
+            
+            # Add any additional info from the item
+            if "description" in item_data:
+                info_lines.append(f"Description: {item_data['description']}")
+                info_lines.append("")
+            
+            if "error" in item_data:
+                info_lines.append(f"Error: {item_data['error']}")
+                info_lines.append("")
+            
+            # Update detection text widget
+            self.detection_text.config(state="normal")
+            self.detection_text.delete(1.0, "end")
+            self.detection_text.insert(1.0, "\n".join(info_lines))
+            self.detection_text.config(state="disabled")
+            
+        except Exception as e:
+            print(f"Error showing package info: {e}")
     
     
     def _safe_after(self, func, *args):

@@ -1,5 +1,5 @@
 @echo off
-REM Bootstrap launcher for LLM Fine-tuning Studio Installer
+REM Bootstrap launcher for OWLLM Installer
 REM ALWAYS runs installer from bootstrap\.venv, never from LLM\.venv
 
 setlocal enabledelayedexpansion
@@ -8,14 +8,13 @@ REM Get script directory
 set "SCRIPT_DIR=%~dp0"
 cd /d "%SCRIPT_DIR%"
 
-REM Locate project root (parent of LLM if we're in LLM, otherwise current dir)
-cd /d "%SCRIPT_DIR%"
-if exist "..\bootstrap" if exist "installer_gui.py" (
-    REM We're in LLM folder, parent is project root
-    set "PROJECT_ROOT=%SCRIPT_DIR%..\"
+REM Locate project root / LLM dir robustly
+REM If installer_gui.py exists in SCRIPT_DIR, then SCRIPT_DIR is the LLM folder.
+if exist "%SCRIPT_DIR%installer_gui.py" (
     set "LLM_DIR=%SCRIPT_DIR%"
+    set "PROJECT_ROOT=%SCRIPT_DIR%..\"
 ) else (
-    REM We're in project root
+    REM Otherwise assume we're in project root and LLM is a subfolder
     set "PROJECT_ROOT=%SCRIPT_DIR%"
     set "LLM_DIR=%SCRIPT_DIR%LLM\"
 )
@@ -23,6 +22,11 @@ if exist "..\bootstrap" if exist "installer_gui.py" (
 set "BOOTSTRAP_VENV=%PROJECT_ROOT%\bootstrap\.venv"
 set "BOOTSTRAP_PYTHON=%BOOTSTRAP_VENV%\Scripts\python.exe"
 set "INSTALLER_SCRIPT=%LLM_DIR%\installer_gui.py"
+
+REM Ensure bootstrap folder exists (repo may not have it yet)
+if not exist "%PROJECT_ROOT%\bootstrap" (
+    mkdir "%PROJECT_ROOT%\bootstrap" >nul 2>&1
+)
 
 REM Check if bootstrap venv exists
 if not exist "%BOOTSTRAP_PYTHON%" (

@@ -711,6 +711,23 @@ class WheelhouseManager:
             Tuple of (success, error_message)
         """
         try:
+            def _pkg_spec(name: str, ver: str) -> str:
+                """
+                Build a valid pip requirement spec from profile versions.
+                Profile versions can be:
+                - exact: "2.5.1+cu121"
+                - ranges: ">=0.7.0,<0.8.0"
+                - wildcards: "12.1.*"
+                """
+                ver = str(ver).strip()
+                # If it's already a spec/range/wildcard, don't prepend '=='.
+                if any(op in ver for op in [">=", "<=", ">", "<", "!=", ","]) or ".*" in ver:
+                    return f"{name}{ver}"
+                # If caller accidentally provides "==x", keep as-is.
+                if ver.startswith("=="):
+                    return f"{name}{ver}"
+                return f"{name}=={ver}"
+
             # Get torch index URL
             torch_index = None
             if cuda_config in self.manifest.get("cuda_configs", {}):
@@ -723,9 +740,10 @@ class WheelhouseManager:
             for pkg_name in torch_packages:
                 if pkg_name in package_versions:
                     pkg_version = package_versions[pkg_name]
-                    self.log(f"  Downloading {pkg_name}=={pkg_version}")
+                    spec = _pkg_spec(pkg_name, pkg_version)
+                    self.log(f"  Downloading {spec}")
                     success, error = self._download_wheel(
-                        package=f"{pkg_name}=={pkg_version}",
+                        package=spec,
                         index_url=torch_index,
                         no_deps=True,  # Critical: no deps for torch
                         python_version=python_version
@@ -786,10 +804,11 @@ class WheelhouseManager:
             
             for pkg_name in ordered_packages:
                 pkg_version = package_versions[pkg_name]
-                self.log(f"  Downloading {pkg_name}=={pkg_version}")
+                spec = _pkg_spec(pkg_name, pkg_version)
+                self.log(f"  Downloading {spec}")
                 
                 success, error = self._download_wheel(
-                    package=f"{pkg_name}=={pkg_version}",
+                    package=spec,
                     index_url=None,  # Use PyPI
                     # Profile mode must be deterministic: never let pip resolve/download dependencies,
                     # otherwise it can pull a newer compatible-but-unwanted version (e.g. transformers 4.57.3).

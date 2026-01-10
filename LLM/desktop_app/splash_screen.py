@@ -27,7 +27,7 @@ class SplashScreen(QSplashScreen):
         layout.setSpacing(8)
         
         # Title (compact)
-        self.title = QLabel("🎯 LLM Fine-tuning Studio")
+        self.title = QLabel("🎯 OWLLM")
         self.title.setAlignment(Qt.AlignCenter)
         self.title.setStyleSheet("""
             QLabel {

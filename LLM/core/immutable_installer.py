@@ -665,26 +665,31 @@ class ImmutableInstaller:
                             # During repair mode (skip_installed=True and no packages_to_install),
                             # we should ALWAYS reinstall binary packages to ensure they work
                             should_install = True
+                            is_broken = False  # Track if package is broken for uninstall step
                             # Check if we're in repair mode
                             is_repair_mode = skip_installed and (packages_to_install is None or len(packages_to_install) == 0)
                             
-                            # In repair mode, always install binary packages (don't skip)
+                            # In repair mode, check if binary packages are broken and reinstall if needed
                             if is_repair_mode:
-                                self.log(f"  Repair mode: Will force install {pkg_name} to ensure it works")
-                                should_install = True
-                            elif skip_installed:
                                 try:
-                                    # Try to actually import the package to verify it works
-                                    import_cmd = f"import {pkg_name.replace('-', '_')}"
-                                    result = subprocess.run(
-                                        [str(venv_python), "-c", import_cmd],
-                                        capture_output=True,
-                                        text=True,
-                                        timeout=5,
-                                        **self.subprocess_flags
-                                    )
-                                    if result.returncode == 0:
-                                        # Package imports successfully - check version if needed
+                                    is_broken = self._check_package_broken(venv_python, pkg_name)
+                                    if is_broken:
+                                        self.log(f"  Repair mode: {pkg_name} is broken, will reinstall")
+                                        should_install = True
+                                    else:
+                                        self.log(f"  Repair mode: {pkg_name} is working, skipping")
+                                        should_install = False
+                                except Exception as e:
+                                    # If check fails, assume broken and reinstall
+                                    is_broken = True
+                                    self.log(f"  Repair mode: {pkg_name} check failed ({e}), will reinstall")
+                                    should_install = True
+                            elif skip_installed:
+                                # Use functional check to detect broken DLLs, not just simple import
+                                try:
+                                    is_broken = self._check_package_broken(venv_python, pkg_name)
+                                    if not is_broken:
+                                        # Package is functional - check version if needed
                                         if pkg_name == "triton":
                                             # For triton, also verify version
                                             version_cmd = "import triton; print(triton.__version__)"
@@ -706,23 +711,43 @@ class ImmutableInstaller:
                                                     self.log(f"  Version check failed for {pkg_name}: {ver_err}, will reinstall")
                                                     should_install = True
                                         else:
-                                            # For causal_conv1d and mamba_ssm, if import works, it's good
+                                            # For causal_conv1d and mamba_ssm, functional check already verified CUDA ops
                                             self.log(f"  ✓ {pkg_name} is already installed and working")
                                             should_install = False
+                                    else:
+                                        # Package is broken (DLL load failed, etc.) - must reinstall
+                                        self.log(f"  ⚠ {pkg_name} is broken (DLL/cuda ops failed), will reinstall")
+                                        should_install = True
                                 except Exception as e:
-                                    # If import check fails, we need to install
-                                    self.log(f"  {pkg_name} import check failed: {e}, will install")
-                                    should_install = True
-                                except Exception as e:
-                                    # If import check fails, we need to install
-                                    self.log(f"  {pkg_name} import check failed: {e}, will install")
+                                    # If functional check fails, we need to install
+                                    is_broken = True
+                                    self.log(f"  ⚠ {pkg_name} functional check failed: {e}, will reinstall")
                                     should_install = True
                             
                             if not should_install:
                                 continue
                             
+                            # If package is broken, uninstall it first to ensure clean reinstall
+                            if is_broken:
+                                self.log(f"  Uninstalling broken {pkg_name} before reinstall...")
+                                uninstall_cmd = [
+                                    str(venv_python), "-m", "pip", "uninstall", "-y", pkg_name
+                                ]
+                                uninstall_result = subprocess.run(
+                                    uninstall_cmd,
+                                    capture_output=True,
+                                    text=True,
+                                    timeout=60,
+                                    **self.subprocess_flags
+                                )
+                                if uninstall_result.returncode == 0:
+                                    self.log(f"  ✓ Uninstalled {pkg_name}")
+                                else:
+                                    self.log(f"  ⚠ Uninstall warning (may not have been installed): {uninstall_result.stderr[:200]}")
+                            
                             self.log(f"  Installing {pkg_name} from {wheel_filename}...")
-                            success, error = self._install_binary_package(venv_python, wheel_path)
+                            # Force reinstall if package was broken
+                            success, error = self._install_binary_package(venv_python, wheel_path, force_reinstall=is_broken)
                             if success:
                                 self.log(f"  ✓ {pkg_name} installed successfully")
                             else:
@@ -898,13 +923,14 @@ class ImmutableInstaller:
         else:
             self.log(f"  ✓ All packages installed ({installed_count} total)")
     
-    def _install_binary_package(self, venv_python: Path, wheel_path: Path) -> Tuple[bool, str]:
+    def _install_binary_package(self, venv_python: Path, wheel_path: Path, force_reinstall: bool = False) -> Tuple[bool, str]:
         """
         Install a binary package from a wheel file.
         
         Args:
             venv_python: Path to venv Python executable
             wheel_path: Path to wheel file
+            force_reinstall: If True, use --force-reinstall flag
         
         Returns:
             Tuple of (success: bool, error_message: str)
@@ -915,8 +941,12 @@ class ImmutableInstaller:
             "--find-links", str(self.wheelhouse),
             "--no-cache-dir",
             "--no-deps",  # Critical: prevent pip from resolving dependencies
-            str(wheel_path)
         ]
+        
+        if force_reinstall:
+            cmd.append("--force-reinstall")
+        
+        cmd.append(str(wheel_path))
         
         try:
             result = subprocess.run(
@@ -1206,11 +1236,56 @@ except Exception as e:
     print(f'ERROR: {e}')
     print('BROKEN')
 """
+        elif package_name in ["mamba_ssm", "mamba-ssm"]:
+            code = """
+try:
+    import mamba_ssm
+    # Try importing the critical CUDA module that fails if DLL is broken
+    # This is the exact import that fails with "DLL load failed" when broken
+    from mamba_ssm.ops.selective_scan_interface import selective_scan_fn, mamba_inner_fn
+    print('OK')
+except ImportError as e:
+    # DLL load failed or missing module - this is BROKEN
+    print('BROKEN')
+except Exception as e:
+    # Other errors also indicate broken state
+    print(f'ERROR: {e}')
+    print('BROKEN')
+"""
+        elif package_name in ["causal_conv1d", "causal-conv1d"]:
+            code = """
+try:
+    import causal_conv1d
+    # Try importing the CUDA operations module
+    # This will fail if DLLs are broken or missing
+    from causal_conv1d import causal_conv1d_fn, causal_conv1d_update
+    print('OK')
+except ImportError as e:
+    # DLL load failed or missing module - this is BROKEN
+    print('BROKEN')
+except Exception as e:
+    # Other errors also indicate broken state
+    print(f'ERROR: {e}')
+    print('BROKEN')
+"""
+        elif package_name == "typing-extensions":
+            # typing-extensions package name has hyphen but module name has underscore
+            code = """
+try:
+    import typing_extensions
+    print('OK')
+except ImportError:
+    print('NOT_INSTALLED')
+except Exception as e:
+    print(f'ERROR: {e}')
+"""
         else:
             # For other packages, just check if import works
+            # Handle package names with hyphens (convert to underscore for import)
+            import_name = package_name.replace("-", "_")
             code = f"""
 try:
-    import {package_name}
+    import {import_name}
     print('OK')
 except ImportError:
     print('NOT_INSTALLED')
@@ -1231,7 +1306,9 @@ except Exception as e:
                 return True  # Consider broken if check fails
             
             output = result.stdout.strip()
-            return output == "BROKEN" or output.startswith("ERROR:")
+            # Check for "BROKEN" anywhere in output (may have warnings before it)
+            # Also check stderr in case errors were printed there
+            return "BROKEN" in output or output.startswith("ERROR:") or "BROKEN" in (result.stderr or "")
         except Exception:
             return True  # Consider broken if check fails
     

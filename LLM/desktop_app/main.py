@@ -38,7 +38,7 @@ from core.inference import InferenceConfig, build_run_adapter_cmd
 
 
 _APP_BUILD = datetime.fromtimestamp(Path(__file__).stat().st_mtime).strftime("%y%m%d-%H%M%S")
-APP_TITLE = f"🤖 LLM Fine-tuning Studio [{_APP_BUILD}]"
+APP_TITLE = "OWLLM"
 
 
 class InstallerThread(QThread):
@@ -167,6 +167,61 @@ class PipPackageThread(QThread):
         except Exception as e:
             import traceback
             self.log_output.emit(f"[ERROR] pip task failed: {e}")
+            self.log_output.emit(traceback.format_exc())
+            self.finished_signal.emit(False)
+
+
+class CudaBootstrapThread(QThread):
+    """Thread to run SmartInstaller CUDA linker bootstrap without freezing UI."""
+    log_output = Signal(str)
+    finished_signal = Signal(bool)
+
+    def __init__(self, python_exe: str, llm_dir: str):
+        super().__init__()
+        self.python_exe = python_exe or sys.executable
+        self.llm_dir = llm_dir
+
+    def run(self):
+        import subprocess
+        try:
+            # Run inside the TARGET venv python so sysconfig paths match that environment.
+            code = f"""
+import sys
+from pathlib import Path
+llm_dir = Path(r\"{self.llm_dir}\")
+if str(llm_dir) not in sys.path:
+    sys.path.insert(0, str(llm_dir))
+from smart_installer import SmartInstaller
+installer = SmartInstaller()
+ok1 = installer._bootstrap_cuda_libs(sys.executable)
+ok2 = installer._patch_triton_runtime_build(sys.executable)
+ok3 = installer._patch_triton_windows_utils(sys.executable)
+print(f\"BOOTSTRAP_CUDA_LIBS: {{ok1}}\")
+print(f\"PATCH_TRITON_RUNTIME_BUILD: {{ok2}}\")
+print(f\"PATCH_TRITON_WINDOWS_UTILS: {{ok3}}\")
+print(\"OK\")
+"""
+            cmd = [self.python_exe, "-c", code]
+            self.log_output.emit("Running: " + " ".join(cmd[:3]) + " ...")
+            proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+                universal_newlines=True,
+                creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0,
+            )
+            assert proc.stdout is not None
+            for line in proc.stdout:
+                line = line.rstrip()
+                if line:
+                    self.log_output.emit(line)
+            rc = proc.wait()
+            self.finished_signal.emit(rc == 0)
+        except Exception as e:
+            import traceback
+            self.log_output.emit(f"[ERROR] CUDA bootstrap task failed: {e}")
             self.log_output.emit(traceback.format_exc())
             self.finished_signal.emit(False)
 
@@ -345,7 +400,7 @@ class PackageCard(QFrame):
     clicked = Signal(str)  # Emits package name when clicked
     checkbox_toggled = Signal(str, bool)  # Emits (package_name, checked) when checkbox toggled
     
-    def __init__(self, pkg_name, required_version, installed_version, is_installed, status, status_color, status_text, description, needs_attention=False, parent=None):
+    def __init__(self, pkg_name, required_version, installed_version, is_installed, status, status_color, status_text, description, needs_attention=False, parent=None, is_loading=False):
         super().__init__(parent)
         self.pkg_name = pkg_name
         self.required_version = required_version
@@ -355,6 +410,7 @@ class PackageCard(QFrame):
         self.status_color = status_color
         self.description = description
         self.needs_attention = needs_attention
+        self.is_loading = is_loading
         
         self.setFrameShape(QFrame.NoFrame)
         self.setMinimumHeight(140)
@@ -378,7 +434,6 @@ class PackageCard(QFrame):
             self.checkbox.setChecked(True)
         
         # Create a custom checkbox with green background
-        # The checkmark will be drawn via custom paint event
         self.checkbox.setStyleSheet("""
             QCheckBox {
                 spacing: 8px;
@@ -434,11 +489,8 @@ class PackageCard(QFrame):
                     painter.setPen(pen)
                     
                     # Draw checkmark: two lines forming a check
-                    # Coordinates relative to indicator rect
                     x, y, w, h = indicator_rect.x(), indicator_rect.y(), indicator_rect.width(), indicator_rect.height()
-                    # Center of indicator
                     center_x, center_y = x + w // 2, y + h // 2
-                    # Draw checkmark: from left-middle to center-bottom to right-top
                     painter.drawLine(
                         QPointF(center_x - 5, center_y),
                         QPointF(center_x - 1, center_y + 4)
@@ -455,11 +507,10 @@ class PackageCard(QFrame):
         def on_checkbox_changed(state):
             checked = (state == Qt.CheckState.Checked)
             self.checkbox_toggled.emit(self.pkg_name, checked)
-            # Force repaint to show/hide checkmark
+            self.clicked.emit(self.pkg_name)
             self.checkbox.update()
         
         self.checkbox.stateChanged.connect(on_checkbox_changed)
-        # Prevent checkbox clicks from triggering card click
         self.checkbox.mousePressEvent = lambda e: QCheckBox.mousePressEvent(self.checkbox, e)
         header.addWidget(self.checkbox)
         
@@ -477,36 +528,50 @@ class PackageCard(QFrame):
         header.addStretch()
         
         # Status badge with rounded background
-        status_badge = QLabel(status_text)
-        status_badge.setStyleSheet(f"""
-            background: {status_color}33;
-            color: {status_color};
-            padding: 4px 12px;
-            border-radius: 12px;
-            font-size: 9pt;
-            font-weight: 600;
-            border: 1px solid {status_color}66;
-        """)
-        header.addWidget(status_badge)
+        self.status_badge = QLabel(status_text)
+        if is_loading:
+            self.status_badge.setText("CHECKING...")
+            self.status_badge.setStyleSheet("""
+                background: rgba(102, 126, 234, 0.1);
+                color: #667eea;
+                padding: 4px 12px;
+                border-radius: 12px;
+                font-size: 9pt;
+                font-weight: 600;
+                border: 1px solid rgba(102, 126, 234, 0.3);
+            """)
+        else:
+            self.status_badge.setStyleSheet(f"""
+                background: {status_color}33;
+                color: {status_color};
+                padding: 4px 12px;
+                border-radius: 12px;
+                font-size: 9pt;
+                font-weight: 600;
+                border: 1px solid {status_color}66;
+            """)
+        header.addWidget(self.status_badge)
         layout.addLayout(header)
         
         # Version info - vertical layout for proper wrapping
-        if installed_version:
-            inst_label = QLabel(f"Installed: {installed_version}")
-            inst_label.setWordWrap(True)
-            inst_label.setStyleSheet(f"color: {status_color}; font-size: 10pt; font-weight: 500; background: transparent;")
-            layout.addWidget(inst_label)
+        self.inst_label = QLabel()
+        self.inst_label.setWordWrap(True)
+        if is_loading:
+            self.inst_label.setText("Checking installation...")
+            self.inst_label.setStyleSheet("color: #667eea; font-size: 10pt; font-style: italic; background: transparent;")
+        elif installed_version:
+            self.inst_label.setText(f"Installed: {installed_version}")
+            self.inst_label.setStyleSheet(f"color: {status_color}; font-size: 10pt; font-weight: 500; background: transparent;")
         else:
-            inst_label = QLabel("Not installed")
-            inst_label.setWordWrap(True)
-            inst_label.setStyleSheet("color: #888; font-size: 10pt; background: transparent;")
-            layout.addWidget(inst_label)
+            self.inst_label.setText("Not installed")
+            self.inst_label.setStyleSheet("color: #888; font-size: 10pt; background: transparent;")
+        layout.addWidget(self.inst_label)
         
         if required_version:
-            req_label = QLabel(f"Required: {required_version}")
-            req_label.setWordWrap(True)
-            req_label.setStyleSheet("color: #aaa; font-size: 9pt; background: transparent;")
-            layout.addWidget(req_label)
+            self.req_label = QLabel(f"Required: {required_version}")
+            self.req_label.setWordWrap(True)
+            self.req_label.setStyleSheet("color: #aaa; font-size: 9pt; background: transparent;")
+            layout.addWidget(self.req_label)
         
         # Description
         if description:
@@ -523,6 +588,43 @@ class PackageCard(QFrame):
             layout.addWidget(desc)
         
         layout.addStretch()
+
+    def update_status(self, inst_ver, is_installed, is_functional, version_mismatch, status_text, status_color, needs_attention):
+        """Update the card with fresh status info from background thread."""
+        self.installed_version = inst_ver
+        self.is_installed = is_installed
+        self.status_text = status_text
+        self.status_color = status_color
+        self.needs_attention = needs_attention
+        self.is_loading = False
+        
+        # Update badge
+        self.status_badge.setText(status_text)
+        self.status_badge.setStyleSheet(f"""
+            background: {status_color}33;
+            color: {status_color};
+            padding: 4px 12px;
+            border-radius: 12px;
+            font-size: 9pt;
+            font-weight: 600;
+            border: 1px solid {status_color}66;
+        """)
+        
+        # Update installed label
+        if inst_ver:
+            self.inst_label.setText(f"Installed: {inst_ver}")
+            self.inst_label.setStyleSheet(f"color: {status_color}; font-size: 10pt; font-weight: 500; background: transparent;")
+        else:
+            self.inst_label.setText("Not installed")
+            self.inst_label.setStyleSheet("color: #f44336; font-size: 10pt; background: transparent;")
+        
+        # Update checkbox (auto-check if attention needed)
+        if needs_attention:
+            self.checkbox.setChecked(True)
+            
+        # Update overall style
+        self._setup_style(False, needs_attention)
+        self.update()
 
     def _setup_style(self, selected=False, needs_attention=False):
         if selected:
@@ -1178,6 +1280,116 @@ QToolBar {{
 """
 
 
+class RequirementCheckThread(QThread):
+    """Background thread to check all package versions at once without freezing UI."""
+    # signal: (pkg_name, inst_ver, is_installed, is_functional, version_mismatch, status_text, status_color, needs_attention)
+    package_checked = Signal(str, str, bool, bool, bool, str, str, bool)
+    all_finished = Signal()
+    
+    def __init__(self, target_python, required_packages, check_functional_func, check_version_mismatch_func):
+        super().__init__()
+        self.target_python = target_python
+        self.required_packages = required_packages
+        self.check_functional_func = check_functional_func
+        self.check_version_mismatch_func = check_version_mismatch_func
+        self._is_running = True
+
+    def run(self):
+        if not self.target_python:
+            self.all_finished.emit()
+            return
+
+        import subprocess
+        import json
+        
+        # 1. Get all installed versions in one bulk call
+        installed_versions = {}
+        try:
+            result = subprocess.run(
+                [self.target_python, "-m", "pip", "list", "--format", "json"],
+                capture_output=True,
+                text=True,
+                timeout=15,
+                creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
+            )
+            if result.returncode == 0:
+                pkgs = json.loads(result.stdout)
+                installed_versions = {pkg['name'].lower(): pkg['version'] for pkg in pkgs}
+        except Exception as e:
+            print(f"[RequirementCheckThread] Bulk check failed: {e}")
+
+        # 2. Process each required package
+        for pkg_name, req_ver in self.required_packages.items():
+            if not self._is_running:
+                break
+                
+            # Get installed version from our bulk dict
+            inst_ver = None
+            search_names = [pkg_name.lower()]
+            if pkg_name in ["triton", "triton-windows"]:
+                search_names = ["triton-windows", "triton"]
+            elif "_" in pkg_name or "-" in pkg_name:
+                search_names.append(pkg_name.lower().replace("_", "-"))
+                search_names.append(pkg_name.lower().replace("-", "_"))
+            
+            for name in search_names:
+                if name in installed_versions:
+                    inst_ver = installed_versions[name]
+                    break
+            
+            is_installed = bool(inst_ver)
+            
+            # Use provided funcs for functional/mismatch checks
+            # Note: functional check might still run a small subprocess for some pkgs
+            is_functional = self.check_functional_func(pkg_name, python_exe=self.target_python) if is_installed else True
+            version_mismatch = False
+            if is_installed and req_ver and req_ver != "Binary (wheel)":
+                version_mismatch = self.check_version_mismatch_func(pkg_name, inst_ver, req_ver)
+            
+            # Determine status
+            needs_attention = False
+            if is_installed:
+                if not is_functional:
+                    status_text = "BROKEN"
+                    status_color = "#f44336"
+                    needs_attention = True
+                elif version_mismatch:
+                    status_text = "WRONG VERSION"
+                    status_color = "#ff9800"
+                    needs_attention = True
+                else:
+                    status_text = "OK"
+                    status_color = "#4CAF50"
+            else:
+                if pkg_name in ["causal_conv1d", "mamba_ssm"]:
+                    status_text = "MISSING"
+                    status_color = "#ff9800"
+                    needs_attention = True
+                elif pkg_name in ["triton", "triton-windows"] and sys.platform == "win32":
+                    status_text = "OPTIONAL"
+                    status_color = "#9e9e9e"
+                else:
+                    status_text = "MISSING"
+                    status_color = "#f44336"
+                    needs_attention = True
+            
+            self.package_checked.emit(
+                pkg_name, 
+                inst_ver or "", 
+                is_installed, 
+                is_functional, 
+                version_mismatch, 
+                status_text, 
+                status_color, 
+                needs_attention
+            )
+            
+        self.all_finished.emit()
+
+    def stop(self):
+        self._is_running = False
+
+
 class MainWindow(QMainWindow):
     def __init__(self, splash: SplashScreen = None) -> None:
         super().__init__()
@@ -1298,6 +1510,12 @@ class MainWindow(QMainWindow):
         self._bg_detect_started: bool = False
         self._home_tab_needs_update: bool = False
         self._rebuilding_home_tab: bool = False
+
+        # Environment issue flag (option C: startup scan + model-load-triggered banner)
+        self._forced_env_attention_msg: str | None = None
+        self._startup_env_popup_shown: bool = False
+        self._model_env_popup_shown: bool = False
+        self._last_env_error_details: str | None = None
 
         # Create a beautiful unified header
         header_widget = QFrame()
@@ -1440,6 +1658,9 @@ class MainWindow(QMainWindow):
         theme_layout.addWidget(color_selector)
         header_layout.addWidget(theme_container)
         
+        # Add stretch before title to center it
+        header_layout.addStretch(1)
+        
         # Center: App title (transparent background)
         title_container = QWidget()
         title_container.setStyleSheet("background: transparent;")
@@ -1448,9 +1669,8 @@ class MainWindow(QMainWindow):
         title_layout.setSpacing(12)
         title_layout.setAlignment(Qt.AlignCenter)
         
-        # Title text only (without emoji or icon)
-        title_text = APP_TITLE.replace("🤖 ", "").replace("🤖", "")  # Remove robot emoji
-        title_label = QLabel(title_text)
+        # Title text
+        title_label = QLabel(APP_TITLE)
         title_label.setAlignment(Qt.AlignCenter | Qt.AlignVCenter)
         title_label.setStyleSheet("""
             QLabel {
@@ -1464,11 +1684,10 @@ class MainWindow(QMainWindow):
         """)
         title_layout.addWidget(title_label)
         
-        # Add stretch on both sides to center the content
-        title_layout.insertStretch(0, 1)
-        title_layout.addStretch(1)
+        header_layout.addWidget(title_container, 2)  # Larger stretch factor to center
         
-        header_layout.addWidget(title_container, 1)
+        # Add stretch after title to center it
+        header_layout.addStretch(1)
         
         # Right: System info (compact)
         sys_info_widget = QWidget()
@@ -1673,6 +1892,37 @@ class MainWindow(QMainWindow):
         
         self.setCentralWidget(border_container)
         
+        # Add build number in bottom right corner (overlay)
+        build_label = QLabel(f"[{_APP_BUILD}]", border_container)
+        build_label.setStyleSheet("""
+            QLabel {
+                color: rgba(255, 255, 255, 0.4);
+                font-size: 8pt;
+                background: transparent;
+                padding: 2px 8px;
+            }
+        """)
+        build_label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self.build_label = build_label  # Store reference
+        
+        # Position build label in bottom right corner
+        def update_build_label_position():
+            if hasattr(self, 'build_label') and self.build_label:
+                container_rect = border_container.rect()
+                label_size = build_label.sizeHint()
+                build_label.setGeometry(
+                    container_rect.width() - label_size.width() - 4,
+                    container_rect.height() - label_size.height() - 4,
+                    label_size.width(),
+                    label_size.height()
+                )
+        
+        # Update position when window is resized
+        border_container.resizeEvent = lambda e: (update_build_label_position(), QFrame.resizeEvent(border_container, e) if hasattr(QFrame, 'resizeEvent') else None)
+        
+        # Initial positioning
+        QTimer.singleShot(100, update_build_label_position)
+        
         # Install event filter on central widget and main widget to catch mouse events for resizing
         # This allows us to intercept mouse events at the window edges even when child widgets would normally consume them
         border_container.installEventFilter(self)
@@ -1797,6 +2047,16 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(2000, self._retry_cuda_detection)
         
         print("=========================\n")
+
+        # Option C: also run a requirements/environment scan shortly after startup,
+        # so the navbar/Home can show issues without the user opening Requirements.
+        try:
+            def _kick_requirements_scan():
+                if hasattr(self, "requirements_col1") and hasattr(self, "requirements_col2"):
+                    self._refresh_requirements_grid()
+            QTimer.singleShot(1500, _kick_requirements_scan)
+        except Exception:
+            pass
 
     def _sort_gpus_by_memory(self, gpus: list) -> list:
         """Sort GPU list by reported memory (descending) while preserving original index."""
@@ -2754,6 +3014,12 @@ class MainWindow(QMainWindow):
             bg_color = QColor(primary)
             bg_color = bg_color.darker(300)  # Much darker for background
             self._hybrid_frame.set_frame_colors(frame_color, frame_accent, bg_color)
+
+        # Re-apply environment notice styling (theme changes can visually mask it)
+        try:
+            self._update_requirements_tab_notice()
+        except Exception:
+            pass
     
     def _update_themed_widgets(self, primary: str, secondary: str, accent: str) -> None:
         """Update all stored themed widgets with current colors"""
@@ -2920,13 +3186,24 @@ class MainWindow(QMainWindow):
         self.themed_widgets["frames"].append(title_frame)
         title_layout = QVBoxLayout(title_frame)
         title_layout.setContentsMargins(0, 12, 0, 12)
-        title = QLabel("Welcome to LLM Fine-tuning Studio")
+        title = QLabel("Welcome to OWLLM")
         title.setObjectName("homeWelcomeTitle")
         title.setAlignment(Qt.AlignCenter)
         text_color = self._get_text_color()
         title.setStyleSheet(f"color: {text_color}; background: transparent; border: none; padding: 0; font-size: 24pt; font-weight: bold; text-decoration: none;")
         self.themed_widgets["labels"].append(title)
         title_layout.addWidget(title)
+        
+        # Add status summary for environment issues
+        self.home_status_summary = QLabel()
+        self.home_status_summary.setAlignment(Qt.AlignCenter)
+        self.home_status_summary.setWordWrap(True)
+        self.home_status_summary.setCursor(Qt.PointingHandCursor)
+        # Clicking the warning takes you to the Requirements tab
+        self.home_status_summary.mousePressEvent = lambda e: self._switch_tab(self.tabs, 7)
+        self.home_status_summary.hide()
+        title_layout.addWidget(self.home_status_summary)
+        
         layout.addWidget(title_frame)
         
         # Create 2-column layout with FIXED 40/60 ratio (not resizable)
@@ -5773,6 +6050,13 @@ class MainWindow(QMainWindow):
                                      line_stripped.startswith('[ERROR]')):
                     error_lines.append(line_stripped)
                     break
+                # Common exception types that don't end with "Error:"
+                if in_traceback and line_stripped.startswith((
+                    'ModuleNotFoundError:', 'ImportError:', 'OSError:', 'FileNotFoundError:',
+                    'AssertionError:', 'KeyError:', 'IndexError:'
+                )):
+                    error_lines.append(line_stripped)
+                    break
             if error_lines:
                 return f"[ERROR] {error_lines[0]}"
             # If we can't find a clear error, return a generic message
@@ -5835,6 +6119,17 @@ class MainWindow(QMainWindow):
         # If we filtered everything out, just return empty string for now
         # This prevents "[ERROR] Unable to parse..." from showing while the model is still loading
         if not result:
+            # If there are error markers anywhere, surface the tail instead of hiding everything.
+            lower = buffer_text.lower()
+            error_markers = [
+                "modulenotfounderror", "importerror", "traceback", "runtimeerror", "valueerror",
+                "typeerror", "attributeerror", "assertionerror", "cuda out of memory", "out of memory",
+                "[error]", "error:"
+            ]
+            if any(m in lower for m in error_markers):
+                lines = [ln.strip() for ln in buffer_text.splitlines() if ln.strip()]
+                tail = lines[-8:] if len(lines) > 8 else lines
+                return "\n".join(tail).strip()
             return ""
         
         return result
@@ -5843,6 +6138,7 @@ class MainWindow(QMainWindow):
         """Run inference for Model A using QProcess"""
         # Reset buffer
         self.inference_buffer_a = ""
+        self._model_env_popup_shown = False
         
         # Ensure model_path is a string
         if not model_path or not isinstance(model_path, str):
@@ -5870,8 +6166,10 @@ class MainWindow(QMainWindow):
             temperature = self.test_model_a_settings.temperature.value()
         
         # Build command - use run_adapter.py for both base models and adapters
+        # IMPORTANT: run using TARGET venv python (LLM/.venv), not the app/bootstrap python.
+        target_python = self._get_target_venv_python() or sys.executable
         cmd = [
-            sys.executable, "-u", "run_adapter.py",
+            str(target_python), "-u", "run_adapter.py",
             "--prompt", prompt,
             "--max-new-tokens", str(max_tokens),
             "--temperature", str(temperature),
@@ -5911,12 +6209,25 @@ class MainWindow(QMainWindow):
             env.insert("CUDA_VISIBLE_DEVICES", str(selected_gpu_idx))
         
         proc.setProcessEnvironment(env)
+
+        # Prepare inference log (raw subprocess output)
+        try:
+            from pathlib import Path
+            logs_dir = Path(self.root) / "logs"
+            logs_dir.mkdir(parents=True, exist_ok=True)
+            self._inference_log_path_a = str(logs_dir / "inference_model_a.log")
+            with open(self._inference_log_path_a, "w", encoding="utf-8") as f:
+                f.write("COMMAND:\n")
+                f.write(" ".join(cmd) + "\n\n")
+                f.write("OUTPUT:\n")
+        except Exception:
+            self._inference_log_path_a = None
         
         # Connect to read output and update last bubble
         proc.readyReadStandardOutput.connect(
             lambda: self._update_inference_output_a(proc)
         )
-        proc.finished.connect(lambda: self._on_inference_finished_a())
+        proc.finished.connect(lambda code, status: self._on_inference_finished_a(code, status))
         
         proc.start()
         self.test_proc_a = proc
@@ -5930,22 +6241,53 @@ class MainWindow(QMainWindow):
         
         # Accumulate text in buffer
         self.inference_buffer_a += text
+
+        # Option C: trigger environment alert on model-load/compiler failures.
+        lower = self.inference_buffer_a.lower()
+        if "[error] model loading failed" in lower or "gcc.exe" in lower or "cuda_utils.c" in lower:
+            # Keep a small tail as details for the popup.
+            lines = [ln.rstrip() for ln in self.inference_buffer_a.splitlines() if ln.strip()]
+            tail = "\n".join(lines[-30:]) if lines else ""
+            self._last_env_error_details = tail
+            self._flag_environment_issue("Model load failed (compiler/Triton).")
+            if not getattr(self, "_model_env_popup_shown", False):
+                self._model_env_popup_shown = True
+                QTimer.singleShot(0, lambda: self._show_env_issue_popup(
+                    "Model load failed",
+                    "A model failed to load due to a compilation/runtime dependency issue.\n\n"
+                    "Click 'Run Repair Environment' to apply the automatic fixes, or open Requirements to install the missing components.",
+                    details=tail or None
+                ))
+
+        # Append raw output to log file
+        try:
+            log_path = getattr(self, "_inference_log_path_a", None)
+            if log_path and text:
+                with open(log_path, "a", encoding="utf-8", errors="replace") as f:
+                    f.write(text)
+        except Exception:
+            pass
         
         # Use shared filtering function
         filtered_output = self._filter_inference_output(self.inference_buffer_a)
         if filtered_output:
             self.chat_display.update_model_a_response(filtered_output)
     
-    def _on_inference_finished_a(self):
+    def _on_inference_finished_a(self, exit_code: int = 0, exit_status=None):
         """Called when Model A inference finishes"""
         # Final update with complete output
-        if self.inference_buffer_a.strip():
+        if self.test_proc_a is not None:
             self._update_inference_output_a(self.test_proc_a)
-            
-            # Check if after final update we still have no filtered output
-            final_filtered = self._filter_inference_output(self.inference_buffer_a)
-            if not final_filtered:
-                self.chat_display.update_model_a_response("[ERROR] Model failed to produce any valid output. Check logs for details.")
+
+        final_filtered = self._filter_inference_output(self.inference_buffer_a)
+        if not final_filtered:
+            lines = [ln.rstrip() for ln in self.inference_buffer_a.splitlines() if ln.strip()]
+            tail = "\n".join(lines[-30:]) if lines else "(no output captured)"
+            log_path = getattr(self, "_inference_log_path_a", None)
+            details = f"[ERROR] No usable model output.\nExit code: {exit_code}\n\nLast output lines:\n{tail}"
+            if log_path:
+                details += f"\n\nFull log: {log_path}"
+            self.chat_display.update_model_a_response(details)
         
         self.test_proc_a = None
     
@@ -5953,6 +6295,7 @@ class MainWindow(QMainWindow):
         """Run inference for Model B using QProcess"""
         # Reset buffer
         self.inference_buffer_b = ""
+        self._model_env_popup_shown = False
         
         # Ensure model_path is a string
         if not model_path or not isinstance(model_path, str):
@@ -5980,8 +6323,10 @@ class MainWindow(QMainWindow):
             temperature = self.test_model_b_settings.temperature.value()
         
         # Build command - use run_adapter.py for both base models and adapters
+        # IMPORTANT: run using TARGET venv python (LLM/.venv), not the app/bootstrap python.
+        target_python = self._get_target_venv_python() or sys.executable
         cmd = [
-            sys.executable, "-u", "run_adapter.py",
+            str(target_python), "-u", "run_adapter.py",
             "--prompt", prompt,
             "--max-new-tokens", str(max_tokens),
             "--temperature", str(temperature),
@@ -6021,12 +6366,25 @@ class MainWindow(QMainWindow):
             env.insert("CUDA_VISIBLE_DEVICES", str(selected_gpu_idx))
         
         proc.setProcessEnvironment(env)
+
+        # Prepare inference log (raw subprocess output)
+        try:
+            from pathlib import Path
+            logs_dir = Path(self.root) / "logs"
+            logs_dir.mkdir(parents=True, exist_ok=True)
+            self._inference_log_path_b = str(logs_dir / "inference_model_b.log")
+            with open(self._inference_log_path_b, "w", encoding="utf-8") as f:
+                f.write("COMMAND:\n")
+                f.write(" ".join(cmd) + "\n\n")
+                f.write("OUTPUT:\n")
+        except Exception:
+            self._inference_log_path_b = None
         
         # Connect to read output and update last bubble
         proc.readyReadStandardOutput.connect(
             lambda: self._update_inference_output_b(proc)
         )
-        proc.finished.connect(lambda: self._on_inference_finished_b())
+        proc.finished.connect(lambda code, status: self._on_inference_finished_b(code, status))
         
         proc.start()
         self.test_proc_b = proc
@@ -6039,22 +6397,50 @@ class MainWindow(QMainWindow):
         
         # Accumulate text in buffer
         self.inference_buffer_b += text
+
+        lower = self.inference_buffer_b.lower()
+        if "[error] model loading failed" in lower or "gcc.exe" in lower or "cuda_utils.c" in lower:
+            lines = [ln.rstrip() for ln in self.inference_buffer_b.splitlines() if ln.strip()]
+            tail = "\n".join(lines[-30:]) if lines else ""
+            self._last_env_error_details = tail
+            self._flag_environment_issue("Model load failed (compiler/Triton).")
+            if not getattr(self, "_model_env_popup_shown", False):
+                self._model_env_popup_shown = True
+                QTimer.singleShot(0, lambda: self._show_env_issue_popup(
+                    "Model load failed",
+                    "A model failed to load due to a compilation/runtime dependency issue.\n\n"
+                    "Click 'Run Repair Environment' to apply the automatic fixes, or open Requirements to install the missing components.",
+                    details=tail or None
+                ))
+
+        # Append raw output to log file
+        try:
+            log_path = getattr(self, "_inference_log_path_b", None)
+            if log_path and text:
+                with open(log_path, "a", encoding="utf-8", errors="replace") as f:
+                    f.write(text)
+        except Exception:
+            pass
         
         # Use shared filtering function
         filtered_output = self._filter_inference_output(self.inference_buffer_b)
         if filtered_output:
             self.chat_display.update_model_b_response(filtered_output)
     
-    def _on_inference_finished_b(self):
+    def _on_inference_finished_b(self, exit_code: int = 0, exit_status=None):
         """Called when Model B inference finishes"""
-        # Final update with complete output
-        if self.inference_buffer_b.strip():
+        if self.test_proc_b is not None:
             self._update_inference_output_b(self.test_proc_b)
-            
-            # Check if after final update we still have no filtered output
-            final_filtered = self._filter_inference_output(self.inference_buffer_b)
-            if not final_filtered:
-                self.chat_display.update_model_b_response("[ERROR] Model failed to produce any valid output. Check logs for details.")
+
+        final_filtered = self._filter_inference_output(self.inference_buffer_b)
+        if not final_filtered:
+            lines = [ln.rstrip() for ln in self.inference_buffer_b.splitlines() if ln.strip()]
+            tail = "\n".join(lines[-30:]) if lines else "(no output captured)"
+            log_path = getattr(self, "_inference_log_path_b", None)
+            details = f"[ERROR] No usable model output.\nExit code: {exit_code}\n\nLast output lines:\n{tail}"
+            if log_path:
+                details += f"\n\nFull log: {log_path}"
+            self.chat_display.update_model_b_response(details)
                 
         self.test_proc_b = None
     
@@ -6065,6 +6451,7 @@ class MainWindow(QMainWindow):
             self.inference_buffer_c = ""
         else:
             self.inference_buffer_c = ""
+        self._model_env_popup_shown = False
         
         # Ensure model_path is a string
         if not model_path or not isinstance(model_path, str):
@@ -6093,8 +6480,10 @@ class MainWindow(QMainWindow):
                 temperature = self.test_model_c_settings.temperature.value()
         
         # Build command - use run_adapter.py for both base models and adapters
+        # IMPORTANT: run using TARGET venv python (LLM/.venv), not the app/bootstrap python.
+        target_python = self._get_target_venv_python() or sys.executable
         cmd = [
-            sys.executable, "-u", "run_adapter.py",
+            str(target_python), "-u", "run_adapter.py",
             "--prompt", prompt,
             "--max-new-tokens", str(max_tokens),
             "--temperature", str(temperature),
@@ -6134,12 +6523,25 @@ class MainWindow(QMainWindow):
             env.insert("CUDA_VISIBLE_DEVICES", str(selected_gpu_idx))
         
         proc.setProcessEnvironment(env)
+
+        # Prepare inference log (raw subprocess output)
+        try:
+            from pathlib import Path
+            logs_dir = Path(self.root) / "logs"
+            logs_dir.mkdir(parents=True, exist_ok=True)
+            self._inference_log_path_c = str(logs_dir / "inference_model_c.log")
+            with open(self._inference_log_path_c, "w", encoding="utf-8") as f:
+                f.write("COMMAND:\n")
+                f.write(" ".join(cmd) + "\n\n")
+                f.write("OUTPUT:\n")
+        except Exception:
+            self._inference_log_path_c = None
         
         # Connect to read output and update last bubble
         proc.readyReadStandardOutput.connect(
             lambda: self._update_inference_output_c(proc)
         )
-        proc.finished.connect(lambda: self._on_inference_finished_c())
+        proc.finished.connect(lambda code, status: self._on_inference_finished_c(code, status))
         
         proc.start()
         self.test_proc_c = proc
@@ -6154,22 +6556,50 @@ class MainWindow(QMainWindow):
         if not hasattr(self, 'inference_buffer_c'):
             self.inference_buffer_c = ""
         self.inference_buffer_c += text
+
+        lower = self.inference_buffer_c.lower()
+        if "[error] model loading failed" in lower or "gcc.exe" in lower or "cuda_utils.c" in lower:
+            lines = [ln.rstrip() for ln in self.inference_buffer_c.splitlines() if ln.strip()]
+            tail = "\n".join(lines[-30:]) if lines else ""
+            self._last_env_error_details = tail
+            self._flag_environment_issue("Model load failed (compiler/Triton).")
+            if not getattr(self, "_model_env_popup_shown", False):
+                self._model_env_popup_shown = True
+                QTimer.singleShot(0, lambda: self._show_env_issue_popup(
+                    "Model load failed",
+                    "A model failed to load due to a compilation/runtime dependency issue.\n\n"
+                    "Click 'Run Repair Environment' to apply the automatic fixes, or open Requirements to install the missing components.",
+                    details=tail or None
+                ))
+
+        # Append raw output to log file
+        try:
+            log_path = getattr(self, "_inference_log_path_c", None)
+            if log_path and text:
+                with open(log_path, "a", encoding="utf-8", errors="replace") as f:
+                    f.write(text)
+        except Exception:
+            pass
         
         # Use shared filtering function
         filtered_output = self._filter_inference_output(self.inference_buffer_c)
         if filtered_output:
             self.chat_display.update_model_c_response(filtered_output)
     
-    def _on_inference_finished_c(self):
+    def _on_inference_finished_c(self, exit_code: int = 0, exit_status=None):
         """Called when Model C inference finishes"""
-        # Final update with complete output
-        if hasattr(self, 'inference_buffer_c') and self.inference_buffer_c.strip():
+        if self.test_proc_c is not None:
             self._update_inference_output_c(self.test_proc_c)
-            
-            # Check if after final update we still have no filtered output
-            final_filtered = self._filter_inference_output(self.inference_buffer_c)
-            if not final_filtered:
-                self.chat_display.update_model_c_response("[ERROR] Model failed to produce any valid output. Check logs for details.")
+
+        final_filtered = self._filter_inference_output(self.inference_buffer_c)
+        if not final_filtered:
+            lines = [ln.rstrip() for ln in self.inference_buffer_c.splitlines() if ln.strip()]
+            tail = "\n".join(lines[-30:]) if lines else "(no output captured)"
+            log_path = getattr(self, "_inference_log_path_c", None)
+            details = f"[ERROR] No usable model output.\nExit code: {exit_code}\n\nLast output lines:\n{tail}"
+            if log_path:
+                details += f"\n\nFull log: {log_path}"
+            self.chat_display.update_model_c_response(details)
                 
         self.test_proc_c = None
     
@@ -6474,23 +6904,32 @@ class MainWindow(QMainWindow):
         self.test_prompt.clear()
 
     # ---------------- Info/About tab ----------------
-    def _is_package_functional(self, pkg_name: str) -> bool:
+    def _is_package_functional(self, pkg_name: str, python_exe: Optional[str] = None) -> bool:
         """Thorough check for package functionality beyond just version presence.
         
         IMPORTANT: Uses LLM/.venv Python (not bootstrap/.venv) to check packages.
         """
-        if pkg_name not in ["torch", "triton-windows", "bitsandbytes"]:
+        # Define which packages need deeper functional checks
+        # Include both hyphen and underscore variants for binary packages
+        check_required = [
+            "torch", "triton", "triton-windows", "bitsandbytes",
+            "nvidia-cuda-runtime-cu12", "nvidia-cuda-runtime-cu11",
+            "mamba_ssm", "mamba-ssm", "causal_conv1d", "causal-conv1d"
+        ]
+        
+        if pkg_name not in check_required:
             return True # Assume other packages are fine if version matches
         
         # Get the target venv Python (LLM/.venv, not bootstrap/.venv)
-        try:
-            target_python = self._get_target_venv_python()
-        except Exception:
-            # If we can't find target venv, fall back to current Python (bootstrap)
-            # This is not ideal but better than crashing
-            target_python = sys.executable
+        target_python = python_exe
+        if not target_python:
+            try:
+                target_python = self._get_target_venv_python()
+            except Exception:
+                target_python = sys.executable
         
         import subprocess
+        from pathlib import Path
         
         try:
             if pkg_name == "torch":
@@ -6514,23 +6953,18 @@ else:
                 )
                 return result.returncode == 0 and 'OK' in result.stdout
                 
-            elif pkg_name == "triton-windows":
-                # Check triton in target venv (package name is triton-windows but module is triton)
-                # Note: triton-windows may not have triton.ops (Windows port limitation),
-                # so we only check if triton itself can be imported
+            elif pkg_name in ["triton", "triton-windows"]:
+                # 1. Check basic import
                 code = """
 try:
     import triton
-    # Check if triton has basic functionality
     has_version = hasattr(triton, '__version__')
     has_compile = hasattr(triton, 'compile')
     if has_version and has_compile:
         print('OK')
     else:
         print('BROKEN')
-except ImportError:
-    print('NOT_INSTALLED')
-except Exception as e:
+except Exception:
     print('BROKEN')
 """
                 result = subprocess.run(
@@ -6540,8 +6974,83 @@ except Exception as e:
                     timeout=10,
                     creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
                 )
-                return result.returncode == 0 and 'OK' in result.stdout
+                if not (result.returncode == 0 and 'OK' in result.stdout):
+                    return False
                 
+                # 2. Check for CRITICAL linker libraries (libcuda.a/cuda.lib)
+                # These are required for MinGW/gcc to link during compilation
+                try:
+                    import sysconfig
+                    # We need to find the platlib of the target venv
+                    # Running a small script to get it from the target python
+                    get_path_code = "import sysconfig; print(sysconfig.get_paths()['platlib'])"
+                    path_result = subprocess.run(
+                        [target_python, "-c", get_path_code],
+                        capture_output=True, text=True,
+                        creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
+                    )
+                    if path_result.returncode == 0:
+                        platlib = Path(path_result.stdout.strip())
+                        triton_lib = platlib / "triton" / "backends" / "nvidia" / "lib" / "libcuda.a"
+                        if not triton_lib.exists():
+                            # Check fallback name
+                            triton_lib_alt = platlib / "triton" / "backends" / "nvidia" / "lib" / "cuda.lib"
+                            if not triton_lib_alt.exists():
+                                print(f"[GUI] Triton is MISSING linker libraries (libcuda.a)")
+                                return False
+
+                        # 3. Check for Python import library for MinGW linking (libpythonXY.dll.a)
+                        # This prevents undefined references to __imp_Py* symbols.
+                        try:
+                            ver_code = "import sysconfig; print(sysconfig.get_python_version().replace('.', ''))"
+                            ver_result = subprocess.run(
+                                [target_python, "-c", ver_code],
+                                capture_output=True, text=True,
+                                creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
+                            )
+                            pyver = ver_result.stdout.strip() if ver_result.returncode == 0 else ""
+                            if pyver:
+                                py_import_lib = platlib / "triton" / "backends" / "nvidia" / "lib" / f"libpython{pyver}.dll.a"
+                                if not py_import_lib.exists():
+                                    print(f"[GUI] Triton is MISSING Python import lib (libpython{pyver}.dll.a)")
+                                    return False
+                        except Exception:
+                            pass
+
+                        # 4. Check that triton/runtime/build.py was patched to link -lpythonXY on MinGW
+                        try:
+                            build_py = platlib / "triton" / "runtime" / "build.py"
+                            if build_py.exists():
+                                content = build_py.read_text(encoding="utf-8", errors="replace")
+                                if "MinGW needs explicit Python import library" not in content and "-lpython" not in content:
+                                    print("[GUI] Triton build.py not patched for MinGW python linking")
+                                    return False
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+                return True
+                
+            elif pkg_name.startswith("nvidia-cuda-runtime"):
+                # Check if CUDA runtime has the expected include/lib structure
+                try:
+                    get_path_code = "import sysconfig; print(sysconfig.get_paths()['platlib'])"
+                    path_result = subprocess.run(
+                        [target_python, "-c", get_path_code],
+                        capture_output=True, text=True,
+                        creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
+                    )
+                    if path_result.returncode == 0:
+                        platlib = Path(path_result.stdout.strip())
+                        cuda_h = platlib / "nvidia" / "cuda_runtime" / "include" / "cuda.h"
+                        libcuda_a = platlib / "nvidia" / "cuda_runtime" / "lib" / "x64" / "libcuda.a"
+                        if not cuda_h.exists() or not libcuda_a.exists():
+                            print(f"[GUI] CUDA Runtime is MISSING headers or linker libs")
+                            return False
+                except Exception:
+                    pass
+                return True
+
             elif pkg_name == "bitsandbytes":
                 # Check bitsandbytes in target venv
                 code = """
@@ -6560,6 +7069,89 @@ except Exception:
                     creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
                 )
                 return result.returncode == 0 and 'OK' in result.stdout
+                
+            elif pkg_name in ["mamba_ssm", "mamba-ssm"]:
+                # Check mamba_ssm - must be able to import the CUDA operations
+                # This is critical for Nemotron and other Mamba models
+                # Note: pip package name may be mamba-ssm but Python module is mamba_ssm
+                code = """
+try:
+    import mamba_ssm
+    # Try importing the critical CUDA module that fails if DLL is broken
+    from mamba_ssm.ops.selective_scan_interface import selective_scan_fn, mamba_inner_fn
+    print('OK')
+except ImportError as e:
+    # DLL load failed or missing module
+    import sys
+    print(f'BROKEN: {e}', file=sys.stderr)
+    print('BROKEN')
+except Exception as e:
+    # Other errors also indicate broken state
+    import sys
+    print(f'BROKEN: {e}', file=sys.stderr)
+    print('BROKEN')
+"""
+                result = subprocess.run(
+                    [target_python, "-c", code],
+                    capture_output=True,
+                    text=True,
+                    timeout=15,
+                    creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
+                )
+                # Check for BROKEN in output (may have warnings before it)
+                output = result.stdout.strip()
+                is_broken = "BROKEN" in output or result.returncode != 0
+                is_ok = "OK" in output and result.returncode == 0
+                
+                if is_broken:
+                    # Log the error for debugging
+                    if result.stderr:
+                        print(f"[GUI] mamba_ssm functional check failed: {result.stderr}")
+                    if result.stdout:
+                        print(f"[GUI] mamba_ssm functional check output: {result.stdout}")
+                
+                return is_ok and not is_broken
+                
+            elif pkg_name in ["causal_conv1d", "causal-conv1d"]:
+                # Check causal_conv1d - must be able to import CUDA operations
+                # Note: pip package name may be causal-conv1d but Python module is causal_conv1d
+                code = """
+try:
+    import causal_conv1d
+    # Try importing the CUDA operations module
+    from causal_conv1d import causal_conv1d_fn, causal_conv1d_update
+    print('OK')
+except ImportError as e:
+    # DLL load failed or missing module
+    import sys
+    print(f'BROKEN: {e}', file=sys.stderr)
+    print('BROKEN')
+except Exception as e:
+    # Other errors also indicate broken state
+    import sys
+    print(f'BROKEN: {e}', file=sys.stderr)
+    print('BROKEN')
+"""
+                result = subprocess.run(
+                    [target_python, "-c", code],
+                    capture_output=True,
+                    text=True,
+                    timeout=15,
+                    creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
+                )
+                # Check for BROKEN in output (may have warnings before it)
+                output = result.stdout.strip()
+                is_broken = "BROKEN" in output or result.returncode != 0
+                is_ok = "OK" in output and result.returncode == 0
+                
+                if is_broken:
+                    # Log the error for debugging
+                    if result.stderr:
+                        print(f"[GUI] causal_conv1d functional check failed: {result.stderr}")
+                    if result.stdout:
+                        print(f"[GUI] causal_conv1d functional check output: {result.stdout}")
+                
+                return is_ok and not is_broken
         except Exception:
             return False
         return True
@@ -6571,7 +7163,7 @@ except Exception:
         Args:
             pkg_name: Package name
             installed_version: Currently installed version
-            requirement_spec: Requirement specifier (e.g., "==4.51.3" or ">=4.51.3,!=4.52.*")
+            requirement_spec: Requirement specifier (e.g., "==4.51.3" or ">=4.51.3,!=4.52.*" or "12.1.*")
         
         Returns:
             True if version mismatch detected, False if OK
@@ -6579,6 +7171,20 @@ except Exception:
         try:
             from packaging.specifiers import SpecifierSet
             from packaging import version as pkg_version
+            
+            # Handle wildcard specs (e.g., "12.1.*" or "==12.1.*")
+            if ".*" in requirement_spec:
+                # Extract base version (e.g., "12.1" from "12.1.*" or "==12.1.*")
+                base_spec = requirement_spec.replace("==", "").replace(".*", "").strip()
+                # Check if installed version starts with base version
+                inst_base = installed_version.split("+")[0]
+                # For "12.1.*", check if installed version starts with "12.1."
+                if inst_base.startswith(base_spec + "."):
+                    return False  # Version matches wildcard
+                # Also check exact match (e.g., "12.1" matches "12.1.*")
+                if inst_base == base_spec:
+                    return False  # Version matches
+                return True  # Version doesn't match wildcard
             
             # Handle exact version specs
             if requirement_spec.startswith("=="):
@@ -6655,12 +7261,15 @@ except Exception:
                 print(f"[GUI] No binary packages in profile (this is normal for some profiles)")
             
             # Convert to requirement specs
-            # Profile versions may be ranges (e.g., ">=0.13.0,<0.16.0") or exact (e.g., "0.14.0")
+            # Profile versions may be ranges (e.g., ">=0.13.0,<0.16.0") or exact (e.g., "0.14.0") or wildcards (e.g., "12.1.*")
             requirements = {}
             for pkg_name, version in package_versions.items():
                 # Check if version is already a range specifier
                 if any(op in str(version) for op in [">=", "<=", ">", "<", "!=", ","]):
                     # It's already a range - use as-is
+                    requirements[pkg_name] = str(version)
+                elif ".*" in str(version):
+                    # Wildcard version (e.g., "12.1.*") - use as-is (don't add ==)
                     requirements[pkg_name] = str(version)
                 else:
                     # Exact version - add == prefix
@@ -6712,25 +7321,32 @@ except Exception:
             return {}
 
     def _build_requirements_tab(self) -> QWidget:
-        """Build Requirements tab in 3 equal columns (1/3 each)."""
+        """Build Requirements tab with 2 scrolling columns (scroll together) and 1 details panel."""
         w = QWidget()
         main_layout = QHBoxLayout(w)
         main_layout.setContentsMargins(20, 20, 20, 20)
         main_layout.setSpacing(0)  # Spacing handled by columns
         
-        # Use a splitter for fixed 1/3 divisions
+        # Use a splitter: 2/3 for scrolling columns, 1/3 for details panel
         splitter = QSplitter(Qt.Horizontal)
         splitter.setStyleSheet("QSplitter::handle { background: rgba(102, 126, 234, 0.15); width: 2px; }")
-        # Disable manual resizing - maintain fixed 1/3 ratio
+        # Disable manual resizing - maintain fixed 2/3 and 1/3 ratio
         splitter.setChildrenCollapsible(False)
         
-        # Column 1 (Scroll Area)
-        col1_scroll = QScrollArea()
-        col1_scroll.setWidgetResizable(True)
-        col1_scroll.setFrameShape(QFrame.NoFrame)
-        col1_scroll.setStyleSheet("QScrollArea { background: transparent; border: none; }")
-        col1_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        # Single scroll area for both columns (scroll together)
+        columns_scroll = QScrollArea()
+        columns_scroll.setWidgetResizable(True)
+        columns_scroll.setFrameShape(QFrame.NoFrame)
+        columns_scroll.setStyleSheet("QScrollArea { background: transparent; border: none; }")
+        columns_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         
+        # Container widget for both columns
+        columns_container = QWidget()
+        columns_layout = QHBoxLayout(columns_container)
+        columns_layout.setContentsMargins(0, 0, 0, 0)
+        columns_layout.setSpacing(0)
+        
+        # Column 1
         col1_container = QWidget()
         col1_layout = QVBoxLayout(col1_container)
         col1_layout.setContentsMargins(15, 10, 15, 10)
@@ -6752,15 +7368,9 @@ except Exception:
         col1_layout.addLayout(self.requirements_col1)
         col1_layout.addStretch()
         
-        col1_scroll.setWidget(col1_container)
+        columns_layout.addWidget(col1_container, 1)  # Equal width
         
-        # Column 2 (Scroll Area)
-        col2_scroll = QScrollArea()
-        col2_scroll.setWidgetResizable(True)
-        col2_scroll.setFrameShape(QFrame.NoFrame)
-        col2_scroll.setStyleSheet("QScrollArea { background: transparent; border: none; }")
-        col2_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        
+        # Column 2
         col2_container = QWidget()
         col2_layout = QVBoxLayout(col2_container)
         col2_layout.setContentsMargins(15, 10, 15, 10)
@@ -6782,7 +7392,9 @@ except Exception:
         col2_layout.addLayout(self.requirements_col2)
         col2_layout.addStretch()
         
-        col2_scroll.setWidget(col2_container)
+        columns_layout.addWidget(col2_container, 1)  # Equal width
+        
+        columns_scroll.setWidget(columns_container)
         
         # Column 3 (Details Panel)
         self.col3_details = QWidget()
@@ -6791,8 +7403,8 @@ except Exception:
         col3_layout.setSpacing(15)
         
         # Add Refresh Button at the top
-        refresh_btn = QPushButton("🔄 Refresh Status")
-        refresh_btn.setStyleSheet("""
+        self.refresh_btn = QPushButton("🔄 Refresh Status")
+        self.refresh_btn.setStyleSheet("""
             QPushButton {
                 background: rgba(102, 126, 234, 0.2);
                 color: #667eea;
@@ -6810,9 +7422,14 @@ except Exception:
             QPushButton:pressed {
                 background: rgba(102, 126, 234, 0.4);
             }
+            QPushButton:disabled {
+                background: rgba(150, 150, 150, 0.1);
+                color: #888;
+                border: 1px solid rgba(150, 150, 150, 0.2);
+            }
         """)
-        refresh_btn.clicked.connect(self._refresh_requirements_grid)
-        col3_layout.addWidget(refresh_btn)
+        self.refresh_btn.clicked.connect(self._refresh_requirements_grid)
+        col3_layout.addWidget(self.refresh_btn)
         
         # Title section with divider
         title_section = QWidget()
@@ -6996,28 +7613,53 @@ except Exception:
         
         col3_layout.addWidget(log_section, 1)
         
+        # Add a progress bar for background checking
+        self.requirements_progress = QProgressBar()
+        self.requirements_progress.setFixedHeight(4)
+        self.requirements_progress.setTextVisible(False)
+        self.requirements_progress.setStyleSheet("""
+            QProgressBar {
+                background: rgba(102, 126, 234, 0.1);
+                border: none;
+                border-radius: 2px;
+            }
+            QProgressBar::chunk {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #667eea, stop:1 #764ba2);
+                border-radius: 2px;
+            }
+        """)
+        self.requirements_progress.hide()
+        
+        # Wrap the columns_scroll and progress bar in a container
+        scroll_with_progress = QWidget()
+        scroll_with_progress_layout = QVBoxLayout(scroll_with_progress)
+        scroll_with_progress_layout.setContentsMargins(0, 0, 0, 0)
+        scroll_with_progress_layout.setSpacing(0)
+        scroll_with_progress_layout.addWidget(self.requirements_progress)
+        scroll_with_progress_layout.addWidget(columns_scroll)
+        
         # Add to splitter and set equal widths
-        splitter.addWidget(col1_scroll)
-        splitter.addWidget(col2_scroll)
+        splitter.addWidget(scroll_with_progress)
         splitter.addWidget(self.col3_details)
         
-        # Set stretch factors to 1 for all to make them equal
-        splitter.setStretchFactor(0, 1)
+        # Set stretch factors: 2 for columns (2/3 width), 1 for details (1/3 width)
+        splitter.setStretchFactor(0, 2)
         splitter.setStretchFactor(1, 1)
-        splitter.setStretchFactor(2, 1)
         
         # Store splitter reference
         self.requirements_splitter = splitter
         
-        # Force fixed 1/3 ratio - maintain equal sizes on any resize
+        # Force fixed 2/3 and 1/3 ratio - maintain sizes on any resize
         def maintain_fixed_ratio():
             width = splitter.width()
             if width > 0:
-                third = width // 3
+                columns_width = int(width * 2 / 3)
+                details_width = width - columns_width
                 current = splitter.sizes()
-                # Only update if not already equal (avoid infinite loops)
-                if len(current) == 3 and (current[0] != third or current[1] != third or current[2] != third):
-                    splitter.setSizes([third, third, third])
+                # Only update if not already correct (avoid infinite loops)
+                if len(current) == 2 and (current[0] != columns_width or current[1] != details_width):
+                    splitter.setSizes([columns_width, details_width])
         
         # Use event filter to catch all resize events
         class FixedRatioFilter(QObject):
@@ -7048,7 +7690,7 @@ except Exception:
         return w
 
     def _refresh_requirements_grid(self):
-        """Populate the requirements columns with package cards."""
+        """Populate the requirements columns with package cards and start background check."""
         # Clear existing
         for layout in [self.requirements_col1, self.requirements_col2]:
             while layout.count():
@@ -7057,56 +7699,17 @@ except Exception:
         
         self.package_cards = {}
         self.selected_packages = set()  # Track which packages are checked
+        self._selected_install_queue = []  # Queue for sequential selected installs
         
-        # Initialize binary packages info (will be populated from profile)
-        if not hasattr(self, '_binary_packages_info'):
-            self._binary_packages_info = {}
-        
-        # Get target venv Python for checking installed versions
-        # IMPORTANT: Check packages in LLM/.venv, not bootstrap/.venv
-        try:
-            target_python = self._get_target_venv_python()
-        except Exception as e:
-            print(f"[GUI] WARNING: Could not get target venv Python: {e}")
-            target_python = None
-        
-        # Helper function to get installed version from target venv
-        def get_installed_version(pkg_name: str) -> Optional[str]:
-            """Get installed version from target venv (LLM/.venv), not bootstrap"""
-            if target_python is None:
-                return None
-            try:
-                import subprocess
-                code = f"""
-try:
-    from importlib.metadata import version, PackageNotFoundError
-except ImportError:
-    from importlib_metadata import version, PackageNotFoundError
+        # Stop existing check if running
+        if hasattr(self, '_req_check_thread') and self._req_check_thread.isRunning():
+            self._req_check_thread.stop()
+            self._req_check_thread.wait()
 
-try:
-    print(version('{pkg_name}'))
-except PackageNotFoundError:
-    print('NOT_FOUND')
-"""
-                result = subprocess.run(
-                    [target_python, "-c", code],
-                    capture_output=True,
-                    text=True,
-                    timeout=10,
-                    creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
-                )
-                if result.returncode == 0:
-                    output = result.stdout.strip()
-                    if output and output != "NOT_FOUND":
-                        return output
-            except Exception:
-                pass
-            return None
-        
-        # PROFILE IS THE ONLY SOURCE OF TRUTH - NO requirements.txt FALLBACK
+        # PROFILE IS THE ONLY SOURCE OF TRUTH
         profile_requirements = self._get_profile_requirements()
         
-        # Also get binary packages from profile
+        # Get binary packages from profile
         binary_packages = {}
         try:
             from pathlib import Path
@@ -7132,42 +7735,29 @@ except PackageNotFoundError:
                 self,
                 "Profile Loading Failed",
                 "Failed to load hardware profile requirements.\n\n"
-                "Profiles are the only source of truth for package versions.\n"
-                "Please check:\n"
-                "- metadata/compatibility_matrix.json exists\n"
-                "- profiles/*.json files exist\n"
-                "- System detection is working correctly"
+                "Profiles are the only source of truth for package versions."
             )
-            # Return empty - GUI will show packages as missing
             required_packages = {}
         else:
-            print(f"[GUI] Loaded {len(profile_requirements)} packages from profile (ONLY SOURCE OF TRUTH)")
-            if binary_packages:
-                print(f"[GUI] Also found {len(binary_packages)} binary package(s) in profile")
-            if 'bitsandbytes' in profile_requirements:
-                print(f"[GUI] Profile requires bitsandbytes: {profile_requirements['bitsandbytes']}")
             required_packages = profile_requirements
         
-        # Add binary packages to required_packages (they don't have version specs, but should be shown)
-        # Store binary package info separately for installation
+        # Add binary packages to required_packages
         self._binary_packages_info = binary_packages.copy()
         for pkg_name, pkg_info in binary_packages.items():
             if pkg_name not in required_packages:
-                # Binary packages are installed from wheels, mark as "Binary (wheel)" for display
                 required_packages[pkg_name] = "Binary (wheel)"
         
-        # Add any remaining defaults for packages not in profile (only if really needed)
-        defaults = {
-            "unsloth": "Latest"  # Only keep unsloth as it's not in profile
-        }
+        # Add any remaining defaults
+        defaults = {"unsloth": "Latest"}
         for pkg, ver in defaults.items():
             if pkg not in required_packages:
                 required_packages[pkg] = ver
         
-        # Sort packages by importance/priority, then alphabetically
+        # Sort packages by importance
         priority_order = [
             "torch", "transformers", "peft", "datasets", "accelerate", "bitsandbytes",
             "triton", "triton-windows", "causal_conv1d", "mamba_ssm",
+            "nvidia-cuda-runtime-cu12", "nvidia-cuda-runtime-cu11", "nvidia-cuda-nvcc-cu12", "nvidia-cuda-nvcc-cu11",
             "numpy", "safetensors", "tokenizers", "huggingface-hub", "huggingface_hub",
             "PySide6", "PySide6-Essentials", "PySide6-Addons",
             "pandas", "tqdm", "packaging", "requests", "pyyaml",
@@ -7176,15 +7766,11 @@ except PackageNotFoundError:
             "mpmath", "regex", "psutil", "streamlit", "unsloth"
         ]
         
-        # Get all package names from profile
         all_packages = list(required_packages.keys())
-        
-        # Sort: priority first, then alphabetical
         sorted_packages = []
         for priority_pkg in priority_order:
             if priority_pkg in all_packages:
                 sorted_packages.append(priority_pkg)
-        # Add remaining packages alphabetically
         for pkg in sorted(all_packages):
             if pkg not in sorted_packages:
                 sorted_packages.append(pkg)
@@ -7198,16 +7784,17 @@ except PackageNotFoundError:
             "bitsandbytes": "Enables 4-bit and 8-bit quantization for low-VRAM training.",
             "triton": "GPU programming language. Required for Unsloth optimizations and Mamba/SSM models.",
             "triton-windows": "GPU programming language. Required for Unsloth optimizations on Windows.",
-            "causal_conv1d": "Required for Mamba/SSM architecture models (e.g., NVIDIA Nemotron). Installed from Windows wheel.",
-            "mamba_ssm": "Required for Mamba/SSM architecture models (e.g., NVIDIA Nemotron). Installed from Windows wheel.",
-            "unsloth": "Advanced training optimizer that provides 2x speedup and 70% less VRAM usage.",
-            "PySide6": "The Qt-based GUI framework used to build this desktop application.",
-            "PySide6-Essentials": "Essential Qt modules for PySide6.",
-            "PySide6-Addons": "Additional Qt modules for PySide6.",
-            "numpy": "Numerical computing library. Essential for tensor and array operations.",
-            "pandas": "Data manipulation library used for dataset analysis and visualization.",
-            "huggingface_hub": "Client library for interacting with the Hugging Face Model Hub.",
-            "huggingface-hub": "Client library for interacting with the Hugging Face Model Hub.",
+            "causal_conv1d": "Required for Mamba/SSM architecture models (e.g., NVIDIA Nemotron).",
+            "mamba_ssm": "Required for Mamba/SSM architecture models (e.g., NVIDIA Nemotron).",
+            "nvidia-cuda-runtime-cu12": "CUDA runtime headers and libraries for CUDA 12.x. Required for Triton to compile CUDA code on Windows.",
+            "nvidia-cuda-runtime-cu11": "CUDA runtime headers and libraries for CUDA 11.x. Required for Triton to compile CUDA code on Windows.",
+            "nvidia-cuda-nvcc-cu12": "CUDA compiler and additional libraries for CUDA 12.x. May include cuda.lib needed for linking.",
+            "nvidia-cuda-nvcc-cu11": "CUDA compiler and additional libraries for CUDA 11.x. May include cuda.lib needed for linking.",
+            "unsloth": "Advanced training optimizer providing 2x speedup and 70% less VRAM.",
+            "PySide6": "The Qt-based GUI framework used for this application.",
+            "numpy": "Numerical computing library. Essential for tensor operations.",
+            "pandas": "Data manipulation library used for dataset analysis.",
+            "huggingface_hub": "Client library for interacting with the Hugging Face Hub.",
             "safetensors": "Fast and safe tensor serialization format.",
             "tokenizers": "Fast tokenization library used by transformers.",
             "tqdm": "Progress bar library for Python.",
@@ -7226,110 +7813,298 @@ except PackageNotFoundError:
             "mpmath": "Arbitrary precision floating-point arithmetic.",
             "regex": "Alternative regular expression module.",
             "psutil": "Cross-platform system and process utilities.",
-            "streamlit": "Web framework for machine learning apps.",
-            "typing-extensions": "Backported type hints for older Python versions."
+            "streamlit": "Web framework for machine learning apps."
         }
         
-        # First, collect all packages with their status to prioritize those needing attention
-        packages_with_status = []
-        for pkg_name in sorted_packages:
-            req_ver = required_packages.get(pkg_name, "")
-            inst_ver = None
-            
-            # Check installed version in target venv (LLM/.venv), not bootstrap
-            if pkg_name in ["triton", "triton-windows"]:
-                inst_ver = get_installed_version("triton-windows")
-                if inst_ver is None:
-                    inst_ver = get_installed_version("triton")
-            elif pkg_name in ["causal_conv1d", "mamba_ssm"]:
-                inst_ver = get_installed_version(pkg_name)
-                if inst_ver is None:
-                    alt_name = pkg_name.replace("_", "-")
-                    if alt_name != pkg_name:
-                        inst_ver = get_installed_version(alt_name)
-            else:
-                inst_ver = get_installed_version(pkg_name)
-            
-            is_installed = bool(inst_ver)
-            is_functional = self._is_package_functional(pkg_name) if is_installed else True
-            version_mismatch = False
-            if is_installed and req_ver and req_ver != "Binary (wheel)":
-                version_mismatch = self._check_version_mismatch(pkg_name, inst_ver, req_ver)
-            
-            # Determine status and priority
-            needs_attention = False
-            if is_installed:
-                if not is_functional:
-                    status_text = "BROKEN"
-                    status_color = "#f44336"
-                    needs_attention = True
-                elif version_mismatch:
-                    status_text = "WRONG VERSION"
-                    status_color = "#ff9800"
-                    needs_attention = True
-                else:
-                    status_text = "OK"
-                    status_color = "#4CAF50"
-            else:
-                if pkg_name in ["causal_conv1d", "mamba_ssm"]:
-                    status_text = "MISSING"
-                    status_color = "#ff9800"
-                    needs_attention = True
-                elif pkg_name in ["triton", "triton-windows"] and sys.platform == "win32":
-                    status_text = "OPTIONAL"
-                    status_color = "#9e9e9e"
-                else:
-                    status_text = "MISSING"
-                    status_color = "#f44336"
-                    needs_attention = True
-            
-            packages_with_status.append({
-                "name": pkg_name,
-                "req_ver": req_ver,
-                "inst_ver": inst_ver,
-                "is_installed": is_installed,
-                "is_functional": is_functional,
-                "version_mismatch": version_mismatch,
-                "status_text": status_text,
-                "status_color": status_color,
-                "needs_attention": needs_attention
-            })
+        # Split into two columns (alternating)
+        col1_pkgs = sorted_packages[::2]
+        col2_pkgs = sorted_packages[1::2]
         
-        # Sort: packages needing attention first, then by original priority order
-        needs_attention_pkgs = [pkg for pkg in packages_with_status if pkg["needs_attention"]]
-        ok_pkgs = [pkg for pkg in packages_with_status if not pkg["needs_attention"]]
-        # Maintain original order within each group
-        sorted_packages_with_status = needs_attention_pkgs + ok_pkgs
-        
-        # Split into two columns (alternating for better distribution)
-        col1_pkgs = sorted_packages_with_status[::2]  # Even indices
-        col2_pkgs = sorted_packages_with_status[1::2]  # Odd indices
-        
+        # Create all cards in LOADING state immediately
         for pkg_list, layout in [(col1_pkgs, self.requirements_col1), (col2_pkgs, self.requirements_col2)]:
-            for pkg_data in pkg_list:
-                pkg_name = pkg_data["name"]
-                req_ver = pkg_data["req_ver"]
-                inst_ver = pkg_data["inst_ver"]
-                is_installed = pkg_data["is_installed"]
-                is_functional = pkg_data["is_functional"]
-                version_mismatch = pkg_data["version_mismatch"]
-                status_text = pkg_data["status_text"]
-                status_color = pkg_data["status_color"]
-                needs_attention = pkg_data["needs_attention"]
+            for pkg_name in pkg_list:
+                req_ver = required_packages.get(pkg_name, "")
                 card = PackageCard(
-                    pkg_name, req_ver, inst_ver, is_installed, 
-                    "ok" if (is_installed and is_functional and not version_mismatch) else ("mismatch" if version_mismatch else "missing"),
-                    status_color, status_text, descriptions.get(pkg_name, ""),
-                    needs_attention=needs_attention  # Pass flag to show red border
+                    pkg_name, req_ver, "", False, "checking", "#667eea", "CHECKING...", 
+                    descriptions.get(pkg_name, ""), is_loading=True
                 )
                 card.clicked.connect(self._on_package_card_clicked)
                 card.checkbox_toggled.connect(self._on_package_checkbox_toggled)
                 layout.addWidget(card)
                 self.package_cards[pkg_name] = card
         
-        # Add stretches to keep cards at the top
+        # Add stretches
         self.requirements_col1.addStretch()
         self.requirements_col2.addStretch()
+        
+        # Start background check
+        try:
+            target_python = self._get_target_venv_python()
+        except Exception:
+            target_python = None
+            
+        self._req_check_thread = RequirementCheckThread(
+            target_python, 
+            required_packages, 
+            self._is_package_functional, 
+            self._check_version_mismatch
+        )
+        self._req_check_thread.package_checked.connect(self._on_package_checked)
+        self._req_check_thread.all_finished.connect(self._on_all_requirements_checked)
+        
+        # Disable refresh button while checking and show progress
+        if hasattr(self, 'refresh_btn'):
+            self.refresh_btn.setEnabled(False)
+            self.refresh_btn.setText("🔄 Checking Status...")
+        
+        if hasattr(self, 'requirements_progress'):
+            self.requirements_progress.setMaximum(len(required_packages))
+            self.requirements_progress.setValue(0)
+            self.requirements_progress.show()
+            
+        # Clear the notice badge while checking
+        self._update_requirements_tab_notice()
+            
+        self._req_check_thread.start()
+
+    def _update_requirements_tab_notice(self):
+        """Show a notice on the requirements tab button if attention is needed."""
+        if not hasattr(self, 'requirements_btn'):
+            return
+            
+        any_needs_attention = any(getattr(card, 'needs_attention', False) for card in self.package_cards.values())
+        forced = bool(getattr(self, "_forced_env_attention_msg", None))
+        if any_needs_attention:
+            self.requirements_btn.setText("🔧 ❗")
+            self.requirements_btn.setToolTip("Environment needs attention (broken or missing packages)")
+            # Add a slight red tint to indicate issue
+            self.requirements_btn.setStyleSheet("""
+                QPushButton {
+                    background: rgba(244, 67, 54, 0.15);
+                    border: 1px solid rgba(244, 67, 54, 0.4);
+                    color: #f44336;
+                    border-radius: 6px;
+                    font-weight: bold;
+                }
+                QPushButton:hover {
+                    background: rgba(244, 67, 54, 0.25);
+                }
+                QPushButton:checked {
+                    background: rgba(244, 67, 54, 0.35);
+                    border: 2px solid #f44336;
+                }
+            """)
+        elif forced:
+            self.requirements_btn.setText("🔧 ❗")
+            msg = str(getattr(self, "_forced_env_attention_msg", "Environment needs attention"))
+            self.requirements_btn.setToolTip(msg)
+            self.requirements_btn.setStyleSheet("""
+                QPushButton {
+                    background: rgba(244, 67, 54, 0.15);
+                    border: 1px solid rgba(244, 67, 54, 0.4);
+                    color: #f44336;
+                    border-radius: 6px;
+                    font-weight: bold;
+                }
+                QPushButton:hover {
+                    background: rgba(244, 67, 54, 0.25);
+                }
+                QPushButton:checked {
+                    background: rgba(244, 67, 54, 0.35);
+                    border: 2px solid #f44336;
+                }
+            """)
+        else:
+            self.requirements_btn.setText("🔧")
+            self.requirements_btn.setToolTip("Requirements & Environment")
+            # Clear custom style, letting theme take over
+            self.requirements_btn.setStyleSheet("")
+            
+        # Also update the home status summary if it exists
+        self._update_home_status_summary()
+
+    def _update_home_status_summary(self):
+        """Update the environment health summary on the home page."""
+        if not hasattr(self, 'home_status_summary'):
+            return
+            
+        any_needs_attention = any(getattr(card, 'needs_attention', False) for card in self.package_cards.values())
+        forced_msg = getattr(self, "_forced_env_attention_msg", None)
+        if any_needs_attention:
+            broken_count = sum(1 for card in self.package_cards.values() if getattr(card, 'status_text', '') == "BROKEN")
+            missing_count = sum(1 for card in self.package_cards.values() if getattr(card, 'status_text', '') == "MISSING")
+            wrong_ver_count = sum(1 for card in self.package_cards.values() if getattr(card, 'status_text', '') == "WRONG VERSION")
+            
+            issues = []
+            if broken_count > 0: issues.append(f"{broken_count} broken")
+            if missing_count > 0: issues.append(f"{missing_count} missing")
+            if wrong_ver_count > 0: issues.append(f"{wrong_ver_count} wrong version")
+            
+            summary = f"⚠️ Environment Health Alert: {', '.join(issues)}. Click here to fix."
+            self.home_status_summary.setText(summary)
+            self.home_status_summary.setStyleSheet("""
+                QLabel {
+                    color: #ffffff;
+                    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                        stop:0 rgba(244, 67, 54, 0.8), stop:1 rgba(211, 47, 47, 0.8));
+                    border: 1px solid rgba(255, 255, 255, 0.3);
+                    border-radius: 8px;
+                    padding: 10px 20px;
+                    margin-top: 15px;
+                    font-size: 12pt;
+                    font-weight: 700;
+                }
+                QLabel:hover {
+                    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                        stop:0 rgba(244, 67, 54, 1.0), stop:1 rgba(211, 47, 47, 1.0));
+                    border: 1px solid #ffffff;
+                }
+            """)
+            self.home_status_summary.show()
+        elif forced_msg:
+            summary = f"⚠️ Environment Health Alert: {forced_msg} (click to fix)."
+            self.home_status_summary.setText(summary)
+            self.home_status_summary.setStyleSheet("""
+                QLabel {
+                    color: #ffffff;
+                    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                        stop:0 rgba(244, 67, 54, 0.8), stop:1 rgba(211, 47, 47, 0.8));
+                    border: 1px solid rgba(255, 255, 255, 0.3);
+                    border-radius: 8px;
+                    padding: 10px 20px;
+                    margin-top: 15px;
+                    font-size: 12pt;
+                    font-weight: 700;
+                }
+                QLabel:hover {
+                    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                        stop:0 rgba(244, 67, 54, 1.0), stop:1 rgba(211, 47, 47, 1.0));
+                    border: 1px solid #ffffff;
+                }
+            """)
+            self.home_status_summary.show()
+        else:
+            self.home_status_summary.hide()
+
+    def _flag_environment_issue(self, message: str):
+        """Force-show environment alert (option C: trigger on model load failures)."""
+        try:
+            self._forced_env_attention_msg = (message or "Environment needs attention").strip()
+            self._update_requirements_tab_notice()
+        except Exception:
+            pass
+
+    def _show_env_issue_popup(self, title: str, message: str, details: str | None = None):
+        """Popup that explains the error and offers a direct fix path."""
+        try:
+            box = QMessageBox(self)
+            box.setIcon(QMessageBox.Critical)
+            box.setWindowTitle(title)
+            box.setText(message)
+            if details:
+                box.setDetailedText(details)
+
+            open_req_btn = box.addButton("Open Requirements", QMessageBox.AcceptRole)
+            run_repair_btn = box.addButton("Run Repair Environment", QMessageBox.DestructiveRole)
+            box.addButton("Close", QMessageBox.RejectRole)
+
+            box.exec()
+            clicked = box.clickedButton()
+            if clicked == open_req_btn:
+                try:
+                    self._switch_tab(self.tabs, 7)
+                    self._refresh_requirements_grid()
+                except Exception:
+                    pass
+            elif clicked == run_repair_btn:
+                try:
+                    self._switch_tab(self.tabs, 7)
+                    # Trigger the full installer repair flow (autonomous fixes)
+                    self._on_repair_environment()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    def _clear_forced_environment_issue(self):
+        """Clear forced environment alert (will still show if requirements detect issues)."""
+        self._forced_env_attention_msg = None
+        try:
+            self._update_requirements_tab_notice()
+        except Exception:
+            pass
+
+    def _on_package_checked(self, pkg_name, inst_ver, is_installed, is_functional, version_mismatch, status_text, status_color, needs_attention):
+        """Update a single card when check completes."""
+        if hasattr(self, 'requirements_progress'):
+            self.requirements_progress.setValue(self.requirements_progress.value() + 1)
+            
+        if pkg_name in self.package_cards:
+            card = self.package_cards[pkg_name]
+            card.update_status(inst_ver, is_installed, is_functional, version_mismatch, status_text, status_color, needs_attention)
+            
+            # Auto-check packages that need attention
+            if needs_attention:
+                self.selected_packages.add(pkg_name)
+            
+            self._update_install_selected_button()
+            # Live update the notice as we find issues
+            self._update_requirements_tab_notice()
+
+    def _on_all_requirements_checked(self):
+        """Enable refresh button and re-sort cards when finished."""
+        if hasattr(self, 'refresh_btn'):
+            self.refresh_btn.setEnabled(True)
+            self.refresh_btn.setText("🔄 Refresh Status")
+        if hasattr(self, 'requirements_progress'):
+            self.requirements_progress.hide()
+            
+        # Re-sort cards: items needing attention at the TOP
+        all_cards = list(self.package_cards.values())
+        needs_attention = [c for c in all_cards if getattr(c, 'needs_attention', False)]
+        ok_cards = [c for c in all_cards if not getattr(c, 'needs_attention', False)]
+        
+        # Maintain relative priority order within groups by using their current layout position
+        # Actually, simpler to just use the sorted order we had initially
+        sorted_all = needs_attention + ok_cards
+        
+        # Clear layouts
+        for layout in [self.requirements_col1, self.requirements_col2]:
+            while layout.count():
+                item = layout.takeAt(0)
+                # Don't delete widgets, we are just re-parenting them in layout
+        
+        # Re-distribute into columns
+        col1_pkgs = sorted_all[::2]
+        col2_pkgs = sorted_all[1::2]
+        
+        for cards, layout in [(col1_pkgs, self.requirements_col1), (col2_pkgs, self.requirements_col2)]:
+            for card in cards:
+                layout.addWidget(card)
+            layout.addStretch()
+            
+        self._update_requirements_tab_notice()
+        # If everything is OK, clear any forced alert from prior model failures.
+        try:
+            if len(needs_attention) == 0:
+                self._clear_forced_environment_issue()
+        except Exception:
+            pass
+        
+        # Startup popup (option C): if we found issues on startup, explain and redirect to fix.
+        try:
+            if not getattr(self, "_startup_env_popup_shown", False) and len(needs_attention) > 0:
+                self._startup_env_popup_shown = True
+                summary = f"{len(needs_attention)} requirement(s) need attention."
+                QTimer.singleShot(0, lambda: self._show_env_issue_popup(
+                    "Environment needs attention",
+                    "Some required components are missing/broken.\n\n"
+                    "Click 'Run Repair Environment' to apply the automatic fixes, or open Requirements to install the missing components.",
+                    details=summary
+                ))
+        except Exception:
+            pass
+        print(f"[GUI] Requirement checks complete. {len(needs_attention)} items need attention.")
 
     def _on_package_card_clicked(self, pkg_name):
         # Update selection state
@@ -7350,11 +8125,23 @@ except PackageNotFoundError:
 
         # Select package for action buttons
         self._selected_requirements_pkg = pkg_name
+        self._set_action_buttons_for_package(pkg_name)
 
-        # Get package status
+    def _set_action_buttons_for_package(self, pkg_name: str):
+        """Enable/disable install/repair/uninstall buttons based on current card status."""
+        pkg_card = self.package_cards.get(pkg_name)
+        if not pkg_card:
+            self.install_btn.setEnabled(False)
+            self.repair_btn.setEnabled(False)
+            self.uninstall_btn.setEnabled(False)
+            self.install_btn.setToolTip("Select a package")
+            self.repair_btn.setToolTip("Select a package")
+            self.uninstall_btn.setToolTip("Select a package")
+            return
+
         status = pkg_card.status_text
+        binary_packages_info = getattr(self, '_binary_packages_info', {})
 
-        # Configure buttons based on package status
         # Note: Repair now uses smart repair mode - only fixes broken packages, doesn't reinstall everything
         if status == "OK":
             self.install_btn.setEnabled(False)
@@ -7363,32 +8150,28 @@ except PackageNotFoundError:
             self.install_btn.setToolTip("Package already installed")
             self.repair_btn.setToolTip("Package is working correctly")
         elif status == "MISSING":
-            # Check if it's a binary package
-            binary_packages_info = getattr(self, '_binary_packages_info', {})
+            # Allow installing binary wheels directly (per-package) using the profile wheel URL.
+            self.install_btn.setEnabled(True)
             if pkg_name in binary_packages_info:
-                self.install_btn.setEnabled(False)
-                self.install_btn.setToolTip("Binary packages must be installed via 'Repair Environment' or the installer")
+                self.install_btn.setToolTip("Install this binary package from its profile wheel")
             else:
-                self.install_btn.setEnabled(True)
                 self.install_btn.setToolTip("Install this package")
-            self.repair_btn.setEnabled(True)  # Repair can install binary packages
+            # "Repair" acts as reinstall/force-fix for a single package (not full environment)
+            self.repair_btn.setEnabled(True)
             self.uninstall_btn.setEnabled(False)
-            if pkg_name not in binary_packages_info:
-                self.repair_btn.setToolTip("Package not installed")
-            else:
-                self.repair_btn.setToolTip("Repair will install binary packages from wheels")
+            self.repair_btn.setToolTip("Fix this package (single-package repair)")
         elif status == "WRONG VERSION":
             self.install_btn.setEnabled(True)
             self.repair_btn.setEnabled(True)
             self.uninstall_btn.setEnabled(True)
             self.install_btn.setToolTip("Update to correct version")
-            self.repair_btn.setToolTip("Repair will uninstall wrong version and install correct version")
+            self.repair_btn.setToolTip("Reinstall correct version (single-package repair)")
         else:  # BROKEN or other issues
             self.install_btn.setEnabled(True)
             self.repair_btn.setEnabled(True)
             self.uninstall_btn.setEnabled(True)
             self.install_btn.setToolTip("Update this package")
-            self.repair_btn.setToolTip("Repair environment (fixes broken/wrong packages)")
+            self.repair_btn.setToolTip("Fix this package (single-package repair)")
 
     def _run_pkg_task(self, pkg_name, action, checked=False):
         """Execute a package-specific task (install/repair/uninstall)."""
@@ -7397,36 +8180,71 @@ except PackageNotFoundError:
         self.requirements_log.append(f"<b>Executing {action} for {pkg_name}...</b>\n")
 
         # IMPORTANT:
-        # - Per-package install/uninstall must NOT trigger a full requirements install.
-        # - Repair is environment-level (uses InstallerV2 targeted repair).
-        if action == "repair":
-            self._run_installer_task("repair", f"Repairing environment (from {pkg_name})...")
-            return
+        # - Per-package install/repair/uninstall must NOT trigger a full environment repair.
+        # - Full environment repair remains available via the "Repair Environment" button.
 
         # Check if this is a binary package that needs special handling
         binary_packages_info = getattr(self, '_binary_packages_info', {})
-        if pkg_name in binary_packages_info and action == "install":
-            # Binary packages must be installed from wheel files via the installer
-            self.requirements_log.append(f"<b>Binary package detected: {pkg_name}</b>")
-            self.requirements_log.append("Binary packages must be installed via the installer (they come from GitHub wheels).")
-            self.requirements_log.append("Please use 'Repair Environment' or run the installer to install binary packages.")
-            self.requirements_log.append("\n<b>⚠️ Cannot install binary packages directly from this page.</b>")
-            return
+        is_binary = pkg_name in binary_packages_info
 
-        # For install/uninstall, run a single pip operation for just this package.
+        # Always run pip operations against the TARGET venv (LLM/.venv), not the bootstrap/app python.
+        target_python = self._get_target_venv_python() or sys.executable
+
+        def needs_cuda_bootstrap(name: str) -> bool:
+            if sys.platform != "win32":
+                return False
+            name = (name or "").lower()
+            return (
+                name in ["triton", "triton-windows"]
+                or name.startswith("nvidia-cuda-runtime")
+                or name.startswith("nvidia-cuda-nvcc")
+            )
+
+        # Track whether we should run the Windows CUDA linker bootstrap after pip succeeds.
+        self._pending_cuda_bootstrap = (action != "uninstall") and needs_cuda_bootstrap(pkg_name)
+        self._last_pip_pkg_name = pkg_name
+        self._last_pip_action = action
+
+        # For install/repair/uninstall, run a single pip operation for just this package.
         pkg_card = self.package_cards.get(pkg_name)
         version_spec = getattr(pkg_card, "required_version", "") if pkg_card else ""
 
-        # Skip "Binary (wheel)" and "Latest" - they're not valid version specs
-        if isinstance(version_spec, str) and version_spec:
-            if version_spec.lower() in ["latest", "binary (wheel)"]:
-                package_spec = pkg_name
-            elif version_spec.startswith("==") or version_spec.startswith(">=") or version_spec.startswith("<"):
-                package_spec = f"{pkg_name}{version_spec}"
+        # Resolve what we're installing:
+        # - Binary packages: check wheelhouse first, then fallback to wheel URL from profile
+        # - Regular packages: install from name+version spec (if any)
+        if is_binary:
+            pkg_info = binary_packages_info.get(pkg_name, {})
+            wheel_url = pkg_info.get("url")
+            if not wheel_url:
+                self.requirements_log.append(f"<b>❌ No wheel URL found for binary package: {pkg_name}</b>")
+                return
+            
+            # Check wheelhouse first (preferred source)
+            from pathlib import Path
+            llm_dir = Path(__file__).parent.parent
+            wheelhouse_dir = llm_dir / "wheelhouse"
+            wheel_filename = wheel_url.split("/")[-1]
+            wheel_path = wheelhouse_dir / wheel_filename if wheelhouse_dir.exists() else None
+            
+            if wheel_path and wheel_path.exists():
+                self.requirements_log.append(f"<b>Using wheel from wheelhouse: {wheel_filename}</b>\n")
+                package_spec = str(wheel_path)
+            else:
+                # Fallback to URL (may fail if GitHub URL is broken)
+                self.requirements_log.append(f"<b>⚠️ Wheelhouse not found or wheel missing. Trying GitHub URL...</b>\n")
+                self.requirements_log.append(f"<i>Note: If this fails with 404, use 'Repair Environment' to download wheels to wheelhouse first.</i>\n")
+                package_spec = wheel_url
+        else:
+            # Skip "Binary (wheel)" and "Latest" - they're not valid version specs
+            if isinstance(version_spec, str) and version_spec:
+                if version_spec.lower() in ["latest", "binary (wheel)"]:
+                    package_spec = pkg_name
+                elif version_spec.startswith(("==", ">=", "<")):
+                    package_spec = f"{pkg_name}{version_spec}"
+                else:
+                    package_spec = pkg_name
             else:
                 package_spec = pkg_name
-        else:
-            package_spec = pkg_name
 
         # Disable all cards during task
         for card in self.package_cards.values():
@@ -7435,8 +8253,9 @@ except PackageNotFoundError:
         self.repair_btn.setEnabled(False)
         self.uninstall_btn.setEnabled(False)
 
+        # Treat "repair" as a reinstall attempt for this one package.
         pip_action = "uninstall" if action == "uninstall" else "install"
-        self.pip_thread = PipPackageThread(pip_action, package_spec)
+        self.pip_thread = PipPackageThread(pip_action, package_spec, python_exe=str(target_python))
         self.pip_thread.log_output.connect(lambda m: self.requirements_log.append(m))
         self.pip_thread.finished_signal.connect(self._on_pip_task_finished)
         self.pip_thread.start()
@@ -7446,7 +8265,29 @@ except PackageNotFoundError:
             card.setEnabled(True)
         msg = "✅ Task completed successfully!" if success else "❌ Task failed. Check log for details."
         self.requirements_log.append(f"\n<b>{msg}</b>")
+
+        # If we installed/updated Triton/CUDA runtime on Windows, we must also bootstrap linker libs.
+        if success and getattr(self, "_pending_cuda_bootstrap", False) and sys.platform == "win32":
+            self.requirements_log.append("<b>Bootstrapping CUDA linker libraries for Triton...</b>")
+            from pathlib import Path
+            llm_dir = str(Path(__file__).parent.parent)
+            target_python = self._get_target_venv_python() or sys.executable
+            self.cuda_bootstrap_thread = CudaBootstrapThread(str(target_python), llm_dir)
+            self.cuda_bootstrap_thread.log_output.connect(lambda m: self.requirements_log.append(m))
+            self.cuda_bootstrap_thread.finished_signal.connect(
+                lambda ok: self._after_cuda_bootstrap_refresh(ok)
+            )
+            self.cuda_bootstrap_thread.start()
+            return
+
         self._refresh_requirements_grid()
+
+    def _after_cuda_bootstrap_refresh(self, ok: bool):
+        msg = "✅ CUDA linker bootstrap completed." if ok else "❌ CUDA linker bootstrap failed. Check log."
+        self.requirements_log.append(f"<b>{msg}</b>")
+        # Small delay to let filesystem writes settle before re-checking.
+        from PySide6.QtCore import QTimer
+        QTimer.singleShot(800, lambda: self._refresh_requirements_grid())
 
     def _on_selected_pkg_install(self, checked=False):
         if not self._selected_requirements_pkg:
@@ -7470,10 +8311,17 @@ except PackageNotFoundError:
         else:
             self.selected_packages.discard(pkg_name)
         
-        # Update Install Selected button state
-        self.install_selected_btn.setEnabled(len(self.selected_packages) > 0)
-        if len(self.selected_packages) > 0:
-            self.install_selected_btn.setText(f"📦 Install Selected ({len(self.selected_packages)})")
+        self._update_install_selected_button()
+        # If this package is currently selected for action buttons, refresh them live
+        if self._selected_requirements_pkg == pkg_name:
+            self._set_action_buttons_for_package(pkg_name)
+
+    def _update_install_selected_button(self):
+        """Refresh Install Selected button state/text from current selection"""
+        count = len(self.selected_packages)
+        self.install_selected_btn.setEnabled(count > 0)
+        if count > 0:
+            self.install_selected_btn.setText(f"📦 Install Selected ({count})")
         else:
             self.install_selected_btn.setText("📦 Install Selected Packages")
     
@@ -7486,42 +8334,118 @@ except PackageNotFoundError:
         self.requirements_log.clear()
         self.requirements_log.append(f"<b>Installing {len(self.selected_packages)} selected package(s)...</b><br>")
         
-        # Separate binary packages from regular packages
+        # Build a sequential queue: binary packages first (wheel URLs), then regular pip installs
         binary_packages_info = getattr(self, '_binary_packages_info', {})
         selected_binary = [pkg for pkg in self.selected_packages if pkg in binary_packages_info]
         selected_regular = [pkg for pkg in self.selected_packages if pkg not in binary_packages_info]
-        
-        # For binary packages, we need to use the installer (repair mode)
-        # The installer will install all binary packages from the profile, but that's OK
-        # since they're small and needed for Mamba/SSM models
-        if selected_binary:
-            self.requirements_log.append(f"<b>Binary package(s) selected: {', '.join(selected_binary)}</b><br>")
-            self.requirements_log.append("Binary packages require the installer. Running repair...<br>")
-            # Clear selection before starting (will be restored after)
-            temp_selected = list(self.selected_packages)
-            for pkg_name in temp_selected:
-                if pkg_name in self.package_cards:
-                    self.package_cards[pkg_name].checkbox.setChecked(False)
-            self._run_installer_task("repair", f"Installing selected packages: {', '.join(self.selected_packages)}")
-            self.selected_packages.clear()
-            return  # Don't install regular packages yet - wait for repair to complete
-        
-        # Install regular packages individually via pip
-        if selected_regular:
-            self.requirements_log.append(f"<b>Installing {len(selected_regular)} regular package(s): {', '.join(selected_regular)}</b><br>")
-            # Install them sequentially
-            for i, pkg_name in enumerate(selected_regular):
-                if i > 0:
-                    self.requirements_log.append("<br>")
-                self._run_pkg_task(pkg_name, "install", False)
-        
-        # Clear selection after starting installation
+
+        self._selected_install_queue = []
+        # Track if any selected package requires post-install CUDA linker bootstrap (Windows).
+        self._selected_bootstrap_needed = False
+        for pkg in selected_binary:
+            self._selected_install_queue.append(("binary", pkg))
+        for pkg in selected_regular:
+            self._selected_install_queue.append(("regular", pkg))
+
+        # Clear selection in UI before starting
         for pkg_name in list(self.selected_packages):
             if pkg_name in self.package_cards:
                 self.package_cards[pkg_name].checkbox.setChecked(False)
         self.selected_packages.clear()
-        self.install_selected_btn.setEnabled(False)
-        self.install_selected_btn.setText("📦 Install Selected Packages")
+        self._update_install_selected_button()
+
+        # Disable cards during installation
+        for card in self.package_cards.values():
+            card.setEnabled(False)
+
+        self.requirements_log.append(f"<b>Queued {len(self._selected_install_queue)} package(s) for install.</b><br>")
+        self._start_next_selected_install()
+
+    def _start_next_selected_install(self):
+        """Process the next package in the selected install queue sequentially."""
+        if not self._selected_install_queue:
+            self.requirements_log.append("<b>Selected package installation completed.</b>")
+            # If needed, run CUDA bootstrap before refreshing status.
+            if getattr(self, "_selected_bootstrap_needed", False) and sys.platform == "win32":
+                self.requirements_log.append("<b>Bootstrapping CUDA linker libraries for Triton...</b>")
+                from pathlib import Path
+                llm_dir = str(Path(__file__).parent.parent)
+                target_python = self._get_target_venv_python() or sys.executable
+                self.cuda_bootstrap_thread = CudaBootstrapThread(str(target_python), llm_dir)
+                self.cuda_bootstrap_thread.log_output.connect(lambda m: self.requirements_log.append(m))
+                self.cuda_bootstrap_thread.finished_signal.connect(lambda ok: self._after_cuda_bootstrap_refresh(ok))
+                self.cuda_bootstrap_thread.start()
+                return
+
+            # Refresh after installs finish - use delay to ensure pip has registered packages
+            self.requirements_log.append("<b>Refreshing package status...</b>")
+            from PySide6.QtCore import QTimer
+            QTimer.singleShot(1500, lambda: self._refresh_requirements_grid())
+            return
+
+        kind, pkg_name = self._selected_install_queue.pop(0)
+        target_python = self._get_target_venv_python() or sys.executable
+
+        # Mark if this package requires CUDA bootstrap after installs finish.
+        if sys.platform == "win32":
+            pn = (pkg_name or "").lower()
+            if pn in ["triton", "triton-windows"] or pn.startswith("nvidia-cuda-runtime") or pn.startswith("nvidia-cuda-nvcc"):
+                self._selected_bootstrap_needed = True
+
+        if kind == "binary":
+            pkg_info = getattr(self, "_binary_packages_info", {}).get(pkg_name, {})
+            wheel_url = pkg_info.get("url")
+            if not wheel_url:
+                self.requirements_log.append(f"<b>⚠️ No wheel URL for {pkg_name}; skipping.</b><br>")
+                self._start_next_selected_install()
+                return
+            
+            # Check wheelhouse first (preferred source)
+            from pathlib import Path
+            llm_dir = Path(__file__).parent.parent
+            wheelhouse_dir = llm_dir / "wheelhouse"
+            wheel_filename = wheel_url.split("/")[-1]
+            wheel_path = wheelhouse_dir / wheel_filename if wheelhouse_dir.exists() else None
+            
+            if wheel_path and wheel_path.exists():
+                self.requirements_log.append(f"<b>Installing {pkg_name} from wheelhouse...</b><br>")
+                package_spec = str(wheel_path)
+            else:
+                # Fallback to URL (may fail if GitHub URL is broken)
+                self.requirements_log.append(f"<b>Installing {pkg_name} from GitHub (wheelhouse not found)...</b><br>")
+                self.requirements_log.append(f"<i>Note: If this fails, use 'Repair Environment' to download wheels to wheelhouse first.</i><br>")
+                package_spec = wheel_url
+        else:
+            # Build package spec with version if present
+            pkg_card = self.package_cards.get(pkg_name)
+            version_spec = getattr(pkg_card, "required_version", "") if pkg_card else ""
+            if isinstance(version_spec, str) and version_spec:
+                if version_spec.lower() in ["latest", "binary (wheel)"]:
+                    package_spec = pkg_name
+                elif version_spec.startswith(("==", ">=", "<")):
+                    package_spec = f"{pkg_name}{version_spec}"
+                else:
+                    package_spec = pkg_name
+            else:
+                package_spec = pkg_name
+            self.requirements_log.append(f"<b>Installing {pkg_name}...</b><br>")
+
+        self.pip_thread = PipPackageThread("install", package_spec, python_exe=str(target_python))
+        self.pip_thread.log_output.connect(lambda m: self.requirements_log.append(m))
+        self.pip_thread.finished_signal.connect(lambda success, pkg=pkg_name: self._on_selected_install_finished(pkg, success))
+        self.pip_thread.start()
+
+    def _on_selected_install_finished(self, pkg_name: str, success: bool):
+        if success:
+            msg = f"{pkg_name} installed successfully"
+        else:
+            msg = f"Failed to install {pkg_name}"
+            # Check if it's a binary package and suggest using Repair Environment
+            binary_packages_info = getattr(self, "_binary_packages_info", {})
+            if pkg_name in binary_packages_info:
+                msg += "<br><i>💡 Tip: Binary packages may need to be downloaded to wheelhouse first. Try 'Repair Environment' button.</i>"
+        self.requirements_log.append(f"<b>{msg}</b><br>")
+        self._start_next_selected_install()
 
     def _on_install_requirements(self):
         self._run_installer_task("dependencies", "Installing requirements...")
@@ -7536,12 +8460,27 @@ except PackageNotFoundError:
 
     def _run_installer_task(self, task_type, start_msg):
         self.requirements_log.append(f"<b>{start_msg}</b>\n")
+        # Capture installer output for error popups (plain text tail)
+        self._installer_output_lines = []
         
         # Disable all cards during task
         for card in self.package_cards.values(): card.setEnabled(False)
         
         self.installer_thread = InstallerThread(task_type)
-        self.installer_thread.log_output.connect(lambda m: self.requirements_log.append(m))
+        def _capture_and_append(m: str):
+            try:
+                self.requirements_log.append(m)
+            except Exception:
+                pass
+            try:
+                self._installer_output_lines.append(str(m))
+                # Keep last ~300 lines to avoid unbounded growth
+                if len(self._installer_output_lines) > 300:
+                    self._installer_output_lines = self._installer_output_lines[-300:]
+            except Exception:
+                pass
+
+        self.installer_thread.log_output.connect(_capture_and_append)
         self.installer_thread.finished_signal.connect(self._on_installer_task_finished)
         self.installer_thread.start()
 
@@ -7550,6 +8489,21 @@ except PackageNotFoundError:
             card.setEnabled(True)
         msg = "✅ Task completed successfully!" if success else "❌ Task failed. Check log for details."
         self.requirements_log.append(f"\n<b>{msg}</b>")
+
+        # If repair/install failed, show a popup with the actual reason + direct buttons.
+        if not success:
+            try:
+                tail = "\n".join((getattr(self, "_installer_output_lines", []) or [])[-60:])
+                self._flag_environment_issue("Installer/repair failed. Click to fix.")
+                QTimer.singleShot(0, lambda: self._show_env_issue_popup(
+                    "Repair failed",
+                    "The automatic repair started but failed.\n\n"
+                    "Click 'Run Repair Environment' to retry after fixes, or open Requirements to inspect and install missing items.",
+                    details=tail or None
+                ))
+            except Exception:
+                pass
+
         # Force refresh requirements grid to show updated package status
         self.requirements_log.append("<b>Refreshing package status...</b>")
         # Clear package cards cache and selected packages to force fresh check
@@ -7574,7 +8528,7 @@ except PackageNotFoundError:
         title_layout.setSpacing(0)
         
         # Title text (centered)
-        title = QLabel("ℹ️ About LLM Fine-tuning Studio")
+        title = QLabel("ℹ️ About OWLLM")
         title.setAlignment(Qt.AlignCenter)
         title.setStyleSheet("font-size: 24pt; font-weight: bold; text-decoration: none;")
         title_layout.addWidget(title)
@@ -7606,7 +8560,7 @@ except PackageNotFoundError:
         
         credits_text = QLabel("""
 <p style="line-height: 1.4;">
-<b>LLM Fine-tuning Studio</b> - A user-friendly desktop application for fine-tuning Large Language Models<br><br>
+<b>OWLLM</b> - A user-friendly desktop application for fine-tuning Large Language Models<br><br>
 
 <b>Development:</b><br>
 • Built with modern Python technologies and AI-assisted development<br>
@@ -8756,7 +9710,7 @@ def main() -> int:
         # Show splash screen with minimal info
         splash = SplashScreen()
         splash.show()
-        splash.update_progress(10, "Starting up", "Initializing LLM Fine-tuning Studio...")
+        splash.update_progress(10, "Starting up", "Initializing OWLLM...")
         app.processEvents()  # Force display
         
         # Create main window quickly (NO detection during init - pass None for splash)

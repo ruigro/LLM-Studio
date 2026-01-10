@@ -2077,8 +2077,54 @@ print(device_name)
                 # Install packages from profile
                 self.log("Installing packages from profile...")
                 packages_to_install = []
+                # Separate CUDA runtime packages (need to be installed early for Triton)
+                cuda_runtime_packages = []
+                other_packages = []
+                
                 for pkg_name, pkg_version in package_versions.items():
-                    packages_to_install.append(f"{pkg_name}=={pkg_version}")
+                    # Handle version specifiers properly
+                    if any(op in pkg_version for op in [">=", "<=", ">", "<", "!=", ","]):
+                        pkg_spec = f"{pkg_name}{pkg_version}"  # Use as-is for ranges
+                    elif ".*" in pkg_version:
+                        pkg_spec = f"{pkg_name}{pkg_version}"  # Use as-is for wildcards (e.g., "12.1.*")
+                    else:
+                        pkg_spec = f"{pkg_name}=={pkg_version}"  # Exact version
+                    
+                    # CUDA runtime packages should be installed before Triton
+                    if "nvidia-cuda-runtime" in pkg_name or "nvidia-cuda-nvcc" in pkg_name:
+                        cuda_runtime_packages.append(pkg_spec)
+                    else:
+                        other_packages.append(pkg_spec)
+                
+                # Install CUDA runtime packages first (needed for Triton compilation)
+                if cuda_runtime_packages:
+                    self.log(f"Installing CUDA runtime packages ({len(cuda_runtime_packages)} packages)...")
+                    cmd = [python_executable, "-m", "pip", "install"] + cuda_runtime_packages
+                    result = subprocess.run(cmd, capture_output=True, text=True, timeout=600, **self.subprocess_flags)
+                    if result.returncode != 0:
+                        self.log(f"Warning: CUDA runtime packages installation had issues: {result.stderr[:500]}")
+                    else:
+                        self.log("✓ CUDA runtime packages installed")
+                
+                # Install binary packages from wheels (if any)
+                if binary_packages:
+                    self.log(f"Installing {len(binary_packages)} binary package(s) from wheels...")
+                    for pkg_name, pkg_info in binary_packages.items():
+                        wheel_url = pkg_info.get("url")
+                        if not wheel_url:
+                            continue
+                        
+                        self.log(f"Installing {pkg_name} from wheel...")
+                        # Use --no-deps for binary wheels to prevent version mismatches
+                        cmd = [python_executable, "-m", "pip", "install", "--no-deps", wheel_url]
+                        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300, **self.subprocess_flags)
+                        if result.returncode == 0:
+                            self.log(f"✓ {pkg_name} installed")
+                        else:
+                            self.log(f"Warning: Failed to install {pkg_name} from wheel: {result.stderr[:200]}")
+
+                # Then install other packages
+                packages_to_install = other_packages
                 
                 if packages_to_install:
                     cmd = [
@@ -2101,6 +2147,13 @@ print(device_name)
                     self.log("✓ Packages installed from profile")
                 else:
                     raise RuntimeError("No packages found in profile")
+                
+                # Apply CUDA library bootstrapping and Triton patches immediately after installation
+                if platform.system() == "Windows":
+                    self.log("Applying Windows-specific Triton fixes...")
+                    self._bootstrap_cuda_libs(python_executable)
+                    self._patch_triton_runtime_build(python_executable)
+                    self._patch_triton_windows_utils(python_executable)
                     
             except Exception as e:
                 self.log(f"ERROR: Failed to load/install from profile: {e}")
@@ -2454,7 +2507,7 @@ if errorlevel 1 (
                     [check_python, "-c", f"import {module_name}; print({module_name}.__version__)"],
                     capture_output=True,
                     text=True,
-                    timeout=10,
+                    timeout=3,  # Reduced from 10s to 3s for faster failure detection
                     **self.subprocess_flags
                 )
                 if result.returncode == 0:
@@ -2507,7 +2560,7 @@ if errorlevel 1 (
                     [check_python, "-c", "import triton; import triton.language as tl; import sys; print(sys.executable); print('triton', triton.__version__)"],
                     capture_output=True,
                     text=True,
-                    timeout=10,
+                    timeout=3,  # Reduced from 10s to 3s for faster failure detection
                     **self.subprocess_flags
                 )
                 if result.returncode == 0:
@@ -2545,7 +2598,7 @@ if errorlevel 1 (
                     [check_python, "-c", f"import {module_name}; print('OK')"],
                     capture_output=True,
                     text=True,
-                    timeout=10,
+                    timeout=3,  # Reduced from 10s to 3s for faster failure detection
                     **self.subprocess_flags
                 )
                 if result.returncode == 0:
@@ -2555,7 +2608,7 @@ if errorlevel 1 (
                             [check_python, "-c", f"import {module_name}; print({module_name}.__version__)"],
                             capture_output=True,
                             text=True,
-                            timeout=10,
+                            timeout=3,  # Reduced from 10s to 3s for faster failure detection
                             **self.subprocess_flags
                         )
                         if ver_result.returncode == 0:
@@ -2728,6 +2781,447 @@ if errorlevel 1 (
                 }
         return {"status": "unknown", "version": None, "status_text": "? Not found in checklist"}
     
+    def _get_cuda_version_from_torch(self, python_executable: str) -> Optional[str]:
+        """
+        Get CUDA version from PyTorch installation.
+        
+        Args:
+            python_executable: Path to Python executable
+            
+        Returns:
+            CUDA version string (e.g., "12.1") or None if not available
+        """
+        try:
+            cmd = [
+                python_executable, "-c",
+                "import torch; print(torch.version.cuda if hasattr(torch.version, 'cuda') and torch.cuda.is_available() else '')"
+            ]
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30, **self.subprocess_flags)
+            if result.returncode == 0 and result.stdout.strip():
+                cuda_version = result.stdout.strip()
+                if cuda_version:
+                    # Extract major.minor version (e.g., "12.1" from "12.1.0")
+                    parts = cuda_version.split('.')
+                    if len(parts) >= 2:
+                        return f"{parts[0]}.{parts[1]}"
+                    return cuda_version
+        except Exception as e:
+            self.log(f"Warning: Could not detect CUDA version from PyTorch: {e}")
+        return None
+    
+    def _find_cuda_library_path(self, python_executable: str) -> Optional[str]:
+        """
+        Find CUDA library path (cuda.lib) for linking.
+        Checks multiple locations including CUDA toolkit installation.
+        
+        Args:
+            python_executable: Path to Python executable
+            
+        Returns:
+            Path to directory containing cuda.lib, or None if not found
+        """
+        import sysconfig
+        from pathlib import Path
+        
+        # Check 1: nvidia pip package (might have libs)
+        platlib = sysconfig.get_paths()["platlib"]
+        nvidia_lib_path = Path(platlib) / "nvidia" / "cuda_runtime" / "lib" / "x64"
+        if (nvidia_lib_path / "cuda.lib").exists():
+            return str(nvidia_lib_path)
+        
+        # Check 2: CUDA toolkit installation (system-wide)
+        cuda_toolkit_paths = [
+            r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA",
+            r"C:\Program Files (x86)\NVIDIA GPU Computing Toolkit\CUDA"
+        ]
+        
+        for base_path in cuda_toolkit_paths:
+            base = Path(base_path)
+            if base.exists():
+                # Check all CUDA versions (v12.x, v11.x, etc.)
+                for version_dir in base.iterdir():
+                    if version_dir.is_dir() and version_dir.name.startswith('v'):
+                        lib_path = version_dir / "lib" / "x64"
+                        if (lib_path / "cuda.lib").exists():
+                            return str(lib_path)
+        
+        # Check 3: Environment variables
+        for env_var in ["CUDA_PATH", "CUDA_HOME"]:
+            cuda_path = os.environ.get(env_var)
+            if cuda_path:
+                lib_path = Path(cuda_path) / "lib" / "x64"
+                if (lib_path / "cuda.lib").exists():
+                    return str(lib_path)
+        
+        return None
+    
+    def _install_cuda_headers(self, python_executable: str, torch_version: Optional[str] = None) -> bool:
+        """
+        Install CUDA headers required for Triton compilation on Windows.
+        
+        Args:
+            python_executable: Path to Python executable
+            torch_version: Optional PyTorch version string (for logging)
+            
+        Returns:
+            True if installation succeeded or headers already available, False otherwise
+        """
+        try:
+            # Check if CUDA headers are already available
+            import sysconfig
+            platlib = sysconfig.get_paths()["platlib"]
+            nvidia_path = Path(platlib) / "nvidia" / "cuda_runtime" / "include" / "cuda.h"
+            if nvidia_path.exists():
+                self.log("CUDA headers already available")
+                return True
+            
+            # Get CUDA version from PyTorch
+            cuda_version = self._get_cuda_version_from_torch(python_executable)
+            if not cuda_version:
+                self.log("Warning: Could not detect CUDA version. Skipping CUDA headers installation.")
+                return False
+            
+            # Map CUDA version to package version
+            # For CUDA 12.x, use nvidia-cuda-runtime-cu12
+            # For CUDA 11.x, use nvidia-cuda-runtime-cu11
+            if cuda_version.startswith("12."):
+                package_spec = f"nvidia-cuda-runtime-cu12=={cuda_version}.*"
+            elif cuda_version.startswith("11."):
+                package_spec = f"nvidia-cuda-runtime-cu11=={cuda_version}.*"
+            else:
+                self.log(f"Warning: Unsupported CUDA version {cuda_version}. Skipping CUDA headers installation.")
+                return False
+            
+            self.log(f"Installing CUDA headers for CUDA {cuda_version}...")
+            success, last_lines, exit_code = self._run_pip_worker(
+                action="install",
+                package=package_spec,
+                python_executable=python_executable,
+                pip_args=[]
+            )
+            
+            if success:
+                # Verify headers were installed
+                if nvidia_path.exists():
+                    self.log(f"✓ CUDA headers installed successfully for CUDA {cuda_version}")
+                    return True
+                else:
+                    self.log(f"Warning: CUDA headers package installed but headers not found at expected location")
+                    return False
+            else:
+                self.log(f"Warning: Failed to install CUDA headers (exit code {exit_code})")
+                return False
+                
+        except Exception as e:
+            self.log(f"Error installing CUDA headers: {e}")
+            return False
+    
+    def _install_cuda_nvcc(self, python_executable: str, cuda_version: str) -> bool:
+        """
+        Install nvidia-cuda-nvcc package which may include additional CUDA libraries.
+        
+        Args:
+            python_executable: Path to Python executable
+            cuda_version: CUDA version string (e.g., "12.1")
+            
+        Returns:
+            True if installation succeeded, False otherwise
+        """
+        try:
+            if cuda_version.startswith("12."):
+                package_spec = f"nvidia-cuda-nvcc-cu12=={cuda_version}.*"
+            elif cuda_version.startswith("11."):
+                package_spec = f"nvidia-cuda-nvcc-cu11=={cuda_version}.*"
+            else:
+                return False
+            
+            self.log(f"Installing nvidia-cuda-nvcc for CUDA {cuda_version} (may include CUDA libraries)...")
+            success, last_lines, exit_code = self._run_pip_worker(
+                action="install",
+                package=package_spec,
+                python_executable=python_executable,
+                pip_args=[]
+            )
+            
+            if success:
+                self.log(f"✓ nvidia-cuda-nvcc installed successfully")
+                return True
+            else:
+                self.log(f"Warning: Failed to install nvidia-cuda-nvcc (exit code {exit_code})")
+                return False
+                
+        except Exception as e:
+            self.log(f"Error installing nvidia-cuda-nvcc: {e}")
+            return False
+
+    def _get_platlib_for_python(self, python_executable: str) -> Optional[Path]:
+        """Return sysconfig platlib for a given Python executable."""
+        try:
+            cmd = [python_executable, "-c", "import sysconfig; print(sysconfig.get_paths()['platlib'])"]
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30, **self.subprocess_flags)
+            if result.returncode == 0 and result.stdout:
+                p = Path(result.stdout.strip())
+                if p.exists():
+                    return p
+        except Exception:
+            pass
+        return None
+
+    def _get_baseprefix_and_pyver(self, python_executable: str) -> tuple[Optional[Path], Optional[str]]:
+        """Return (sys.base_prefix, python_version_digits) for python_executable."""
+        try:
+            cmd = [
+                python_executable,
+                "-c",
+                "import sys, sysconfig; print(sys.base_prefix); print(sysconfig.get_python_version())",
+            ]
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30, **self.subprocess_flags)
+            if result.returncode == 0 and result.stdout:
+                lines = [l.strip() for l in result.stdout.splitlines() if l.strip()]
+                if len(lines) >= 2:
+                    base = Path(lines[0])
+                    ver = lines[1].replace(".", "")
+                    return base, ver
+        except Exception:
+            pass
+        return None, None
+    
+    def _bootstrap_cuda_libs(self, python_executable: str) -> bool:
+        """
+        Generate compatible MinGW import libs for Triton JIT builds on Windows:
+        - libcuda.a / cuda.lib from nvcuda.dll (CUDA driver)
+        - libpythonXY.dll.a from pythonXY.dll (Python import symbols)
+
+        Without these, MinGW ld will fail with undefined references to __imp_Py* symbols.
+        """
+        try:
+            platlib = self._get_platlib_for_python(python_executable)
+            if not platlib:
+                self.log("Warning: could not determine target platlib for bootstrap.")
+                return False
+            
+            # Location 1: Triton's own backend lib folder (used by compiler directly)
+            triton_lib_dir = Path(platlib) / "triton" / "backends" / "nvidia" / "lib"
+            # Location 2: Standard NVIDIA pip layout (used by Triton detection logic)
+            pip_lib_dir = Path(platlib) / "nvidia" / "cuda_runtime" / "lib" / "x64"
+            
+            for d in [triton_lib_dir, pip_lib_dir]:
+                if not d.exists():
+                    d.mkdir(parents=True, exist_ok=True)
+            
+            # Check for system nvcuda.dll
+            nvcuda_dll = Path("C:\\Windows\\System32\\nvcuda.dll")
+            if not nvcuda_dll.exists():
+                self.log("Warning: C:\\Windows\\System32\\nvcuda.dll not found. Linker bootstrapping skipped.")
+                return False
+            
+            self.log(f"Bootstrapping CUDA linker libraries from {nvcuda_dll}...")
+            
+            # Find MinGW tools (gendef, dlltool)
+            mingw_bin = Path("C:\\mingw64\\bin")
+            gendef = mingw_bin / "gendef.exe"
+            dlltool = mingw_bin / "dlltool.exe"
+            
+            if not gendef.exists() or not dlltool.exists():
+                from shutil import which
+                gendef_path = which("gendef")
+                dlltool_path = which("dlltool")
+                if not gendef_path or not dlltool_path:
+                    self.log("Warning: MinGW tools (gendef/dlltool) not found. Cannot bootstrap CUDA libraries.")
+                    return False
+                gendef = Path(gendef_path)
+                dlltool = Path(dlltool_path)
+
+            # Generate in Triton's lib dir first
+            def_file = triton_lib_dir / "nvcuda.def"
+            libcuda_a = triton_lib_dir / "libcuda.a"
+            cuda_lib = triton_lib_dir / "cuda.lib"
+            
+            self.log("  Generating nvcuda.def...")
+            subprocess.run([str(gendef), str(nvcuda_dll)], cwd=str(triton_lib_dir), capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0)
+            
+            self.log("  Building libcuda.a (MinGW format)...")
+            subprocess.run([str(dlltool), "-d", "nvcuda.def", "-l", "libcuda.a", "-D", "nvcuda.dll"], cwd=str(triton_lib_dir), capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0)
+            
+            import shutil
+            shutil.copy2(libcuda_a, cuda_lib)
+            
+            # Copy to PIP location to satisfy Triton's check_cuda_pip()
+            shutil.copy2(libcuda_a, pip_lib_dir / "libcuda.a")
+            shutil.copy2(cuda_lib, pip_lib_dir / "cuda.lib")
+
+            # Also bootstrap Python import library for MinGW linking.
+            base_prefix, pyver = self._get_baseprefix_and_pyver(python_executable)
+            if base_prefix and pyver:
+                python_dll = base_prefix / f"python{pyver}.dll"
+                if python_dll.exists():
+                    self.log(f"Bootstrapping Python import library from {python_dll}...")
+                    py_def = triton_lib_dir / "python.def"
+                    py_lib = triton_lib_dir / f"libpython{pyver}.dll.a"
+                    subprocess.run([str(gendef), str(python_dll)], cwd=str(triton_lib_dir), capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0)
+                    # gendef writes <dllname>.def (e.g. python312.def). normalize to python.def if needed.
+                    generated_def = triton_lib_dir / f"python{pyver}.def"
+                    if generated_def.exists():
+                        generated_def.replace(py_def)
+                    subprocess.run(
+                        [str(dlltool), "-d", py_def.name, "-l", py_lib.name, "-D", python_dll.name],
+                        cwd=str(triton_lib_dir),
+                        capture_output=True,
+                        creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0,
+                    )
+                    if py_lib.exists():
+                        self.log(f"✓ Python import library ready: {py_lib.name}")
+                else:
+                    self.log(f"Warning: {python_dll} not found; Python import library not bootstrapped.")
+            else:
+                self.log("Warning: could not determine Python DLL for import-lib bootstrap.")
+            
+            self.log("✓ Successfully bootstrapped CUDA linker libraries in all locations")
+            return True
+            
+        except Exception as e:
+            self.log(f"Warning: Exception during CUDA library bootstrapping: {e}")
+            return False
+
+    def _patch_triton_runtime_build(self, python_executable: str) -> bool:
+        """Patch triton/runtime/build.py so MinGW links against libpythonXY.dll.a on Windows."""
+        try:
+            platlib = self._get_platlib_for_python(python_executable)
+            if not platlib:
+                self.log("Warning: could not determine target platlib for triton build patch.")
+                return False
+            build_py = Path(platlib) / "triton" / "runtime" / "build.py"
+            if not build_py.exists():
+                self.log("Warning: triton runtime/build.py not found. Skipping build patch.")
+                return False
+
+            content = build_py.read_text(encoding="utf-8")
+            if "libpython" in content and "python_version().replace" in content and "-lpython" in content:
+                # Likely already patched.
+                return True
+
+            needle = "cc_cmd += [f'-l{lib}' for lib in libraries]"
+            if needle not in content:
+                self.log("Warning: build.py format unexpected; cannot patch safely.")
+                return False
+
+            injection = (
+                "cc_cmd += [f'-l{lib}' for lib in libraries]\n"
+                "        if os.name == \"nt\":\n"
+                "            # MinGW needs explicit Python import library (libpythonXY.dll.a).\n"
+                "            pyver = sysconfig.get_python_version().replace(\".\", \"\")\n"
+                "            cc_cmd += [f\"-lpython{pyver}\"]\n"
+            )
+            content = content.replace(needle, injection, 1)
+            build_py.write_text(content, encoding="utf-8")
+            self.log("✓ Patched triton/runtime/build.py to link libpythonXY")
+            return True
+        except Exception as e:
+            self.log(f"Warning: Failed to patch triton runtime/build.py: {e}")
+            return False
+
+    def _patch_triton_windows_utils(self, python_executable: str) -> bool:
+        """
+        Patch triton's windows_utils.py to fix CUDA detection issues.
+        This applies the fixes we made earlier to the installed triton package.
+        
+        Args:
+            python_executable: Path to Python executable
+            
+        Returns:
+            True if patching succeeded or not needed, False otherwise
+        """
+        try:
+            platlib = self._get_platlib_for_python(python_executable) or Path(sysconfig.get_paths()["platlib"])
+            windows_utils_path = Path(platlib) / "triton" / "windows_utils.py"
+            
+            if not windows_utils_path.exists():
+                self.log("Warning: triton windows_utils.py not found. Skipping patch.")
+                return False
+            
+            # Read the file
+            content = windows_utils_path.read_text(encoding='utf-8')
+            original_content = content
+            
+            # Check if already patched (look for our lenient check function)
+            if "check_cuda_pip_headers_only" in content:
+                self.log("triton windows_utils.py already patched")
+                return True
+            
+            # Apply patch 1: Fix find_winsdk_registry return value (line ~176)
+            if 'except OSError:\n        return None' in content and 'find_winsdk_registry' in content.split('except OSError:\n        return None')[0].split('def find_winsdk_registry')[1]:
+                content = content.replace(
+                    'except OSError:\n        return None',
+                    'except OSError:\n        return None, None',
+                    1  # Only replace first occurrence
+                )
+                self.log("Applied patch: Fixed find_winsdk_registry return value")
+            
+            # Apply patch 2: Add lenient CUDA header check function after check_cuda_pip
+            if "def check_cuda_pip_headers_only" not in content:
+                # Find the end of check_cuda_pip function
+                check_cuda_pip_end = content.find("def find_cuda_pip():")
+                if check_cuda_pip_end > 0:
+                    # Insert the new function before find_cuda_pip
+                    new_function = '''
+
+def check_cuda_pip_headers_only(nvidia_base_path):
+    """Check if CUDA headers are available via pip (more lenient check)"""
+    return (nvidia_base_path / "cuda_runtime" / "include" / "cuda.h").exists()
+'''
+                    content = content[:check_cuda_pip_end] + new_function + content[check_cuda_pip_end:]
+                    self.log("Applied patch: Added check_cuda_pip_headers_only function")
+            
+            # Apply patch 3: Update find_cuda_pip to use lenient check
+            if "check_cuda_pip_headers_only" in content and 'if check_cuda_pip_headers_only(nvidia_base_path):' not in content:
+                # Find the return statement in find_cuda_pip
+                find_cuda_pip_start = content.find("def find_cuda_pip():")
+                if find_cuda_pip_start > 0:
+                    # Find the return None, [], [] at the end of find_cuda_pip
+                    find_cuda_pip_section = content[find_cuda_pip_start:]
+                    find_cuda_pip_end = find_cuda_pip_section.find("\n\n", find_cuda_pip_section.find("return None, [], []"))
+                    if find_cuda_pip_end == -1:
+                        find_cuda_pip_end = find_cuda_pip_section.find("\ndef ", 100)
+                    
+                    if find_cuda_pip_end > 0:
+                        old_section = find_cuda_pip_section[:find_cuda_pip_end]
+                        if 'return None, [], []' in old_section and 'check_cuda_pip_headers_only' not in old_section:
+                            # Insert lenient check before the final return
+                            old_return = old_section.rfind('    return None, [], []')
+                            if old_return > 0:
+                                new_section = (
+                                    old_section[:old_return] +
+                                    '''    # More lenient check: if headers exist, return them even without other components
+    if check_cuda_pip_headers_only(nvidia_base_path):
+        bin_path = str(nvidia_base_path / "cuda_nvcc" / "bin") if (nvidia_base_path / "cuda_nvcc" / "bin").exists() else None
+        lib_dirs = [str(nvidia_base_path / "cuda_runtime" / "lib" / "x64")] if (nvidia_base_path / "cuda_runtime" / "lib" / "x64").exists() else []
+        return (
+            bin_path,
+            [str(nvidia_base_path / "cuda_runtime" / "include")],
+            lib_dirs,
+        )
+
+''' +
+                                    old_section[old_return:]
+                                )
+                                content = content[:find_cuda_pip_start] + new_section + content[find_cuda_pip_start + find_cuda_pip_end:]
+                                self.log("Applied patch: Updated find_cuda_pip with lenient header check")
+            
+            # Only write if content changed
+            if content != original_content:
+                windows_utils_path.write_text(content, encoding='utf-8')
+                self.log("✓ Successfully patched triton windows_utils.py")
+                return True
+            else:
+                self.log("triton windows_utils.py did not need patching")
+                return True
+            
+        except Exception as e:
+            self.log(f"Warning: Failed to patch triton windows_utils.py: {e}")
+            import traceback
+            self.log(traceback.format_exc())
+            return False
+    
     def _verify_torch(self, target_python: str) -> Tuple[bool, Optional[str], Optional[bool], Optional[str]]:
         """
         Verify torch installation using target venv Python ONLY (minimal logging for performance).
@@ -2827,7 +3321,7 @@ if errorlevel 1 (
                 verify_cmd,
                 capture_output=True,
                 text=True,
-                timeout=30,
+                timeout=5,  # Reduced from 30s to 5s for faster failure detection
                 **self.subprocess_flags
             )
             
@@ -2895,7 +3389,7 @@ if errorlevel 1 (
                 verify_cmd,
                 capture_output=True,
                 text=True,
-                timeout=30,
+                timeout=5,  # Reduced from 30s to 5s for faster failure detection
                 **self.subprocess_flags
             )
             
@@ -2973,7 +3467,7 @@ if errorlevel 1 (
                 verify_cmd,
                 capture_output=True,
                 text=True,
-                timeout=30,
+                timeout=3,  # Reduced from 30s to 3s for faster failure detection
                 **self.subprocess_flags
             )
             return verify_result.returncode == 0
@@ -3191,6 +3685,35 @@ if errorlevel 1 (
                 if not torch_ok:
                     return False, f"torch must be installed and working before installing triton: {torch_error}"
                 
+                # CRITICAL: Install CUDA headers if CUDA is available (required for Triton compilation on Windows)
+                if torch_cuda:
+                    self.log("CUDA detected - installing CUDA headers for Triton compilation...")
+                    cuda_header_success = self._install_cuda_headers(python_executable, torch_ver)
+                    if not cuda_header_success:
+                        self.log("Warning: CUDA headers installation failed. Triton may fail to compile CUDA code.")
+                    else:
+                        self.log("✓ CUDA headers installed successfully")
+                    
+                    # Check for CUDA library (cuda.lib) needed for linking
+                    cuda_lib_path = self._find_cuda_library_path(python_executable)
+                    if not cuda_lib_path:
+                        self.log("Warning: CUDA library (cuda.lib) not found.")
+                        # Try installing nvidia-cuda-nvcc which might include libraries
+                        cuda_version = self._get_cuda_version_from_torch(python_executable)
+                        if cuda_version:
+                            self.log("Attempting to install nvidia-cuda-nvcc (may include CUDA libraries)...")
+                            self._install_cuda_nvcc(python_executable, cuda_version)
+                            # Check again after installation
+                            cuda_lib_path = self._find_cuda_library_path(python_executable)
+                        
+                        if not cuda_lib_path:
+                            self.log("  CUDA library still not found. Triton compilation may fail.")
+                            self.log("  To fix, install NVIDIA CUDA Toolkit from:")
+                            self.log("  https://developer.nvidia.com/cuda-downloads")
+                            self.log("  Or set CUDA_PATH environment variable to CUDA installation")
+                    else:
+                        self.log(f"✓ CUDA library found at: {cuda_lib_path}")
+                
                 # Install triton-windows for Windows (package name), triton for others
                 if platform.system() == "Windows":
                     pkg_spec = "triton-windows"
@@ -3205,6 +3728,11 @@ if errorlevel 1 (
                     pip_args=["--force-reinstall", "--no-deps"]
                 )
                 if success:
+                    # Patch triton's windows_utils.py to improve CUDA detection (after installation)
+                    if platform.system() == "Windows":
+                        self.log("Applying fixes to triton's CUDA detection...")
+                        self._patch_triton_windows_utils(python_executable)
+                    
                     # Verify using target Python with exact command specified
                     self.log("Verifying triton installation...")
                     verify_cmd = [

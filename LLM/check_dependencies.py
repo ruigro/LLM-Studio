@@ -94,8 +94,11 @@ def verify_all():
     """Verify all critical dependencies"""
     checks = [
         ("numpy", "<2.0.0"),
-        ("transformers", ">=4.51.3,!=4.52.*,!=4.53.*,!=4.54.*,!=4.55.*,!=4.57.0,<4.58"),
-        ("tokenizers", ">=0.21,<0.22"),  # Updated to match transformers 4.51.3 requirement
+        # Keep this broad enough to avoid forcing unnecessary repair loops.
+        # The actual pinned versions come from the hardware profile / installer.
+        ("transformers", ">=4.51.0,<4.60.0"),
+        ("tokenizers", ">=0.21.0,<0.24.0"),
+        ("huggingface-hub", ">=0.30.0,<1.0"),
         ("datasets", ">=2.11.0,<4.4.0"),
     ]
     
