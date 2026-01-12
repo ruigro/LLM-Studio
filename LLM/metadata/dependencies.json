@@ -8,9 +8,9 @@
       "cuda_driver_min": "12.4",
       "torch_index": "https://download.pytorch.org/whl/cu124",
       "packages": {
-        "torch": "2.5.1+cu124",
-        "torchvision": "0.20.1+cu124",
-        "torchaudio": "2.5.1+cu124"
+        "torch": "2.6.0+cu124",
+        "torchvision": "0.21.0+cu124",
+        "torchaudio": "2.6.0+cu124"
       }
     },
     "cu121": {
@@ -59,6 +59,13 @@
       "version": ">=3.0",
       "order": 3,
       "critical": false
+    },
+    {
+      "name": "markupsafe",
+      "version": ">=2.0.0",
+      "order": 3,
+      "critical": false,
+      "comment": "Dependency of jinja2 (required before jinja2 installation)"
     },
     {
       "name": "jinja2",
@@ -114,6 +121,22 @@
       "platform": "win32"
     },
     {
+      "name": "nvidia-cuda-runtime-cu12",
+      "version": "==12.6.*",
+      "order": 14,
+      "critical": true,
+      "platform": "win32",
+      "comment": "CUDA 12.x runtime headers/libs for Triton JIT on Windows (provides cuda.h and linker libs)"
+    },
+    {
+      "name": "nvidia-cuda-nvcc-cu12",
+      "version": "==12.6.*",
+      "order": 15,
+      "critical": true,
+      "platform": "win32",
+      "comment": "CUDA 12.x NVCC/toolchain bits for Triton JIT on Windows (may provide cuda.lib)"
+    },
+    {
       "name": "regex",
       "version": ">=2022.1.18",
       "order": 20,
@@ -126,6 +149,34 @@
       "critical": false
     },
     {
+      "name": "urllib3",
+      "version": ">=1.26.0,<3.0.0",
+      "order": 21,
+      "critical": false,
+      "comment": "Dependency of requests"
+    },
+    {
+      "name": "certifi",
+      "version": ">=2022.0.0",
+      "order": 21,
+      "critical": false,
+      "comment": "Dependency of requests"
+    },
+    {
+      "name": "charset-normalizer",
+      "version": ">=2.0.0,<4.0.0",
+      "order": 21,
+      "critical": false,
+      "comment": "Dependency of requests"
+    },
+    {
+      "name": "idna",
+      "version": ">=2.5,<4",
+      "order": 21,
+      "critical": false,
+      "comment": "Dependency of requests"
+    },
+    {
       "name": "requests",
       "version": ">=2.28.0",
       "order": 22,
@@ -136,6 +187,13 @@
       "version": ">=20.9",
       "order": 23,
       "critical": false
+    },
+    {
+      "name": "colorama",
+      "version": ">=0.4.0",
+      "order": 23,
+      "critical": false,
+      "comment": "Dependency of tqdm on Windows"
     },
     {
       "name": "tqdm",
@@ -172,23 +230,25 @@
       "comment": "Installed with no-deps after all dependencies are in place. Allows 4.51.3 or 4.57.3 (excludes 4.52-4.55 and 4.57.0 per unsloth requirements)"
     },
     {
+      "name": "accelerate",
+      "version": ">=1.0.0",
+      "order": 31,
+      "critical": true,
+      "comment": "Must be installed before peft (peft depends on accelerate)"
+    },
+    {
       "name": "peft",
       "version": ">=0.13.0",
-      "order": 31,
-      "critical": true
+      "order": 32,
+      "critical": true,
+      "comment": "Depends on accelerate (order 31)"
     },
     {
       "name": "datasets",
       "version": ">=3.0.0,<4.4.0",
-      "order": 32,
+      "order": 33,
       "critical": true,
       "comment": "Upper bound to avoid conflicts with unsloth"
-    },
-    {
-      "name": "accelerate",
-      "version": ">=1.0.0",
-      "order": 33,
-      "critical": true
     },
     {
       "name": "bitsandbytes",
@@ -230,23 +290,32 @@
       "comment": "Required for CLIP vision models"
     },
     {
+      "name": "shiboken6",
+      "version": "6.8.1",
+      "order": 49,
+      "critical": true,
+      "comment": "Required by PySide6 - must match PySide6 version exactly (6.8.1)"
+    },
+    {
       "name": "PySide6",
-      "version": ">=6.6.0",
+      "version": "6.8.1",
       "order": 50,
       "critical": true,
-      "comment": "Qt desktop GUI framework"
+      "comment": "Qt desktop GUI framework - must be exactly 6.8.1 to match shiboken6"
     },
     {
       "name": "PySide6-Essentials",
-      "version": ">=6.6.0",
+      "version": "6.8.1",
       "order": 51,
-      "critical": true
+      "critical": true,
+      "comment": "Must be exactly 6.8.1 to match PySide6"
     },
     {
       "name": "PySide6-Addons",
-      "version": ">=6.6.0",
+      "version": "6.8.1",
       "order": 52,
-      "critical": true
+      "critical": true,
+      "comment": "Must be exactly 6.8.1 to match PySide6"
     },
     {
       "name": "pandas",

@@ -7,13 +7,13 @@ import json
 from functools import partial
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Tuple, Dict
 
 from PySide6.QtCore import Qt, QProcess, QTimer, QThread, Signal, QProcessEnvironment, QRect, QSize, QEvent, QObject, QPoint, QPointF
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QTabWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QLineEdit, QPushButton, QFileDialog, QComboBox, QTextEdit, QPlainTextEdit,
-    QSpinBox, QDoubleSpinBox, QMessageBox, QListWidget, QListWidgetItem, QSplitter, QToolBar, QScrollArea, QGridLayout, QFrame, QProgressBar, QSizePolicy, QTabBar, QStyleOptionTab, QStyle, QStackedWidget, QGroupBox, QInputDialog, QCheckBox, QStyleOptionButton
+    QSpinBox, QDoubleSpinBox, QMessageBox, QListWidget, QListWidgetItem, QSplitter, QToolBar, QScrollArea, QGridLayout, QFrame, QProgressBar, QSizePolicy, QTabBar, QStyleOptionTab, QStyle, QStackedWidget, QGroupBox, QInputDialog, QCheckBox, QStyleOptionButton, QDialog
 )
 from PySide6.QtGui import QAction, QIcon, QFont, QMouseEvent, QCursor, QPixmap, QPainter, QPen, QColor
 
@@ -35,6 +35,8 @@ from core.models import (DEFAULT_BASE_MODELS, search_hf_models, download_hf_mode
                          list_local_downloads, get_app_root, detect_model_capabilities, get_capability_icons, get_model_size)
 from core.training import TrainingConfig, default_output_dir, build_finetune_cmd
 from core.inference import InferenceConfig, build_run_adapter_cmd
+from core.environment_manager import EnvironmentManager
+from core.python_runtime import PythonRuntimeManager
 
 
 _APP_BUILD = datetime.fromtimestamp(Path(__file__).stat().st_mtime).strftime("%y%m%d-%H%M%S")
@@ -1425,6 +1427,10 @@ class MainWindow(QMainWindow):
         if splash:
             splash.update_progress(5, "Initializing model checker", "")
         self.model_checker = ModelIntegrityChecker()
+        
+        # Environment manager for per-model isolated environments
+        self.env_manager = EnvironmentManager(self.root)
+        self.python_runtime_manager = PythonRuntimeManager(self.root)
 
         # App shutdown coordination (stop server first, then exit)
         self._shutdown_in_progress = False
@@ -1530,10 +1536,16 @@ class MainWindow(QMainWindow):
         # Install event filter on header to catch top edge resize events
         header_widget.installEventFilter(self)
         
-        header_layout = QHBoxLayout(header_widget)
+        # Use a 3-column grid so the title can be truly centered in the window.
+        # We'll keep the left and right columns the same width at runtime.
+        header_layout = QGridLayout(header_widget)
         # Increased right margin to 50px to account for frame extension (75px) + padding
         header_layout.setContentsMargins(20, 10, 50, 10)
-        header_layout.setSpacing(6)
+        header_layout.setHorizontalSpacing(6)
+        header_layout.setVerticalSpacing(0)
+        header_layout.setColumnStretch(0, 0)
+        header_layout.setColumnStretch(1, 1)
+        header_layout.setColumnStretch(2, 0)
         
         # Left: Theme controls container
         theme_container = QWidget()
@@ -1656,10 +1668,15 @@ class MainWindow(QMainWindow):
         color_layout.addLayout(row2)
         
         theme_layout.addWidget(color_selector)
-        header_layout.addWidget(theme_container)
-        
-        # Add stretch before title to center it
-        header_layout.addStretch(1)
+
+        # Left column (theme controls)
+        header_left = QWidget()
+        header_left.setStyleSheet("background: transparent;")
+        header_left_layout = QHBoxLayout(header_left)
+        header_left_layout.setContentsMargins(0, 0, 0, 0)
+        header_left_layout.setSpacing(0)
+        header_left_layout.addWidget(theme_container)
+        header_left_layout.addStretch(1)
         
         # Center: App title (transparent background)
         title_container = QWidget()
@@ -1684,10 +1701,8 @@ class MainWindow(QMainWindow):
         """)
         title_layout.addWidget(title_label)
         
-        header_layout.addWidget(title_container, 2)  # Larger stretch factor to center
-        
-        # Add stretch after title to center it
-        header_layout.addStretch(1)
+        # Center column (title)
+        header_layout.addWidget(title_container, 0, 1, Qt.AlignCenter)
         
         # Right: System info (compact)
         sys_info_widget = QWidget()
@@ -1740,7 +1755,12 @@ class MainWindow(QMainWindow):
         sys_info_layout.addWidget(ram_label)
         self.header_ram_label = ram_label
         
-        header_layout.addWidget(sys_info_widget)
+        # Right column (system info + window buttons)
+        header_right = QWidget()
+        header_right.setStyleSheet("background: transparent;")
+        header_right_layout = QHBoxLayout(header_right)
+        header_right_layout.setContentsMargins(0, 0, 0, 0)
+        header_right_layout.setSpacing(6)
         
         # Fullscreen button (⛶) in top right
         fullscreen_btn = QPushButton("⛶")
@@ -1763,7 +1783,8 @@ class MainWindow(QMainWindow):
             }
         """)
         fullscreen_btn.clicked.connect(self._toggle_fullscreen)
-        header_layout.addWidget(fullscreen_btn)
+        header_right_layout.addWidget(sys_info_widget)
+        header_right_layout.addWidget(fullscreen_btn)
         self.fullscreen_btn = fullscreen_btn
         
         # Close button (X) in top right
@@ -1787,8 +1808,17 @@ class MainWindow(QMainWindow):
             }
         """)
         close_btn.clicked.connect(self.close)
-        header_layout.addWidget(close_btn)
+        header_right_layout.addWidget(close_btn)
         self.close_btn = close_btn  # Store reference for frame integration
+
+        # Mount left/right columns and keep them symmetric so the title is centered
+        header_layout.addWidget(header_left, 0, 0, Qt.AlignLeft | Qt.AlignVCenter)
+        header_layout.addWidget(header_right, 0, 2, Qt.AlignRight | Qt.AlignVCenter)
+
+        self.header_left_container = header_left
+        self.header_right_container = header_right
+
+        QTimer.singleShot(0, self._sync_header_side_widths)
         
         # Create main layout
         main_widget = QWidget()
@@ -1812,17 +1842,14 @@ class MainWindow(QMainWindow):
         self.logs_btn = QPushButton("📊 Logs")
         self.server_btn = QPushButton("🖧 Server")
         self.mcp_btn = QPushButton("🧩 MCP")
-        self.requirements_btn = QPushButton("🔧")  # Tool icon only
+        self.envs_btn = QPushButton("🔧 Environment")
         self.info_btn = QPushButton("ℹ️ Info")
         
         # Navigation buttons will be styled by theme system
         
-        for btn in [self.home_btn, self.train_btn, self.download_btn, self.test_btn, self.logs_btn, self.server_btn, self.mcp_btn, self.requirements_btn, self.info_btn]:
+        for btn in [self.home_btn, self.train_btn, self.download_btn, self.test_btn, self.logs_btn, self.server_btn, self.mcp_btn, self.envs_btn, self.info_btn]:
             btn.setCheckable(True)
             # Navigation buttons will be styled by theme system
-        
-        # Special styling for requirements button (icon only, smaller)
-        self.requirements_btn.setMaximumWidth(60)
         
         # Add left-side buttons
         navbar_layout.addWidget(self.home_btn)
@@ -1831,12 +1858,12 @@ class MainWindow(QMainWindow):
         navbar_layout.addWidget(self.test_btn)
         navbar_layout.addWidget(self.server_btn)
         navbar_layout.addWidget(self.mcp_btn)
+        navbar_layout.addWidget(self.envs_btn)
         
         # Add stretch to consume remaining space
         navbar_layout.addStretch(1)
         
-        # Add Requirements, Logs and Info buttons on far right
-        navbar_layout.addWidget(self.requirements_btn)
+        # Add Logs and Info buttons on far right
         navbar_layout.addWidget(self.logs_btn)
         navbar_layout.addWidget(self.info_btn)
         
@@ -1856,7 +1883,7 @@ class MainWindow(QMainWindow):
         self.server_page = ServerPage(self)
         tabs.addTab(self.server_page, "Server")
         tabs.addTab(MCPPage(self), "MCP")
-        tabs.addTab(self._build_requirements_tab(), "Requirements")
+        tabs.addTab(self._build_environment_management_page(), "Environment Manager")
         tabs.addTab(self._build_info_tab(), "Info")
         
         # Connect buttons to tab switching
@@ -1867,7 +1894,7 @@ class MainWindow(QMainWindow):
         self.logs_btn.clicked.connect(lambda: self._switch_tab(tabs, 4))
         self.server_btn.clicked.connect(lambda: self._switch_tab(tabs, 5))
         self.mcp_btn.clicked.connect(lambda: self._switch_tab(tabs, 6))
-        self.requirements_btn.clicked.connect(lambda: self._switch_tab(tabs, 7))
+        self.envs_btn.clicked.connect(lambda: self._switch_tab(tabs, 7))
         self.info_btn.clicked.connect(lambda: self._switch_tab(tabs, 8))
         
         # Also connect to tab widget's currentChanged signal to handle programmatic changes
@@ -1976,12 +2003,28 @@ class MainWindow(QMainWindow):
         
         return row
     
-    def _get_target_venv_python(self) -> str:
-        """Get the target venv Python executable path"""
+    def _get_target_venv_python(self, model_id: str = None, model_path: str = None) -> str:
+        """
+        Get the target venv Python executable path for a model.
+        Uses per-model isolated environment if available, otherwise falls back to shared .venv.
+        
+        Args:
+            model_id: HuggingFace model ID (e.g., "nvidia/Nemotron-3-30B")
+            model_path: Local model path
+            
+        Returns:
+            Path to Python executable
+        """
         import sys
         from pathlib import Path
         
-        # Try to find LLM/.venv Python
+        # Try per-model environment first if model is specified
+        if model_id or model_path:
+            python_exe = self.env_manager.get_python_executable(model_id=model_id, model_path=model_path)
+            if python_exe and python_exe.exists():
+                return str(python_exe)
+        
+        # Fallback to shared LLM/.venv (for backward compatibility)
         llm_venv = self.root / ".venv"
         if sys.platform == "win32":
             venv_python = llm_venv / "Scripts" / "python.exe"
@@ -1991,8 +2034,88 @@ class MainWindow(QMainWindow):
         if venv_python.exists():
             return str(venv_python)
         
-        # Fallback to current Python
+        # Last resort: current Python
         return sys.executable
+    
+    def _ensure_model_environment(self, model_id: str = None, model_path: str = None) -> Tuple[bool, Optional[str]]:
+        """
+        Ensure a model has its own isolated environment. Creates it if needed.
+        
+        Args:
+            model_id: HuggingFace model ID
+            model_path: Local model path
+            
+        Returns:
+            Tuple of (success: bool, python_executable_path: str or None)
+        """
+        # Check if environment already exists
+        python_exe = self.env_manager.get_python_executable(model_id=model_id, model_path=model_path)
+        if python_exe and python_exe.exists():
+            return True, str(python_exe)
+        
+        # Need to create environment - get Python runtime
+        python_runtime = self.python_runtime_manager.get_python_runtime("3.12")
+        if not python_runtime:
+            return False, None
+        
+        # Get hardware profile for this model
+        try:
+            from system_detector import SystemDetector
+            from core.profile_selector import ProfileSelector
+            
+            detector = SystemDetector()
+            detector.detect_all()
+            hw_profile = detector.get_hardware_profile()
+            selector = ProfileSelector(self.root / "metadata" / "compatibility_matrix.json")
+            profile_name, _, _, _ = selector.select_profile(hw_profile)
+        except Exception:
+            profile_name = None
+        
+        # Create environment
+        success, error = self.env_manager.create_environment(
+            model_id=model_id,
+            model_path=model_path,
+            python_runtime=python_runtime,
+            profile_name=profile_name
+        )
+        
+        if success:
+            python_exe = self.env_manager.get_python_executable(model_id=model_id, model_path=model_path)
+            return True, str(python_exe) if python_exe else None
+        else:
+            return False, None
+    
+    def _extract_model_id_from_path(self, model_path: str) -> Optional[str]:
+        """
+        Try to extract HuggingFace model ID from a local model path.
+        Looks for patterns like models/nvidia__Nemotron-3-30B or similar.
+        
+        Args:
+            model_path: Local model path
+            
+        Returns:
+            Model ID if extractable, None otherwise
+        """
+        from pathlib import Path
+        path_obj = Path(model_path)
+        
+        # Check if path contains a model directory that looks like a HF model ID
+        # Pattern: .../models/nvidia__Nemotron-3-30B/... -> nvidia/Nemotron-3-30B
+        for part in path_obj.parts:
+            if "__" in part:
+                # Convert back from filesystem-safe format
+                model_id = part.replace("__", "/")
+                # Validate it looks like a model ID (has / or is a known pattern)
+                if "/" in model_id or part.startswith(("nvidia", "unsloth", "microsoft", "meta", "google")):
+                    return model_id
+        
+        # Check parent directory name
+        if path_obj.parent.name and "__" in path_obj.parent.name:
+            model_id = path_obj.parent.name.replace("__", "/")
+            if "/" in model_id:
+                return model_id
+        
+        return None
     
     def _create_status_widget(self, label: str, is_ok: bool, detail: str) -> QWidget:
         """Create a status indicator widget"""
@@ -2348,6 +2471,35 @@ class MainWindow(QMainWindow):
         
         super().mouseReleaseEvent(event)
 
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._sync_header_side_widths()
+
+    def _sync_header_side_widths(self) -> None:
+        """
+        Keep the header title visually centered in the window by ensuring
+        the left and right header columns use the same width.
+        """
+        left = getattr(self, "header_left_container", None)
+        right = getattr(self, "header_right_container", None)
+        header = getattr(self, "header_widget", None)
+        if left is None or right is None or header is None:
+            return
+
+        max_w = max(left.sizeHint().width(), right.sizeHint().width())
+
+        # If we're too narrow, don't force fixed widths (avoid layout breakage).
+        available_w = max(0, header.width())
+        if max_w * 2 > available_w:
+            for w in (left, right):
+                w.setMinimumWidth(0)
+                w.setMaximumWidth(16777215)
+            return
+
+        for w in (left, right):
+            w.setMinimumWidth(max_w)
+            w.setMaximumWidth(max_w)
+
     def closeEvent(self, event):
         """
         When user clicks the window X:
@@ -2700,7 +2852,7 @@ class MainWindow(QMainWindow):
         tab_widget.setCurrentIndex(index)
         
         # Update button checked states
-        buttons = [self.home_btn, self.download_btn, self.train_btn, self.test_btn, self.logs_btn, self.server_btn, self.mcp_btn, self.requirements_btn, self.info_btn]
+        buttons = [self.home_btn, self.download_btn, self.train_btn, self.test_btn, self.logs_btn, self.server_btn, self.mcp_btn, self.envs_btn, self.info_btn]
         for i, btn in enumerate(buttons):
             btn.setChecked(i == index)
         
@@ -6165,9 +6317,40 @@ class MainWindow(QMainWindow):
         if hasattr(self.test_model_a_settings, 'temperature'):
             temperature = self.test_model_a_settings.temperature.value()
         
+        # Ensure model_path is a string before adding to command
+        model_path_str = str(model_path) if model_path else ""
+        if not model_path_str:
+            self.chat_display.update_model_a_response("[ERROR] Invalid model path: path is empty.")
+            return
+        
+        # Extract model_id from path if possible
+        model_id = self._extract_model_id_from_path(model_path_str)
+        
+        # Check if model has an associated environment
+        associated_env = self.env_manager.get_associated_environment(model_path_str)
+        if associated_env:
+            # Use the associated environment's Python executable
+            env_python = self.env_manager.get_python_executable(model_id=associated_env)
+            if env_python and env_python.exists():
+                target_python = env_python
+            else:
+                # Associated env doesn't exist or is broken, create new one
+                env_success, env_python = self._ensure_model_environment(model_id=model_id, model_path=model_path_str)
+                if not env_success:
+                    target_python = self._get_target_venv_python(model_id=model_id, model_path=model_path_str) or sys.executable
+                else:
+                    target_python = env_python or sys.executable
+        else:
+            # No association, use standard logic
+            env_success, env_python = self._ensure_model_environment(model_id=model_id, model_path=model_path_str)
+            if not env_success:
+                # Fallback to shared environment
+                target_python = self._get_target_venv_python(model_id=model_id, model_path=model_path_str) or sys.executable
+            else:
+                target_python = env_python or sys.executable
+        
         # Build command - use run_adapter.py for both base models and adapters
-        # IMPORTANT: run using TARGET venv python (LLM/.venv), not the app/bootstrap python.
-        target_python = self._get_target_venv_python() or sys.executable
+        # IMPORTANT: run using model-specific isolated environment Python, not the app/bootstrap python.
         cmd = [
             str(target_python), "-u", "run_adapter.py",
             "--prompt", prompt,
@@ -6179,12 +6362,6 @@ class MainWindow(QMainWindow):
         # Add system prompt if provided
         if system_prompt:
             cmd += ["--system-prompt", system_prompt]
-        
-        # Ensure model_path is a string before adding to command
-        model_path_str = str(model_path) if model_path else ""
-        if not model_path_str:
-            self.chat_display.update_model_a_response("[ERROR] Invalid model path: path is empty.")
-            return
         
         if is_adapter:
             # Load as adapter (requires base model + adapter)
@@ -6205,8 +6382,17 @@ class MainWindow(QMainWindow):
         # Set GPU selection via environment variable
         env = QProcessEnvironment.systemEnvironment()
         if hasattr(self, 'test_gpu_select') and self.test_gpu_select.isEnabled():
-            selected_gpu_idx = self.test_gpu_select.currentIndex()
-            env.insert("CUDA_VISIBLE_DEVICES", str(selected_gpu_idx))
+            # IMPORTANT: use the real CUDA device index (not the combobox index)
+            selected_display_idx = self.test_gpu_select.currentIndex()
+            real_cuda_idx = selected_display_idx
+            try:
+                index_map = getattr(self, "test_gpu_index_map", None)
+                if index_map and 0 <= selected_display_idx < len(index_map):
+                    real_cuda_idx = index_map[selected_display_idx]
+            except Exception:
+                pass
+            env.insert("CUDA_VISIBLE_DEVICES", str(real_cuda_idx))
+            env.insert("CUDA_DEVICE_ORDER", "PCI_BUS_ID")
         
         proc.setProcessEnvironment(env)
 
@@ -6241,6 +6427,26 @@ class MainWindow(QMainWindow):
         
         # Accumulate text in buffer
         self.inference_buffer_a += text
+        
+        # Show loading progress if we see checkpoint loading progress
+        if "Loading checkpoint shards:" in text and "--- OUTPUT ---" not in self.inference_buffer_a:
+            # Extract progress percentage from lines like "Loading checkpoint shards:  31%|███       | 4/13"
+            lines = text.split('\n')
+            for line in lines:
+                if "Loading checkpoint shards:" in line and "%" in line:
+                    # Extract percentage
+                    import re
+                    match = re.search(r'(\d+)%', line)
+                    if match:
+                        percent = match.group(1)
+                        # Extract shard info like "4/13"
+                        shard_match = re.search(r'(\d+)/(\d+)', line)
+                        if shard_match:
+                            current = shard_match.group(1)
+                            total = shard_match.group(2)
+                            status = f"[INFO] Loading model: {percent}% ({current}/{total} shards)..."
+                            self.chat_display.update_model_a_response(status)
+                            break
 
         # Option C: trigger environment alert on model-load/compiler failures.
         lower = self.inference_buffer_a.lower()
@@ -6322,9 +6528,40 @@ class MainWindow(QMainWindow):
         if hasattr(self.test_model_b_settings, 'temperature'):
             temperature = self.test_model_b_settings.temperature.value()
         
+        # Ensure model_path is a string before adding to command
+        model_path_str = str(model_path) if model_path else ""
+        if not model_path_str:
+            self.chat_display.update_model_b_response("[ERROR] Invalid model path: path is empty.")
+            return
+        
+        # Extract model_id from path if possible
+        model_id = self._extract_model_id_from_path(model_path_str)
+        
+        # Check if model has an associated environment
+        associated_env = self.env_manager.get_associated_environment(model_path_str)
+        if associated_env:
+            # Use the associated environment's Python executable
+            env_python = self.env_manager.get_python_executable(model_id=associated_env)
+            if env_python and env_python.exists():
+                target_python = env_python
+            else:
+                # Associated env doesn't exist or is broken, create new one
+                env_success, env_python = self._ensure_model_environment(model_id=model_id, model_path=model_path_str)
+                if not env_success:
+                    target_python = self._get_target_venv_python(model_id=model_id, model_path=model_path_str) or sys.executable
+                else:
+                    target_python = env_python or sys.executable
+        else:
+            # No association, use standard logic
+            env_success, env_python = self._ensure_model_environment(model_id=model_id, model_path=model_path_str)
+            if not env_success:
+                # Fallback to shared environment
+                target_python = self._get_target_venv_python(model_id=model_id, model_path=model_path_str) or sys.executable
+            else:
+                target_python = env_python or sys.executable
+        
         # Build command - use run_adapter.py for both base models and adapters
-        # IMPORTANT: run using TARGET venv python (LLM/.venv), not the app/bootstrap python.
-        target_python = self._get_target_venv_python() or sys.executable
+        # IMPORTANT: run using model-specific isolated environment Python, not the app/bootstrap python.
         cmd = [
             str(target_python), "-u", "run_adapter.py",
             "--prompt", prompt,
@@ -6336,12 +6573,6 @@ class MainWindow(QMainWindow):
         # Add system prompt if provided
         if system_prompt:
             cmd += ["--system-prompt", system_prompt]
-        
-        # Ensure model_path is a string before adding to command
-        model_path_str = str(model_path) if model_path else ""
-        if not model_path_str:
-            self.chat_display.update_model_b_response("[ERROR] Invalid model path: path is empty.")
-            return
         
         if is_adapter:
             # Load as adapter (requires base model + adapter)
@@ -6362,8 +6593,16 @@ class MainWindow(QMainWindow):
         # Set GPU selection via environment variable
         env = QProcessEnvironment.systemEnvironment()
         if hasattr(self, 'test_gpu_select') and self.test_gpu_select.isEnabled():
-            selected_gpu_idx = self.test_gpu_select.currentIndex()
-            env.insert("CUDA_VISIBLE_DEVICES", str(selected_gpu_idx))
+            selected_display_idx = self.test_gpu_select.currentIndex()
+            real_cuda_idx = selected_display_idx
+            try:
+                index_map = getattr(self, "test_gpu_index_map", None)
+                if index_map and 0 <= selected_display_idx < len(index_map):
+                    real_cuda_idx = index_map[selected_display_idx]
+            except Exception:
+                pass
+            env.insert("CUDA_VISIBLE_DEVICES", str(real_cuda_idx))
+            env.insert("CUDA_DEVICE_ORDER", "PCI_BUS_ID")
         
         proc.setProcessEnvironment(env)
 
@@ -6397,6 +6636,26 @@ class MainWindow(QMainWindow):
         
         # Accumulate text in buffer
         self.inference_buffer_b += text
+        
+        # Show loading progress if we see checkpoint loading progress
+        if "Loading checkpoint shards:" in text and "--- OUTPUT ---" not in self.inference_buffer_b:
+            # Extract progress percentage from lines like "Loading checkpoint shards:  31%|███       | 4/13"
+            lines = text.split('\n')
+            for line in lines:
+                if "Loading checkpoint shards:" in line and "%" in line:
+                    # Extract percentage
+                    import re
+                    match = re.search(r'(\d+)%', line)
+                    if match:
+                        percent = match.group(1)
+                        # Extract shard info like "4/13"
+                        shard_match = re.search(r'(\d+)/(\d+)', line)
+                        if shard_match:
+                            current = shard_match.group(1)
+                            total = shard_match.group(2)
+                            status = f"[INFO] Loading model: {percent}% ({current}/{total} shards)..."
+                            self.chat_display.update_model_b_response(status)
+                            break
 
         lower = self.inference_buffer_b.lower()
         if "[error] model loading failed" in lower or "gcc.exe" in lower or "cuda_utils.c" in lower:
@@ -6479,9 +6738,40 @@ class MainWindow(QMainWindow):
             if hasattr(self.test_model_c_settings, 'temperature'):
                 temperature = self.test_model_c_settings.temperature.value()
         
+        # Ensure model_path is a string before adding to command
+        model_path_str = str(model_path) if model_path else ""
+        if not model_path_str:
+            self.chat_display.update_model_c_response("[ERROR] Invalid model path: path is empty.")
+            return
+        
+        # Extract model_id from path if possible
+        model_id = self._extract_model_id_from_path(model_path_str)
+        
+        # Check if model has an associated environment
+        associated_env = self.env_manager.get_associated_environment(model_path_str)
+        if associated_env:
+            # Use the associated environment's Python executable
+            env_python = self.env_manager.get_python_executable(model_id=associated_env)
+            if env_python and env_python.exists():
+                target_python = env_python
+            else:
+                # Associated env doesn't exist or is broken, create new one
+                env_success, env_python = self._ensure_model_environment(model_id=model_id, model_path=model_path_str)
+                if not env_success:
+                    target_python = self._get_target_venv_python(model_id=model_id, model_path=model_path_str) or sys.executable
+                else:
+                    target_python = env_python or sys.executable
+        else:
+            # No association, use standard logic
+            env_success, env_python = self._ensure_model_environment(model_id=model_id, model_path=model_path_str)
+            if not env_success:
+                # Fallback to shared environment
+                target_python = self._get_target_venv_python(model_id=model_id, model_path=model_path_str) or sys.executable
+            else:
+                target_python = env_python or sys.executable
+        
         # Build command - use run_adapter.py for both base models and adapters
-        # IMPORTANT: run using TARGET venv python (LLM/.venv), not the app/bootstrap python.
-        target_python = self._get_target_venv_python() or sys.executable
+        # IMPORTANT: run using model-specific isolated environment Python, not the app/bootstrap python.
         cmd = [
             str(target_python), "-u", "run_adapter.py",
             "--prompt", prompt,
@@ -6493,12 +6783,6 @@ class MainWindow(QMainWindow):
         # Add system prompt if provided
         if system_prompt:
             cmd += ["--system-prompt", system_prompt]
-        
-        # Ensure model_path is a string before adding to command
-        model_path_str = str(model_path) if model_path else ""
-        if not model_path_str:
-            self.chat_display.update_model_c_response("[ERROR] Invalid model path: path is empty.")
-            return
         
         if is_adapter:
             # Load as adapter (requires base model + adapter)
@@ -6519,8 +6803,16 @@ class MainWindow(QMainWindow):
         # Set GPU selection via environment variable
         env = QProcessEnvironment.systemEnvironment()
         if hasattr(self, 'test_gpu_select') and self.test_gpu_select.isEnabled():
-            selected_gpu_idx = self.test_gpu_select.currentIndex()
-            env.insert("CUDA_VISIBLE_DEVICES", str(selected_gpu_idx))
+            selected_display_idx = self.test_gpu_select.currentIndex()
+            real_cuda_idx = selected_display_idx
+            try:
+                index_map = getattr(self, "test_gpu_index_map", None)
+                if index_map and 0 <= selected_display_idx < len(index_map):
+                    real_cuda_idx = index_map[selected_display_idx]
+            except Exception:
+                pass
+            env.insert("CUDA_VISIBLE_DEVICES", str(real_cuda_idx))
+            env.insert("CUDA_DEVICE_ORDER", "PCI_BUS_ID")
         
         proc.setProcessEnvironment(env)
 
@@ -6556,6 +6848,26 @@ class MainWindow(QMainWindow):
         if not hasattr(self, 'inference_buffer_c'):
             self.inference_buffer_c = ""
         self.inference_buffer_c += text
+        
+        # Show loading progress if we see checkpoint loading progress
+        if "Loading checkpoint shards:" in text and "--- OUTPUT ---" not in self.inference_buffer_c:
+            # Extract progress percentage from lines like "Loading checkpoint shards:  31%|███       | 4/13"
+            lines = text.split('\n')
+            for line in lines:
+                if "Loading checkpoint shards:" in line and "%" in line:
+                    # Extract percentage
+                    import re
+                    match = re.search(r'(\d+)%', line)
+                    if match:
+                        percent = match.group(1)
+                        # Extract shard info like "4/13"
+                        shard_match = re.search(r'(\d+)/(\d+)', line)
+                        if shard_match:
+                            current = shard_match.group(1)
+                            total = shard_match.group(2)
+                            status = f"[INFO] Loading model: {percent}% ({current}/{total} shards)..."
+                            self.chat_display.update_model_c_response(status)
+                            break
 
         lower = self.inference_buffer_c.lower()
         if "[error] model loading failed" in lower or "gcc.exe" in lower or "cuda_utils.c" in lower:
@@ -6907,7 +7219,8 @@ class MainWindow(QMainWindow):
     def _is_package_functional(self, pkg_name: str, python_exe: Optional[str] = None) -> bool:
         """Thorough check for package functionality beyond just version presence.
         
-        IMPORTANT: Uses LLM/.venv Python (not bootstrap/.venv) to check packages.
+        IMPORTANT: Uses the provided python_exe (or shared LLM/.venv Python) to check packages.
+        For per-model environments, pass the model's Python executable.
         """
         # Define which packages need deeper functional checks
         # Include both hyphen and underscore variants for binary packages
@@ -7320,8 +7633,8 @@ except Exception as e:
             print("[GUI] Cannot fall back to requirements.txt - profiles must work!")
             return {}
 
-    def _build_requirements_tab(self) -> QWidget:
-        """Build Requirements tab with 2 scrolling columns (scroll together) and 1 details panel."""
+    def _build_requirements_subtab(self) -> QWidget:
+        """Build Requirements sub-tab with 2 scrolling columns (scroll together) and 1 details panel."""
         w = QWidget()
         main_layout = QHBoxLayout(w)
         main_layout.setContentsMargins(20, 20, 20, 20)
@@ -8513,6 +8826,780 @@ except Exception as e:
         # Increased delay to 1500ms to ensure all subprocesses have fully terminated
         from PySide6.QtCore import QTimer
         QTimer.singleShot(1500, lambda: self._refresh_requirements_grid())
+
+    def _build_environment_management_page(self) -> QWidget:
+        """Build the combined Environment Management page with Environments and Requirements sub-tabs"""
+        w = QWidget()
+        main_layout = QVBoxLayout(w)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(0)
+        
+        # Create sub-tab widget
+        sub_tabs = QTabWidget()
+        sub_tabs.setStyleSheet("""
+            QTabWidget::pane {
+                border: none;
+                background: transparent;
+            }
+            QTabBar::tab {
+                background: rgba(30, 30, 50, 0.4);
+                color: rgba(255, 255, 255, 0.7);
+                padding: 10px 20px;
+                margin-right: 2px;
+                border-top-left-radius: 6px;
+                border-top-right-radius: 6px;
+                font-size: 10pt;
+                font-weight: bold;
+            }
+            QTabBar::tab:selected {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 rgba(102, 126, 234, 0.6), stop:1 rgba(118, 75, 162, 0.6));
+                color: white;
+            }
+            QTabBar::tab:hover {
+                background: rgba(102, 126, 234, 0.3);
+            }
+        """)
+        
+        # Add sub-tabs
+        sub_tabs.addTab(self._build_environments_subtab(), "🔧 Environments")
+        sub_tabs.addTab(self._build_requirements_subtab(), "⚙️ System Requirements")
+        
+        main_layout.addWidget(sub_tabs)
+        
+        return w
+    
+    def _build_environments_subtab(self) -> QWidget:
+        """Build the Environments management tab"""
+        w = QWidget()
+        main_layout = QVBoxLayout(w)
+        main_layout.setContentsMargins(20, 20, 20, 20)
+        main_layout.setSpacing(15)
+        
+        # Header with title and Create button
+        header = QWidget()
+        header.setStyleSheet("background: transparent;")
+        header_layout = QHBoxLayout(header)
+        header_layout.setContentsMargins(0, 0, 0, 0)
+        
+        title = QLabel("🔧 Environments")
+        title.setStyleSheet("font-size: 20pt; font-weight: bold; color: #ffffff; background: transparent;")
+        header_layout.addWidget(title)
+        
+        header_layout.addStretch(1)
+        
+        create_env_btn = QPushButton("+ New Environment")
+        create_env_btn.setFixedHeight(35)
+        create_env_btn.setStyleSheet("""
+            QPushButton {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #667eea, stop:1 #764ba2);
+                color: white;
+                border: none;
+                border-radius: 6px;
+                padding: 8px 16px;
+                font-size: 11pt;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #7a8efc, stop:1 #875fb8);
+            }
+        """)
+        create_env_btn.clicked.connect(self._show_create_environment_dialog)
+        header_layout.addWidget(create_env_btn)
+        
+        main_layout.addWidget(header)
+        
+        # Splitter for list and detail panels
+        splitter = QSplitter(Qt.Horizontal)
+        
+        # Left panel: Environment list
+        left_panel = QWidget()
+        left_layout = QVBoxLayout(left_panel)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.setSpacing(10)
+        
+        list_label = QLabel("Installed Environments")
+        list_label.setStyleSheet("font-size: 12pt; font-weight: bold; color: #ffffff; background: transparent;")
+        left_layout.addWidget(list_label)
+        
+        self.env_list = QListWidget()
+        self.env_list.setStyleSheet("""
+            QListWidget {
+                background: rgba(30, 30, 50, 0.4);
+                border: 1px solid rgba(255, 255, 255, 0.2);
+                border-radius: 8px;
+                padding: 5px;
+                color: white;
+                font-size: 10pt;
+            }
+            QListWidget::item {
+                padding: 12px;
+                border-radius: 6px;
+                margin: 3px;
+            }
+            QListWidget::item:selected {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 rgba(102, 126, 234, 0.6), stop:1 rgba(118, 75, 162, 0.6));
+            }
+            QListWidget::item:hover {
+                background: rgba(102, 126, 234, 0.3);
+            }
+        """)
+        self.env_list.itemSelectionChanged.connect(self._on_environment_selected)
+        left_layout.addWidget(self.env_list)
+        
+        # Refresh button
+        refresh_btn = QPushButton("🔄 Refresh")
+        refresh_btn.setMinimumHeight(35)
+        refresh_btn.setStyleSheet("""
+            QPushButton {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 rgba(102, 126, 234, 0.3), stop:1 rgba(118, 75, 162, 0.3));
+                color: white;
+                border: 1px solid rgba(255, 255, 255, 0.2);
+                border-radius: 6px;
+                padding: 8px 16px;
+                font-size: 10pt;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 rgba(102, 126, 234, 0.5), stop:1 rgba(118, 75, 162, 0.5));
+            }
+        """)
+        refresh_btn.clicked.connect(self._refresh_environment_list)
+        left_layout.addWidget(refresh_btn)
+        
+        splitter.addWidget(left_panel)
+        
+        # Right panel: Environment details
+        right_panel = QWidget()
+        right_layout = QVBoxLayout(right_panel)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        right_layout.setSpacing(15)
+        
+        detail_label = QLabel("Environment Details")
+        detail_label.setStyleSheet("font-size: 12pt; font-weight: bold; color: #ffffff; background: transparent;")
+        right_layout.addWidget(detail_label)
+        
+        # Scrollable detail area
+        detail_scroll = QScrollArea()
+        detail_scroll.setWidgetResizable(True)
+        detail_scroll.setStyleSheet("""
+            QScrollArea {
+                background: rgba(30, 30, 50, 0.4);
+                border: 1px solid rgba(255, 255, 255, 0.2);
+                border-radius: 8px;
+            }
+        """)
+        
+        self.env_detail_widget = QWidget()
+        self.env_detail_layout = QVBoxLayout(self.env_detail_widget)
+        self.env_detail_layout.setContentsMargins(15, 15, 15, 15)
+        self.env_detail_layout.setSpacing(15)
+        
+        # Placeholder
+        placeholder = QLabel("Select an environment to view details")
+        placeholder.setAlignment(Qt.AlignCenter)
+        placeholder.setStyleSheet("color: rgba(255, 255, 255, 0.5); font-size: 12pt;")
+        self.env_detail_layout.addWidget(placeholder)
+        self.env_detail_layout.addStretch(1)
+        
+        detail_scroll.setWidget(self.env_detail_widget)
+        right_layout.addWidget(detail_scroll)
+        
+        splitter.addWidget(right_panel)
+        splitter.setStretchFactor(0, 3)  # Left: 30%
+        splitter.setStretchFactor(1, 7)  # Right: 70%
+        
+        main_layout.addWidget(splitter)
+        
+        # Show loading message immediately, then load async
+        loading_item = QListWidgetItem("Loading environments...")
+        loading_item.setFlags(loading_item.flags() & ~Qt.ItemIsSelectable)
+        self.env_list.addItem(loading_item)
+        
+        # Delayed load to not block UI
+        QTimer.singleShot(50, self._refresh_environment_list)
+        
+        return w
+    
+    def _refresh_environment_list(self):
+        """Refresh the environment list"""
+        self.env_list.clear()
+        
+        try:
+            envs = self.env_manager.list_all_environments()
+            
+            if not envs:
+                item = QListWidgetItem("No environments found\n\nClick '+ New Environment' to create one")
+                item.setFlags(item.flags() & ~Qt.ItemIsSelectable)
+                item.setTextAlignment(Qt.AlignCenter)
+                self.env_list.addItem(item)
+                return
+            
+            for env_info in envs:
+                env_id = env_info.get("env_id", "Unknown")
+                python_ver = env_info.get("python_version", "Unknown")
+                disk_mb = env_info.get("disk_usage_mb", 0)
+                associated = env_info.get("associated_models", [])
+                pkg_count = env_info.get("package_count", 0)
+                
+                # Format display text - emphasize packages
+                display_text = f"📦 {env_id}\n"
+                display_text += f"Python {python_ver}"
+                if pkg_count > 0:
+                    display_text += f" • {pkg_count} packages"
+                if associated:
+                    display_text += f" • {len(associated)} model(s)"
+                
+                item = QListWidgetItem(display_text)
+                item.setData(Qt.UserRole, env_info)
+                self.env_list.addItem(item)
+                
+        except Exception as e:
+            item = QListWidgetItem(f"Error loading environments:\n{str(e)}")
+            item.setFlags(item.flags() & ~Qt.ItemIsSelectable)
+            self.env_list.addItem(item)
+    
+    def _on_environment_selected(self):
+        """Handle environment selection"""
+        items = self.env_list.selectedItems()
+        if not items:
+            return
+        
+        env_info = items[0].data(Qt.UserRole)
+        if not env_info:
+            return
+        
+        self._display_environment_details(env_info)
+    
+    def _display_environment_details(self, env_info: Dict):
+        """Display detailed information about an environment"""
+        # Clear existing widgets
+        while self.env_detail_layout.count():
+            child = self.env_detail_layout.takeAt(0)
+            if child.widget():
+                child.widget().deleteLater()
+        
+        env_id = env_info.get("env_id", "Unknown")
+        
+        # Get full details
+        try:
+            full_info = self.env_manager.get_environment_info(model_id=env_id)
+            if full_info:
+                env_info = full_info
+        except Exception:
+            pass
+        
+        # Environment name/ID
+        name_label = QLabel(f"<b>Environment:</b> {env_id}")
+        name_label.setStyleSheet("font-size: 13pt; color: white; background: transparent;")
+        name_label.setWordWrap(True)
+        self.env_detail_layout.addWidget(name_label)
+        
+        # Info grid
+        info_grid = QWidget()
+        info_grid.setStyleSheet("background: transparent;")
+        grid_layout = QGridLayout(info_grid)
+        grid_layout.setSpacing(10)
+        
+        row = 0
+        
+        # Python version
+        python_ver = env_info.get("python_version", "Unknown")
+        grid_layout.addWidget(self._create_info_label("🐍 Python:"), row, 0, Qt.AlignLeft)
+        grid_layout.addWidget(self._create_info_value(python_ver), row, 1, Qt.AlignLeft)
+        row += 1
+        
+        # Location
+        location = env_info.get("path", "Unknown")
+        grid_layout.addWidget(self._create_info_label("📁 Location:"), row, 0, Qt.AlignLeft)
+        loc_label = self._create_info_value(location)
+        loc_label.setWordWrap(True)
+        grid_layout.addWidget(loc_label, row, 1, Qt.AlignLeft)
+        row += 1
+        
+        # Created date
+        created = env_info.get("created_at", "Unknown")
+        if created != "Unknown" and "T" in created:
+            try:
+                from datetime import datetime
+                dt = datetime.fromisoformat(created)
+                created = dt.strftime("%Y-%m-%d %H:%M")
+            except Exception:
+                pass
+        grid_layout.addWidget(self._create_info_label("📅 Created:"), row, 0, Qt.AlignLeft)
+        grid_layout.addWidget(self._create_info_value(created), row, 1, Qt.AlignLeft)
+        row += 1
+        
+        # Disk usage
+        disk_mb = env_info.get("disk_usage_mb", 0)
+        disk_str = f"{disk_mb:.1f} MB" if disk_mb < 1024 else f"{disk_mb/1024:.2f} GB"
+        grid_layout.addWidget(self._create_info_label("💾 Disk:"), row, 0, Qt.AlignLeft)
+        grid_layout.addWidget(self._create_info_value(disk_str), row, 1, Qt.AlignLeft)
+        row += 1
+        
+        # Package count
+        pkg_count = env_info.get("package_count", 0)
+        grid_layout.addWidget(self._create_info_label("📦 Packages:"), row, 0, Qt.AlignLeft)
+        grid_layout.addWidget(self._create_info_value(str(pkg_count)), row, 1, Qt.AlignLeft)
+        row += 1
+        
+        self.env_detail_layout.addWidget(info_grid)
+        
+        # Associated models
+        associated = env_info.get("associated_models", [])
+        if associated:
+            assoc_label = QLabel("<b>Associated Models:</b>")
+            assoc_label.setStyleSheet("font-size: 11pt; color: white; margin-top: 10px; background: transparent;")
+            self.env_detail_layout.addWidget(assoc_label)
+            
+            for model in associated:
+                model_item = QLabel(f"  • {model}")
+                model_item.setStyleSheet("color: rgba(255, 255, 255, 0.8); font-size: 10pt; background: transparent;")
+                model_item.setWordWrap(True)
+                self.env_detail_layout.addWidget(model_item)
+        
+        # Action buttons
+        self.env_detail_layout.addSpacing(20)
+        
+        buttons_widget = QWidget()
+        buttons_widget.setStyleSheet("background: transparent;")
+        buttons_layout = QVBoxLayout(buttons_widget)
+        buttons_layout.setSpacing(10)
+        
+        # Repair button
+        repair_btn = QPushButton("🔧 Repair Environment")
+        repair_btn.setFixedHeight(40)
+        repair_btn.setStyleSheet("""
+            QPushButton {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #667eea, stop:1 #764ba2);
+                color: white;
+                border: none;
+                border-radius: 6px;
+                font-size: 11pt;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #7a8efc, stop:1 #875fb8);
+            }
+        """)
+        repair_btn.clicked.connect(lambda: self._repair_environment(env_id))
+        buttons_layout.addWidget(repair_btn)
+        
+        # Associate model button
+        assoc_btn = QPushButton("🔗 Associate Model")
+        assoc_btn.setFixedHeight(40)
+        assoc_btn.setStyleSheet("""
+            QPushButton {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #43e97b, stop:1 #38f9d7);
+                color: #1a1a2e;
+                border: none;
+                border-radius: 6px;
+                font-size: 11pt;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #56ff92, stop:1 #4cffe8);
+            }
+        """)
+        assoc_btn.clicked.connect(lambda: self._show_associate_model_dialog(env_id))
+        buttons_layout.addWidget(assoc_btn)
+        
+        # Delete button
+        delete_btn = QPushButton("🗑️ Delete Environment")
+        delete_btn.setFixedHeight(40)
+        delete_btn.setStyleSheet("""
+            QPushButton {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #f093fb, stop:1 #f5576c);
+                color: white;
+                border: none;
+                border-radius: 6px;
+                font-size: 11pt;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #ffa7ff, stop:1 #ff6b7e);
+            }
+        """)
+        delete_btn.clicked.connect(lambda: self._delete_environment(env_id))
+        buttons_layout.addWidget(delete_btn)
+        
+        self.env_detail_layout.addWidget(buttons_widget)
+        self.env_detail_layout.addStretch(1)
+    
+    def _create_info_label(self, text: str) -> QLabel:
+        """Create a styled info label"""
+        label = QLabel(text)
+        label.setStyleSheet("color: rgba(255, 255, 255, 0.7); font-size: 10pt; background: transparent;")
+        return label
+    
+    def _create_info_value(self, text: str) -> QLabel:
+        """Create a styled info value label"""
+        label = QLabel(text)
+        label.setStyleSheet("color: white; font-size: 10pt; font-weight: bold; background: transparent;")
+        return label
+    
+    def _show_create_environment_dialog(self):
+        """Show dialog to create a new environment"""
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Create New Environment")
+        dialog.setMinimumWidth(550)
+        dialog.setMinimumHeight(450)
+        dialog.setStyleSheet("""
+            QDialog {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+                    stop:0 #1a1a2e, stop:1 #16213e);
+            }
+            QLabel {
+                color: white;
+                font-size: 10pt;
+            }
+            QLineEdit, QComboBox, QListWidget {
+                background: rgba(40, 40, 60, 0.6);
+                border: 1px solid rgba(255, 255, 255, 0.2);
+                border-radius: 5px;
+                padding: 8px;
+                color: white;
+                font-size: 10pt;
+            }
+            QListWidget::item {
+                padding: 8px;
+                border-radius: 4px;
+            }
+            QListWidget::item:selected {
+                background: rgba(102, 126, 234, 0.5);
+            }
+            QListWidget::item:hover {
+                background: rgba(102, 126, 234, 0.3);
+            }
+            QPushButton {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #667eea, stop:1 #764ba2);
+                color: white;
+                border: none;
+                border-radius: 6px;
+                padding: 10px 20px;
+                font-size: 10pt;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #7a8efc, stop:1 #875fb8);
+            }
+        """)
+        
+        layout = QVBoxLayout(dialog)
+        layout.setSpacing(15)
+        
+        # Environment name
+        name_label = QLabel("Environment Name:")
+        layout.addWidget(name_label)
+        
+        name_input = QLineEdit()
+        name_input.setPlaceholderText("e.g., my_custom_env or leave empty for auto-name")
+        layout.addWidget(name_input)
+        
+        # Model selection
+        model_label = QLabel("Associate with Model (optional):")
+        layout.addWidget(model_label)
+        
+        # Model list
+        model_list = QListWidget()
+        model_list.setSelectionMode(QListWidget.SingleSelection)
+        
+        # Scan for local models
+        local_models = []
+        models_dir = self.root / "models"
+        hf_models_dir = self.root / "hf_models"
+        
+        model_list.addItem("[None - Create empty environment]")
+        
+        # Add downloaded models
+        for base_dir in [models_dir, hf_models_dir]:
+            if base_dir.exists():
+                for model_dir in base_dir.iterdir():
+                    if model_dir.is_dir():
+                        model_name = model_dir.name
+                        display_name = f"📦 {model_name}"
+                        item = QListWidgetItem(display_name)
+                        item.setData(Qt.UserRole, str(model_dir))
+                        model_list.addItem(item)
+        
+        # Select first item by default
+        model_list.setCurrentRow(0)
+        layout.addWidget(model_list)
+        
+        # Info text
+        info_label = QLabel("Tip: Associating a model will automatically configure the environment for that model's requirements.")
+        info_label.setWordWrap(True)
+        info_label.setStyleSheet("color: rgba(255, 255, 255, 0.6); font-size: 9pt;")
+        layout.addWidget(info_label)
+        
+        # Buttons
+        button_layout = QHBoxLayout()
+        button_layout.addStretch(1)
+        
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.clicked.connect(dialog.reject)
+        button_layout.addWidget(cancel_btn)
+        
+        create_btn = QPushButton("Create")
+        create_btn.clicked.connect(dialog.accept)
+        button_layout.addWidget(create_btn)
+        
+        layout.addLayout(button_layout)
+        
+        if dialog.exec() == QDialog.Accepted:
+            env_name = name_input.text().strip()
+            
+            # Get selected model
+            selected_items = model_list.selectedItems()
+            model_path = None
+            model_name_for_env = None
+            if selected_items:
+                selected_item = selected_items[0]
+                if selected_item.row() > 0:  # Not "[None]"
+                    model_path = selected_item.data(Qt.UserRole)
+                    # Extract model name for auto-naming
+                    if model_path:
+                        from pathlib import Path
+                        model_name_for_env = Path(model_path).name
+            
+            # Auto-generate name if empty
+            if not env_name:
+                if model_name_for_env:
+                    env_name = f"env_{model_name_for_env}"
+                else:
+                    # Generate unique name
+                    from datetime import datetime
+                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    env_name = f"env_{timestamp}"
+            
+            # Sanitize name for filesystem
+            env_id = "".join(c for c in env_name if c.isalnum() or c in ("_", "-", "."))
+            if not env_id:
+                QMessageBox.warning(self, "Invalid Name", "Environment name must contain alphanumeric characters.")
+                return
+            
+            # Create the environment
+            try:
+                # Show progress
+                progress = QMessageBox(self)
+                progress.setWindowTitle("Creating Environment")
+                progress.setText(f"Creating environment '{env_id}'...\n\nThis may take a few moments.")
+                progress.setStandardButtons(QMessageBox.NoButton)
+                progress.setModal(True)
+                progress.show()
+                QApplication.processEvents()
+                
+                success, error = self.env_manager.create_environment(model_id=env_id)
+                
+                progress.close()
+                
+                if success:
+                    # Associate model if selected
+                    if model_path:
+                        self.env_manager.associate_model(env_id, model_path)
+                    
+                    QMessageBox.information(self, "Success", f"Environment '{env_id}' created successfully!")
+                    self._refresh_environment_list()
+                else:
+                    QMessageBox.critical(self, "Error", f"Failed to create environment:\n{error}")
+            except Exception as e:
+                import traceback
+                error_details = traceback.format_exc()
+                QMessageBox.critical(self, "Error", f"Failed to create environment:\n{str(e)}\n\nDetails:\n{error_details}")
+    
+    def _show_associate_model_dialog(self, env_id: str):
+        """Show dialog to associate a model with an environment"""
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"Associate Model with {env_id}")
+        dialog.setMinimumWidth(500)
+        dialog.setStyleSheet("""
+            QDialog {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+                    stop:0 #1a1a2e, stop:1 #16213e);
+            }
+            QLabel {
+                color: white;
+                font-size: 10pt;
+            }
+            QLineEdit, QListWidget {
+                background: rgba(40, 40, 60, 0.6);
+                border: 1px solid rgba(255, 255, 255, 0.2);
+                border-radius: 5px;
+                padding: 8px;
+                color: white;
+                font-size: 10pt;
+            }
+            QPushButton {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #667eea, stop:1 #764ba2);
+                color: white;
+                border: none;
+                border-radius: 6px;
+                padding: 10px 20px;
+                font-size: 10pt;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #7a8efc, stop:1 #875fb8);
+            }
+        """)
+        
+        layout = QVBoxLayout(dialog)
+        layout.setSpacing(15)
+        
+        info_label = QLabel("Enter model ID (e.g., nvidia/Nemotron-3-30B) or select from downloaded models:")
+        info_label.setWordWrap(True)
+        layout.addWidget(info_label)
+        
+        # Model ID input
+        model_input = QLineEdit()
+        model_input.setPlaceholderText("Model ID or path")
+        layout.addWidget(model_input)
+        
+        # List of local models
+        models_label = QLabel("Downloaded Models:")
+        layout.addWidget(models_label)
+        
+        models_list = QListWidget()
+        models_list.setMaximumHeight(150)
+        
+        # Scan for local models
+        local_models = []
+        models_dir = self.env_manager.root_dir / "models"
+        hf_models_dir = self.env_manager.root_dir / "hf_models"
+        
+        for base_dir in [models_dir, hf_models_dir]:
+            if base_dir.exists():
+                for model_dir in base_dir.iterdir():
+                    if model_dir.is_dir():
+                        local_models.append(str(model_dir))
+        
+        for model_path in local_models:
+            models_list.addItem(model_path)
+        
+        models_list.itemClicked.connect(lambda item: model_input.setText(item.text()))
+        layout.addWidget(models_list)
+        
+        # Buttons
+        button_layout = QHBoxLayout()
+        button_layout.addStretch(1)
+        
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.clicked.connect(dialog.reject)
+        button_layout.addWidget(cancel_btn)
+        
+        associate_btn = QPushButton("Associate")
+        associate_btn.clicked.connect(dialog.accept)
+        button_layout.addWidget(associate_btn)
+        
+        layout.addLayout(button_layout)
+        
+        if dialog.exec() == QDialog.Accepted:
+            model_id = model_input.text().strip()
+            if not model_id:
+                QMessageBox.warning(self, "Invalid Model", "Please enter or select a model.")
+                return
+            
+            # Associate the model
+            try:
+                success = self.env_manager.associate_model(env_id, model_id)
+                if success:
+                    QMessageBox.information(self, "Success", f"Model associated with environment '{env_id}'!")
+                    self._refresh_environment_list()
+                    # Refresh details if this env is selected
+                    items = self.env_list.selectedItems()
+                    if items:
+                        self._on_environment_selected()
+                else:
+                    QMessageBox.critical(self, "Error", "Failed to associate model.")
+            except Exception as e:
+                QMessageBox.critical(self, "Error", f"Failed to associate model:\n{str(e)}")
+    
+    def _repair_environment(self, env_id: str):
+        """Repair an environment using InstallerV2"""
+        try:
+            # Show progress dialog
+            progress_dialog = QDialog(self)
+            progress_dialog.setWindowTitle("Repairing Environment")
+            progress_dialog.setMinimumWidth(400)
+            progress_dialog.setModal(True)
+            
+            progress_layout = QVBoxLayout(progress_dialog)
+            
+            progress_label = QLabel(f"Repairing environment: {env_id}\nPlease wait...")
+            progress_label.setAlignment(Qt.AlignCenter)
+            progress_layout.addWidget(progress_label)
+            
+            progress_bar = QProgressBar()
+            progress_bar.setRange(0, 0)  # Indeterminate
+            progress_layout.addWidget(progress_bar)
+            
+            progress_dialog.show()
+            QApplication.processEvents()
+            
+            # Run repair in a thread
+            from LLM.installer_v2 import InstallerV2
+            installer = InstallerV2()
+            
+            # Try to repair
+            success, message = installer.repair_model_environment(env_id)
+            
+            progress_dialog.close()
+            
+            if success:
+                QMessageBox.information(self, "Success", f"Environment '{env_id}' repaired successfully!")
+                self._refresh_environment_list()
+            else:
+                QMessageBox.critical(self, "Error", f"Failed to repair environment:\n{message}")
+                
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to repair environment:\n{str(e)}")
+    
+    def _delete_environment(self, env_id: str):
+        """Delete an environment with confirmation"""
+        reply = QMessageBox.question(
+            self,
+            "Confirm Deletion",
+            f"Are you sure you want to delete environment '{env_id}'?\n\nThis action cannot be undone.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+        
+        if reply == QMessageBox.Yes:
+            try:
+                success = self.env_manager.delete_environment(model_id=env_id)
+                if success:
+                    QMessageBox.information(self, "Success", f"Environment '{env_id}' deleted successfully!")
+                    self._refresh_environment_list()
+                    
+                    # Clear detail panel
+                    while self.env_detail_layout.count():
+                        child = self.env_detail_layout.takeAt(0)
+                        if child.widget():
+                            child.widget().deleteLater()
+                    
+                    placeholder = QLabel("Select an environment to view details")
+                    placeholder.setAlignment(Qt.AlignCenter)
+                    placeholder.setStyleSheet("color: rgba(255, 255, 255, 0.5); font-size: 12pt;")
+                    self.env_detail_layout.addWidget(placeholder)
+                else:
+                    QMessageBox.critical(self, "Error", "Failed to delete environment.")
+            except Exception as e:
+                QMessageBox.critical(self, "Error", f"Failed to delete environment:\n{str(e)}")
 
     def _build_info_tab(self) -> QWidget:
         w = QWidget()

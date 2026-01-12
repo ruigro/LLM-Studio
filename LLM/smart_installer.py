@@ -2507,7 +2507,7 @@ if errorlevel 1 (
                     [check_python, "-c", f"import {module_name}; print({module_name}.__version__)"],
                     capture_output=True,
                     text=True,
-                    timeout=3,  # Reduced from 10s to 3s for faster failure detection
+                    timeout=10,  # Increased from 3s to 10s for more reliable checks
                     **self.subprocess_flags
                 )
                 if result.returncode == 0:
@@ -2552,28 +2552,23 @@ if errorlevel 1 (
                 "status_text": "✗ Not Installed"
             })
         
-        # Triton (Windows) - verify using import (package name is triton-windows, import is triton)
+        # Triton (Windows) - verify using SIMPLE import (don't import triton.language - it requires compilation)
         def check_triton_installed():
-            """Check if triton is installed by importing it"""
+            """Check if triton is installed by importing it (SIMPLE check - don't test compilation)"""
             try:
                 result = subprocess.run(
-                    [check_python, "-c", "import triton; import triton.language as tl; import sys; print(sys.executable); print('triton', triton.__version__)"],
+                    [check_python, "-c", "import triton; print(triton.__version__)"],
                     capture_output=True,
                     text=True,
-                    timeout=3,  # Reduced from 10s to 3s for faster failure detection
+                    timeout=10,  # Increased from 3s to 10s for more reliable checks
                     **self.subprocess_flags
                 )
                 if result.returncode == 0:
-                    # Parse version from output (format: "triton X.Y.Z")
-                    lines = result.stdout.strip().split('\n')
-                    for line in lines:
-                        if line.startswith('triton '):
-                            return line.split(' ', 1)[1] if ' ' in line else None
-                    return "installed"  # If import works but can't parse version, still consider it installed
+                    return result.stdout.strip()
                 return None
             except:
                 return None
-        
+
         triton_ver = check_triton_installed()
         if triton_ver:
             checklist.append({
@@ -2590,6 +2585,72 @@ if errorlevel 1 (
                 "status_text": "✗ Not Installed"
             })
         
+        # Mamba SSM - verify using SIMPLE import (check if package is importable)
+        def check_mamba_ssm_installed():
+            """Check if mamba_ssm is installed"""
+            try:
+                result = subprocess.run(
+                    [check_python, "-c", "import mamba_ssm; print(mamba_ssm.__version__)"],
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                    **self.subprocess_flags
+                )
+                if result.returncode == 0:
+                    return result.stdout.strip()
+                return None
+            except:
+                return None
+        
+        mamba_ver = check_mamba_ssm_installed()
+        if mamba_ver:
+            checklist.append({
+                "component": "Mamba SSM",
+                "version": "any",
+                "status": "installed",
+                "status_text": f"✓ Installed ({mamba_ver})"
+            })
+        else:
+            checklist.append({
+                "component": "Mamba SSM",
+                "version": "any",
+                "status": "missing",
+                "status_text": "✗ Not Installed"
+            })
+        
+        # Causal Conv1D - verify using SIMPLE import
+        def check_causal_conv1d_installed():
+            """Check if causal_conv1d is installed"""
+            try:
+                result = subprocess.run(
+                    [check_python, "-c", "import causal_conv1d; print(causal_conv1d.__version__)"],
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                    **self.subprocess_flags
+                )
+                if result.returncode == 0:
+                    return result.stdout.strip()
+                return None
+            except:
+                return None
+        
+        causal_ver = check_causal_conv1d_installed()
+        if causal_ver:
+            checklist.append({
+                "component": "Causal Conv1D",
+                "version": "any",
+                "status": "installed",
+                "status_text": f"✓ Installed ({causal_ver})"
+            })
+        else:
+            checklist.append({
+                "component": "Causal Conv1D",
+                "version": "any",
+                "status": "missing",
+                "status_text": "✗ Not Installed"
+            })
+        
         # PySide6 packages (verify using import only)
         def check_pyside6_import(module_name):
             """Check PySide6 using import"""
@@ -2598,7 +2659,7 @@ if errorlevel 1 (
                     [check_python, "-c", f"import {module_name}; print('OK')"],
                     capture_output=True,
                     text=True,
-                    timeout=3,  # Reduced from 10s to 3s for faster failure detection
+                    timeout=10,  # Increased from 3s to 10s for more reliable checks
                     **self.subprocess_flags
                 )
                 if result.returncode == 0:
@@ -2608,7 +2669,7 @@ if errorlevel 1 (
                             [check_python, "-c", f"import {module_name}; print({module_name}.__version__)"],
                             capture_output=True,
                             text=True,
-                            timeout=3,  # Reduced from 10s to 3s for faster failure detection
+                            timeout=10,  # Increased from 3s to 10s for more reliable checks
                             **self.subprocess_flags
                         )
                         if ver_result.returncode == 0:
@@ -2662,7 +2723,7 @@ if errorlevel 1 (
         
         # PROFILE IS THE ONLY SOURCE OF TRUTH - Load packages from profile
         try:
-            from core.system_detector import SystemDetector
+            from system_detector import SystemDetector
             from core.profile_selector import ProfileSelector
             
             detector = SystemDetector()
@@ -2673,7 +2734,7 @@ if errorlevel 1 (
                 raise FileNotFoundError(f"compatibility_matrix.json not found at {compat_matrix_path}")
             
             selector = ProfileSelector(compat_matrix_path)
-            profile_name, package_versions, warnings = selector.select_profile(hw_profile)
+            profile_name, package_versions, warnings, binary_packages = selector.select_profile(hw_profile)
             
             # Add packages from profile
             for pkg_name, pkg_version in package_versions.items():

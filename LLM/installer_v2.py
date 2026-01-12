@@ -17,6 +17,7 @@ from core.wheelhouse import WheelhouseManager
 from core.immutable_installer import ImmutableInstaller, InstallationFailed
 from system_detector import SystemDetector
 from core.python_runtime import PythonRuntimeManager
+from core.environment_manager import EnvironmentManager
 
 
 class InstallerV2:
@@ -39,6 +40,9 @@ class InstallerV2:
         
         # Initialize Python runtime manager for self-contained Python
         self.python_runtime_manager = PythonRuntimeManager(self.root)
+        
+        # Initialize environment manager for per-model isolated environments
+        self.env_manager = EnvironmentManager(self.root)
         
         # Verify manifest exists and load it
         if not self.manifest_path.exists():
@@ -155,6 +159,7 @@ class InstallerV2:
                 self.log("\n⚠ Using legacy fixed-version installation")
                 cuda_config = self._determine_cuda_config(results)
                 package_versions = None  # Will use manifest
+                binary_packages = None  # No binary packages in legacy mode
             
             self.log(f"\n✓ Target configuration: {cuda_config}")
             
@@ -170,7 +175,7 @@ class InstallerV2:
                     cuda_config, 
                     python_version,
                     package_versions,  # Pass hardware-specific versions or None
-                    binary_packages if use_profile else None  # Pass binary packages if using profile
+                    binary_packages if self.use_adaptive else None  # Pass binary packages if using profile
                 )
                 
                 if not success:
@@ -206,42 +211,59 @@ class InstallerV2:
                 python_exe = None
             
             installer = ImmutableInstaller(self.venv, self.wheelhouse, self.manifest_path, python_executable=python_exe)
-            success, error = installer.install(cuda_config, package_versions=package_versions, binary_packages=binary_packages if use_profile else None)
+            success, error = installer.install(cuda_config, package_versions=package_versions, binary_packages=binary_packages if self.use_adaptive else None)
             
             if not success:
                 self.log(f"\n✗ Installation failed:")
                 self.log(f"  {error}")
                 
-                # Check if this is a version conflict error (package installed but wrong version)
-                is_version_conflict = any(phrase in error.lower() for phrase in [
-                    "is required",
-                    "but found",
-                    "version",
-                    "importerror",
-                    "package installed but import failed"
+                # IMPROVED: More selective detection of errors that warrant wheelhouse clearing
+                # Only clear wheelhouse if there's actual evidence of corrupted/incompatible wheels
+                
+                # Check if this is a WHEELHOUSE-SPECIFIC error (corrupted wheels, missing wheels)
+                is_wheelhouse_error = any(phrase in error for phrase in [
+                    "Could not find a version",
+                    "No matching distribution found",
+                    "Invalid wheel",
+                    "corrupted",
+                    "METADATA file",
+                    "not a supported wheel"
                 ])
                 
-                # Check if this is SPECIFICALLY a version mismatch error with the wheelhouse
-                # Only retry if we see package version errors AND wheelhouse exists
-                is_version_error = any(phrase in error for phrase in [
-                    "Could not find a version",
-                    "No matching distribution found"
-                ]) or is_version_conflict
+                # Check if this is an import error (package installed but imports fail)
+                # These should NOT trigger wheelhouse clearing - they're usually dependency issues
+                is_import_error = any(phrase in error.lower() for phrase in [
+                    "importerror",
+                    "modulenotfounderror",
+                    "cannot import name",
+                    "no module named"
+                ])
+                
+                # Check if this is a version conflict error (package installed but wrong version)
+                # These should trigger repair, but preserve wheelhouse if possible
+                is_version_conflict = any(phrase in error.lower() for phrase in [
+                    "is required",
+                    "but found"
+                ]) and "version" in error.lower()
                 
                 has_wheelhouse = self.wheelhouse.exists() and len(list(self.wheelhouse.glob("*.whl"))) > 0
                 
-                if is_version_error and has_wheelhouse:
+                # Only retry with wheelhouse operations if it's a wheelhouse error OR version conflict
+                # Do NOT retry on simple import errors - those need dependency fixes, not re-downloads
+                should_retry_with_wheelhouse = (is_wheelhouse_error or is_version_conflict) and has_wheelhouse and not is_import_error
+                
+                if should_retry_with_wheelhouse:
                     if is_version_conflict:
                         self.log("\n⚠ Detected version conflict - package installed but wrong version")
-                        self.log("  This usually means the wheelhouse has incompatible package versions")
-                        self.log("  The installer will clear the wheelhouse and re-download with correct versions")
-                    else:
-                        self.log("\n⚠ Detected version mismatch between wheelhouse and installation requirements")
-                        self.log("  This usually means the wheelhouse was built for different hardware or requirements changed")
+                        self.log("  Will try to repair without clearing wheelhouse first...")
+                    elif is_wheelhouse_error:
+                        self.log("\n⚠ Detected wheelhouse error - missing or corrupted wheel files")
+                        self.log("  Will validate wheelhouse and re-download only if needed")
                     
-                    # Check if venv exists - if so, try resume mode first
+                    # Check if venv exists - if so, try resume mode first WITHOUT clearing wheelhouse
                     venv_exists = self.venv.exists()
                     wheelhouse_valid = False
+                    wheelhouse_needs_clearing = False
                     
                     if venv_exists:
                         # Check if wheelhouse validation passes (wheels satisfy current requirements)
@@ -256,6 +278,7 @@ class InstallerV2:
                         if is_valid:
                             self.log("  ✓ Wheelhouse validation passed - wheels satisfy current requirements")
                             self.log("  ✓ Venv exists - will resume installation from where we left off")
+                            self.log("  ✓ Keeping wheelhouse intact (no re-download needed)")
                             self.log("\n🔄 Retrying installation in resume mode...")
                             self.log("=" * 60)
                             
@@ -263,73 +286,91 @@ class InstallerV2:
                             python_exe = getattr(self, '_python_executable', None)
                             python_exe = Path(python_exe) if python_exe else None
                             installer = ImmutableInstaller(self.venv, self.wheelhouse, self.manifest_path, python_executable=python_exe)
-                            success, error = installer.install(cuda_config, package_versions=package_versions)
+                            success, error = installer.install(cuda_config, package_versions=package_versions, binary_packages=binary_packages if self.use_adaptive else None)
                             
                             if success:
                                 self.log("\n✓ Installation succeeded after resume!")
                                 return True
                             else:
                                 self.log(f"\n⚠ Resume failed: {error}")
-                                self.log("  Will try full reinstall...")
+                                self.log("  Will now clear wheelhouse and re-download...")
+                                wheelhouse_needs_clearing = True
                         else:
                             self.log(f"  ⚠ Wheelhouse validation failed: {error_msg}")
-                            self.log("  Will clear wheelhouse and re-download...")
+                            self.log("  Wheelhouse needs to be cleared and re-downloaded")
+                            wheelhouse_needs_clearing = True
+                    else:
+                        # No venv exists - if wheelhouse error, we need to clear and re-download
+                        if is_wheelhouse_error:
+                            self.log("  ⚠ No venv exists and wheelhouse has errors")
+                            wheelhouse_needs_clearing = True
                     
-                    # Full retry: Clear wheelhouse and re-download
-                    self.log("\n🔄 Auto-fixing: Clearing wheelhouse and re-downloading for your hardware...")
-                    
-                    # Clear wheelhouse only
-                    import shutil
-                    shutil.rmtree(self.wheelhouse, ignore_errors=True)
-                    self.log("  ✓ Wheelhouse cleared")
-                    
-                    # Only clear venv if resume wasn't attempted or wheelhouse validation failed
-                    if not venv_exists or not wheelhouse_valid:
-                        if self.venv.exists():
-                            shutil.rmtree(self.venv, ignore_errors=True)
-                            self.log("  ✓ Venv cleared")
-                    
-                    self.log("\n🔄 Retrying installation with fresh downloads for your GPU...")
-                    self.log("=" * 60)
-                    
-                    # Retry: Prepare wheelhouse again
-                    self.log("\nPHASE 1 (RETRY): Wheelhouse Preparation")
-                    self.log("-" * 60)
-                    
-                    wheelhouse_mgr = WheelhouseManager(self.manifest_path, self.wheelhouse)
-                    python_version = (sys.version_info.major, sys.version_info.minor)
-                    success, error = wheelhouse_mgr.prepare_wheelhouse(
-                        cuda_config, 
-                        python_version,
-                        package_versions,
-                        binary_packages if use_profile else None,  # Pass binary packages if using profile
-                        force_redownload=True  # Force fresh download
-                    )
-                    
-                    if not success:
-                        self.log(f"\n✗ Retry failed - wheelhouse preparation:")
-                        self.log(f"  {error}")
+                    # Only clear wheelhouse if validation failed OR it's a wheelhouse error
+                    if wheelhouse_needs_clearing or is_wheelhouse_error:
+                        # Full retry: Clear wheelhouse and re-download
+                        self.log("\n🔄 Clearing wheelhouse and re-downloading (wheelhouse validation failed or corrupted)...")
+                        
+                        # Clear wheelhouse only
+                        import shutil
+                        shutil.rmtree(self.wheelhouse, ignore_errors=True)
+                        self.log("  ✓ Wheelhouse cleared")
+                        
+                        # Only clear venv if it doesn't exist OR wheelhouse validation failed
+                        if not venv_exists or not wheelhouse_valid:
+                            if self.venv.exists():
+                                shutil.rmtree(self.venv, ignore_errors=True)
+                                self.log("  ✓ Venv cleared")
+                        
+                        self.log("\n🔄 Retrying installation with fresh downloads for your GPU...")
+                        self.log("=" * 60)
+                        
+                        # Retry: Prepare wheelhouse again
+                        self.log("\nPHASE 1 (RETRY): Wheelhouse Preparation")
+                        self.log("-" * 60)
+                        
+                        wheelhouse_mgr = WheelhouseManager(self.manifest_path, self.wheelhouse)
+                        python_version = (sys.version_info.major, sys.version_info.minor)
+                        success, error = wheelhouse_mgr.prepare_wheelhouse(
+                            cuda_config, 
+                            python_version,
+                            package_versions,
+                            binary_packages if self.use_adaptive else None,  # Pass binary packages if using profile
+                            force_redownload=True  # Force fresh download
+                        )
+                        
+                        if not success:
+                            self.log(f"\n✗ Retry failed - wheelhouse preparation:")
+                            self.log(f"  {error}")
+                            return False
+                        
+                        self.log("\n✓ Wheelhouse ready (retry)")
+                        
+                        # Retry: Install again
+                        self.log("\nPHASE 2-6 (RETRY): Environment Installation")
+                        self.log("-" * 60)
+                        
+                        python_exe = getattr(self, '_python_executable', None)
+                        python_exe = Path(python_exe) if python_exe else None
+                        installer = ImmutableInstaller(self.venv, self.wheelhouse, self.manifest_path, python_executable=python_exe)
+                        success, error = installer.install(cuda_config, package_versions=package_versions, binary_packages=binary_packages if self.use_adaptive else None)
+                        
+                        if not success:
+                            self.log(f"\n✗ Installation still failed after retry:")
+                            self.log(f"  {error}")
+                            return False
+                        
+                        self.log("\n✓ Installation succeeded after retry!")
+                    else:
+                        # Wheelhouse is OK, just return error without clearing
+                        self.log("  ℹ Wheelhouse is valid - keeping it intact")
+                        self.log("  ℹ This error doesn't warrant clearing the wheelhouse")
                         return False
-                    
-                    self.log("\n✓ Wheelhouse ready (retry)")
-                    
-                    # Retry: Install again
-                    self.log("\nPHASE 2-6 (RETRY): Environment Installation")
-                    self.log("-" * 60)
-                    
-                    python_exe = getattr(self, '_python_executable', None)
-                    python_exe = Path(python_exe) if python_exe else None
-                    installer = ImmutableInstaller(self.venv, self.wheelhouse, self.manifest_path, python_executable=python_exe)
-                    success, error = installer.install(cuda_config, package_versions=package_versions)
-                    
-                    if not success:
-                        self.log(f"\n✗ Installation still failed after retry:")
-                        self.log(f"  {error}")
-                        return False
-                    
-                    self.log("\n✓ Installation succeeded after retry!")
                 else:
-                    # Not a version mismatch error - just fail without retry
+                    # Not a wheelhouse or version error - don't clear wheelhouse, just fail
+                    if is_import_error:
+                        self.log("\n⚠ This is an import error, not a wheelhouse problem")
+                        self.log("  Wheelhouse will NOT be cleared - the issue is with dependencies or installation")
+                    self.log("  ℹ Preserving wheelhouse - can retry with same downloads")
                     return False
             
             self.log("\n" + "=" * 60)
@@ -352,6 +393,143 @@ class InstallerV2:
             self.log("\nFull traceback:")
             self.log(traceback.format_exc())
             
+            return False
+    
+    def repair_model_environment(self, model_id: str = None, model_path: str = None) -> bool:
+        """
+        Repair a specific model's isolated environment.
+        Creates the environment if it doesn't exist, then installs/repairs packages.
+        
+        Args:
+            model_id: HuggingFace model ID
+            model_path: Local model path
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            self.log("=" * 60)
+            self.log(f"Repairing environment for model: {model_id or model_path}")
+            self.log("=" * 60)
+            
+            # Get or create model environment
+            env_path = self.env_manager.get_environment_path(model_id=model_id, model_path=model_path)
+            venv_path = env_path / ".venv"
+            
+            if not venv_path.exists():
+                self.log(f"\nCreating new environment for model at: {env_path}")
+                # Get Python runtime
+                python_runtime = self.python_runtime_manager.get_python_runtime("3.12")
+                if not python_runtime:
+                    self.log("\n✗ Failed to get Python runtime")
+                    return False
+                
+                # Get hardware profile
+                detector = SystemDetector()
+                detector.detect_all()
+                hw_profile = detector.get_hardware_profile()
+                from core.profile_selector import ProfileSelector
+                selector = ProfileSelector(self.compat_matrix_path)
+                profile_name, _, _, _ = selector.select_profile(hw_profile)
+                
+                # Create environment
+                success, error = self.env_manager.create_environment(
+                    model_id=model_id,
+                    model_path=model_path,
+                    python_runtime=python_runtime,
+                    profile_name=profile_name
+                )
+                if not success:
+                    self.log(f"\n✗ Failed to create environment: {error}")
+                    return False
+                self.log("✓ Environment created")
+            
+            # Get venv Python
+            if sys.platform == 'win32':
+                target_python = venv_path / "Scripts" / "python.exe"
+            else:
+                target_python = venv_path / "bin" / "python"
+            
+            if not target_python.exists():
+                self.log(f"\n✗ Python not found in environment: {target_python}")
+                return False
+            
+            self.log(f"\nTarget environment: {env_path}")
+            self.log(f"Target Python: {target_python}")
+            
+            # Continue with normal repair flow but targeting this environment
+            # (rest of repair logic, but use venv_path instead of self.venv)
+            # For now, delegate to the main repair but with custom venv path
+            # We'll need to modify ImmutableInstaller to accept a custom venv path
+            
+            # Check wheelhouse
+            if not self.wheelhouse.exists() or len(list(self.wheelhouse.glob("*.whl"))) == 0:
+                self.log("\n⚠ Wheelhouse not found or empty.")
+                self.log("  Will prepare wheelhouse first...")
+            else:
+                wheel_count = len(list(self.wheelhouse.glob("*.whl")))
+                self.log(f"\n✓ Found existing wheelhouse with {wheel_count} wheels")
+            
+            # Detection
+            detector = SystemDetector()
+            results = detector.detect_all()
+            results['python'] = {
+                'found': True,
+                'version': f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}",
+                'executable': str(target_python),
+                'path': str(target_python.parent),
+                'pip_available': True
+            }
+            
+            # Get profile
+            if self.use_adaptive:
+                from core.profile_selector import ProfileSelector
+                hw_profile = detector.get_hardware_profile()
+                selector = ProfileSelector(self.compat_matrix_path)
+                profile_name, package_versions, warnings, binary_packages = selector.select_profile(hw_profile)
+                cuda_config = self._extract_cuda_config(package_versions.get("torch", ""))
+            else:
+                cuda_config = self._determine_cuda_config(results)
+                package_versions = None
+                binary_packages = None
+            
+            # Prepare wheelhouse
+            wheelhouse_mgr = WheelhouseManager(self.manifest_path, self.wheelhouse)
+            python_version = (sys.version_info.major, sys.version_info.minor)
+            success, error = wheelhouse_mgr.prepare_wheelhouse(
+                cuda_config, 
+                python_version,
+                package_versions,
+                binary_packages if self.use_adaptive else None,
+                force_redownload=False
+            )
+            
+            if not success:
+                self.log(f"\n✗ Wheelhouse preparation failed: {error}")
+                return False
+            
+            # Install packages into this model's environment
+            python_runtime = self.python_runtime_manager.get_python_runtime("3.12")
+            installer = ImmutableInstaller(venv_path, self.wheelhouse, self.manifest_path, python_executable=python_runtime)
+            success, error = installer.install(
+                cuda_config,
+                package_versions=package_versions,
+                binary_packages=binary_packages if self.use_adaptive else None
+            )
+            
+            if not success:
+                self.log(f"\n✗ Installation failed: {error}")
+                return False
+            
+            self.log("\n" + "=" * 60)
+            self.log("✓ Model environment repair complete!")
+            self.log("=" * 60)
+            return True
+            
+        except Exception as e:
+            self.log(f"\n✗ Repair failed: {e}")
+            import traceback
+            self.log(traceback.format_exc())
             return False
     
     def repair(self) -> bool:

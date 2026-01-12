@@ -216,12 +216,22 @@ class HybridFrameWindow(QWidget):
 
         # Top-center badge image
         if self.top_center and not self.top_center.isNull():
+            # Requirement: top-center badge must be 150px wide (logical px),
+            # and should keep the same vertical placement behavior as before.
             badge_h = int(cs * 0.65)
-            badge_w = int(cs * 1.6)
+            badge_w = 150
             x = (w - badge_w) // 2
             y = max(0, t // 2)
             target = QRect(x, y, badge_w, badge_h)
-            self._draw_scaled(p, self.top_center, target)
+
+            # HiDPI-safe scaling: scale in device pixels, then center in target rect.
+            dpr = float(self.devicePixelRatioF()) if hasattr(self, "devicePixelRatioF") else 1.0
+            scaled = self.top_center.scaledToWidth(int(badge_w * dpr), Qt.SmoothTransformation)
+            scaled.setDevicePixelRatio(dpr)
+            size = scaled.deviceIndependentSize()
+            px = target.x() + (target.width() - int(size.width())) // 2
+            py = target.y() + (target.height() - int(size.height())) // 2
+            p.drawPixmap(px, py, scaled)
 
     def _draw_corner_brackets(self, p: QPainter, r: QRect, *, length: int, inset: int) -> None:
         x1, y1, x2, y2 = r.left(), r.top(), r.right(), r.bottom()

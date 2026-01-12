@@ -447,13 +447,22 @@ class InstallerGUI:
                 return
             
             # Clear existing items
-            for item in self.checklist_tree.get_children():
-                self.checklist_tree.delete(item)
+            try:
+                for item in self.checklist_tree.get_children():
+                    self.checklist_tree.delete(item)
+            except Exception as e:
+                self._log(f"Error clearing checklist: {e}")
             
             # Show loading indicator
-            self.checklist_loading_label.grid()
-            self.checklist_tree.config(state="disabled")
-            self.root.update_idletasks()
+            try:
+                self.checklist_loading_label.grid()
+                # Note: ttk.Treeview doesn't support state="disabled", so we disable selection instead
+                self.checklist_tree.config(selectmode="none")
+                self.root.update_idletasks()
+            except Exception as e:
+                self._log(f"Error configuring checklist tree: {e}")
+                import traceback
+                self._log(traceback.format_exc())
             
             # Determine which Python to use for checking
             venv_path = Path(__file__).parent / ".venv"
@@ -484,7 +493,7 @@ class InstallerGUI:
             self._log(f"Error starting checklist generation: {str(e)}")
             self._log(f"Traceback: {traceback.format_exc()}")
             self.checklist_loading_label.grid_remove()
-            self.checklist_tree.config(state="normal")
+            self.checklist_tree.config(selectmode="browse")
     
     def _on_checklist_ready(self, checklist, error):
         """Callback when checklist generation completes"""
@@ -493,8 +502,14 @@ class InstallerGUI:
                 return
             
             # Hide loading indicator
-            self.checklist_loading_label.grid_remove()
-            self.checklist_tree.config(state="normal")
+            try:
+                self.checklist_loading_label.grid_remove()
+                # Note: ttk.Treeview doesn't support state="normal", use selectmode="browse" instead
+                self.checklist_tree.config(selectmode="browse")
+            except Exception as e:
+                self._log(f"Error re-enabling checklist tree: {e}")
+                import traceback
+                self._log(traceback.format_exc())
             
             if error:
                 import traceback
@@ -560,9 +575,12 @@ class InstallerGUI:
         finally:
             # Ensure loading indicator is hidden and tree is enabled
             try:
-                self.checklist_loading_label.grid_remove()
-                self.checklist_tree.config(state="normal")
-            except:
+                if not self._root_destroyed:
+                    self.checklist_loading_label.grid_remove()
+                    # Note: ttk.Treeview doesn't support state="normal", use selectmode="browse" instead
+                    self.checklist_tree.config(selectmode="browse")
+            except Exception as e:
+                # Silently fail - widget might be destroyed
                 pass
     
     def _on_checklist_item_selected(self, event):
@@ -919,9 +937,14 @@ def main():
         print(f"CRASH: {e}")
         print(traceback.format_exc())
         try:
+            # Show error dialog - this will block until user clicks OK
             messagebox.showerror("Fatal Error", f"The installer crashed.\n\nError: {str(e)}\n\nCheck logs/installer_crash.log for details.")
-        except:
-            pass
+            # After dialog closes, exit gracefully instead of crashing
+            sys.exit(1)
+        except Exception as e2:
+            # If showing dialog also fails, just exit
+            print(f"Error showing dialog: {e2}")
+            sys.exit(1)
 
 
 if __name__ == "__main__":

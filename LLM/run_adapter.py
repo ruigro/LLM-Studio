@@ -37,6 +37,16 @@ except Exception:
     pass
 
 
+def _bitsandbytes_available() -> bool:
+    # Allow 4-bit on Windows if bitsandbytes is actually importable.
+    # Older code disabled it unconditionally on Windows, which forces FP16 and can make large models "hang".
+    try:
+        import bitsandbytes  # type: ignore  # noqa: F401
+        return True
+    except Exception:
+        return False
+
+
 def load_model(base_model, adapter_dir, use_4bit=True, offload=True):
     import os
     import sys
@@ -112,9 +122,14 @@ def load_model(base_model, adapter_dir, use_4bit=True, offload=True):
             print(f"[INFO] Set pad_token to eos_token: {tokenizer.eos_token}", file=sys.stderr)
         
         # Load base model
-        # On Windows, bitsandbytes is unreliable - use FP16 instead
-        if use_4bit and not IS_WINDOWS:
-            print(f"[INFO] Loading with 4-bit quantization (non-Windows)", file=sys.stderr)
+        # Previously we disabled bitsandbytes on Windows unconditionally.
+        # Now: enable 4-bit on Windows when bitsandbytes is importable (we install/fix it in our environment).
+        bnb_ok = _bitsandbytes_available()
+        if use_4bit and (not IS_WINDOWS or bnb_ok):
+            if IS_WINDOWS:
+                print(f"[INFO] Windows detected - bitsandbytes available, using 4-bit quantization", file=sys.stderr)
+            else:
+                print(f"[INFO] Loading with 4-bit quantization (non-Windows)", file=sys.stderr)
             bnb_config = BitsAndBytesConfig(
                 load_in_4bit=True,
                 bnb_4bit_compute_dtype=torch.float16,
@@ -157,9 +172,9 @@ def load_model(base_model, adapter_dir, use_4bit=True, offload=True):
                     trust_remote_code=True,
                 )
         else:
-            # Windows or non-4bit: use FP16 on CUDA
-            if IS_WINDOWS:
-                print("[INFO] Windows detected - loading with FP16 (bitsandbytes disabled)")
+            # No 4-bit: use FP16 on CUDA/CPU
+            if IS_WINDOWS and use_4bit and not bnb_ok:
+                print("[INFO] Windows detected - bitsandbytes not available, falling back to FP16", file=sys.stderr)
             else:
                 print("[INFO] Loading without quantization")
             
@@ -353,6 +368,226 @@ def generate_text(tokenizer, model, prompt, max_new_tokens=128, temperature=0.7,
     model.eval()
     device = next(model.parameters()).device
     
+    # Check if this is a NemotronH model that requires a cache
+    is_nemotron_h = False
+    nemotron_cache = None
+    try:
+        model_class_name = model.__class__.__name__
+        config_class_name = model.config.__class__.__name__ if hasattr(model, 'config') else ""
+        model_type = getattr(model.config, 'model_type', '').lower() if hasattr(model, 'config') else ""
+        architectures = getattr(model.config, 'architectures', []) if hasattr(model, 'config') else []
+        arch_str = " ".join(architectures).lower() if architectures else ""
+        
+        # Check for NemotronH models (various naming conventions)
+        # Check model class, config class, model_type, and architectures
+        # Also check if the warning message appears (which indicates it's a NemotronH model)
+        is_nemotron_model = (
+            "nemotron" in model_class_name.lower() or 
+            "nemotron" in config_class_name.lower() or 
+            "nemotron" in model_type or
+            "nemotron" in arch_str or
+            "NemotronH" in model_class_name or 
+            "NemotronH" in config_class_name or
+            "NemotronH" in arch_str
+        )
+        
+        if is_nemotron_model:
+            is_nemotron_h = True
+            print(f"[DEBUG] Detected Nemotron model: class={model_class_name}, config={config_class_name}, type={model_type}, arch={arch_str}", file=sys.stderr)
+            
+            # Try multiple import paths for the cache - start with model's own module
+            nemotron_cache_class = None
+            
+            # First: try to get it from the model's own module (most reliable)
+            # Nemotron models often have the cache class in their custom modeling file
+            try:
+                model_module = model.__class__.__module__
+                print(f"[DEBUG] Model module: {model_module}", file=sys.stderr)
+                if model_module:
+                    # The cache class is likely in the same module or a cache_utils submodule
+                    # Try multiple strategies to find it
+                    
+                    # Strategy 1: Check if it's in the same module as the model class
+                    try:
+                        modeling_module = __import__(model_module, fromlist=["NemotronHHybridDynamicCache"])
+                        nemotron_cache_class = getattr(modeling_module, "NemotronHHybridDynamicCache", None)
+                        if nemotron_cache_class:
+                            print(f"[INFO] Found NemotronHHybridDynamicCache in model module {model_module}", file=sys.stderr)
+                    except (ImportError, AttributeError):
+                        pass
+                    
+                    # Strategy 2: Try cache_utils in various locations relative to the model module
+                    if nemotron_cache_class is None:
+                        base_module = model_module.rsplit('.', 1)[0]
+                        # Try different cache_utils paths
+                        cache_paths = [
+                            base_module + '.cache_utils',
+                            model_module + '.cache_utils',  # Same level as modeling
+                        ]
+                        # Also try parent packages
+                        if '.' in base_module:
+                            cache_paths.append(base_module.rsplit('.', 1)[0] + '.cache_utils')
+                        # Add standard transformers paths
+                        cache_paths.extend([
+                            'transformers.models.nemotron_h.cache_utils',
+                            'transformers.cache_utils',
+                        ])
+                        
+                        for cache_module_path in cache_paths:
+                            try:
+                                print(f"[DEBUG] Trying to import from {cache_module_path}", file=sys.stderr)
+                                module = __import__(cache_module_path, fromlist=["NemotronHHybridDynamicCache"])
+                                nemotron_cache_class = getattr(module, "NemotronHHybridDynamicCache", None)
+                                if nemotron_cache_class:
+                                    print(f"[INFO] Found NemotronHHybridDynamicCache in {cache_module_path}", file=sys.stderr)
+                                    break
+                            except (ImportError, AttributeError) as import_err:
+                                print(f"[DEBUG] Failed to import from {cache_module_path}: {import_err}", file=sys.stderr)
+                                continue
+                    
+                    # Strategy 3: Use inspect to find the cache class in the model's module
+                    if nemotron_cache_class is None:
+                        try:
+                            import inspect
+                            # Get all members of the modeling module
+                            modeling_module = __import__(model_module, fromlist=[])
+                            for name, obj in inspect.getmembers(modeling_module):
+                                if (inspect.isclass(obj) and 
+                                    'NemotronHHybridDynamicCache' in name and 
+                                    'Cache' in name):
+                                    nemotron_cache_class = obj
+                                    print(f"[INFO] Found cache class via inspect: {name} in {model_module}", file=sys.stderr)
+                                    break
+                        except Exception as inspect_err:
+                            print(f"[DEBUG] Inspect method failed: {inspect_err}", file=sys.stderr)
+                    
+                    # Strategy 4: Try to get it from the model's config or by inspecting the model class
+                    if nemotron_cache_class is None:
+                        try:
+                            # Some models define the cache class as a class attribute or in the config
+                            if hasattr(model.config, 'cache_class'):
+                                cache_class_name = model.config.cache_class
+                                if cache_class_name:
+                                    # Try to import it dynamically
+                                    parts = cache_class_name.split('.')
+                                    module_name = '.'.join(parts[:-1])
+                                    class_name = parts[-1]
+                                    if module_name:
+                                        cache_module = __import__(module_name, fromlist=[class_name])
+                                        nemotron_cache_class = getattr(cache_module, class_name, None)
+                                        if nemotron_cache_class:
+                                            print(f"[INFO] Found cache class from config: {cache_class_name}", file=sys.stderr)
+                        except Exception:
+                            pass
+                    
+                    # Strategy 5: Try importing from the exact module path that the warning suggests
+                    if nemotron_cache_class is None:
+                        try:
+                            # The warning format suggests: transformers_modules.nvidia.NVIDIA-Nemotron-Nano-9B-v2.xxx.modeling_nemotron_h
+                            # Try to construct cache_utils path from modeling path
+                            if 'modeling_nemotron' in model_module or 'modeling' in model_module:
+                                # Replace 'modeling' with 'cache_utils'
+                                cache_module_path = model_module.replace('modeling_nemotron', 'cache_utils').replace('modeling', 'cache_utils')
+                                if cache_module_path != model_module:
+                                    try:
+                                        cache_module = __import__(cache_module_path, fromlist=["NemotronHHybridDynamicCache"])
+                                        nemotron_cache_class = getattr(cache_module, "NemotronHHybridDynamicCache", None)
+                                        if nemotron_cache_class:
+                                            print(f"[INFO] Found cache class in constructed path: {cache_module_path}", file=sys.stderr)
+                                    except (ImportError, AttributeError):
+                                        pass
+                        except Exception:
+                            pass
+                            
+            except Exception as e:
+                print(f"[DEBUG] Error checking model module for cache: {e}", file=sys.stderr)
+                import traceback
+                traceback.print_exc(file=sys.stderr)
+            
+            # Second: try standard transformers locations
+            if nemotron_cache_class is None:
+                import_paths = [
+                    "transformers.cache_utils",
+                    "transformers.models.nemotron_h.cache_utils",
+                    "transformers",
+                ]
+                
+                for import_path in import_paths:
+                    try:
+                        if import_path == "transformers":
+                            from transformers import NemotronHHybridDynamicCache
+                        else:
+                            module = __import__(import_path, fromlist=["NemotronHHybridDynamicCache"])
+                            NemotronHHybridDynamicCache = getattr(module, "NemotronHHybridDynamicCache")
+                        nemotron_cache_class = NemotronHHybridDynamicCache
+                        print(f"[INFO] Found NemotronHHybridDynamicCache in {import_path}", file=sys.stderr)
+                        break
+                    except (ImportError, AttributeError):
+                        continue
+            
+            if nemotron_cache_class is not None:
+                try:
+                    # Initialize cache with proper parameters
+                    # Try with all required parameters first
+                    try:
+                        nemotron_cache = nemotron_cache_class(
+                            config=model.config,
+                            max_batch_size=1,  # Single batch for inference
+                            max_cache_len=2048,  # Reasonable cache length
+                            device=device,
+                            dtype=next(model.parameters()).dtype
+                        )
+                    except TypeError:
+                        # If that fails, try with just config
+                        try:
+                            nemotron_cache = nemotron_cache_class(config=model.config)
+                        except TypeError:
+                            # If that also fails, try minimal initialization
+                            nemotron_cache = nemotron_cache_class()
+                    print(f"[INFO] Initialized NemotronHHybridDynamicCache for {model_class_name}", file=sys.stderr)
+                except Exception as e:
+                    print(f"[WARN] Failed to initialize NemotronHHybridDynamicCache: {e}", file=sys.stderr)
+                    import traceback
+                    traceback.print_exc(file=sys.stderr)
+            else:
+                print(f"[WARN] NemotronHHybridDynamicCache class not found - trying alternative methods", file=sys.stderr)
+                # Alternative: Check if model has a method to create cache
+                try:
+                    if hasattr(model, 'create_cache') or hasattr(model, '_create_cache'):
+                        cache_method = getattr(model, 'create_cache', None) or getattr(model, '_create_cache', None)
+                        if cache_method:
+                            try:
+                                nemotron_cache = cache_method()
+                                print(f"[INFO] Created cache using model's create_cache method", file=sys.stderr)
+                            except Exception as e:
+                                print(f"[DEBUG] Model's create_cache failed: {e}", file=sys.stderr)
+                except Exception:
+                    pass
+                
+                # Last resort: Try to find and instantiate from model's __dict__ or class attributes
+                if nemotron_cache is None:
+                    try:
+                        # Check if cache class is a class attribute of the model
+                        for attr_name in dir(model.__class__):
+                            if 'cache' in attr_name.lower() and 'class' in attr_name.lower():
+                                attr = getattr(model.__class__, attr_name)
+                                if isinstance(attr, type) and 'Nemotron' in str(attr):
+                                    try:
+                                        nemotron_cache = attr(config=model.config)
+                                        print(f"[INFO] Created cache from model class attribute {attr_name}", file=sys.stderr)
+                                        break
+                                    except Exception:
+                                        pass
+                    except Exception:
+                        pass
+                
+                if nemotron_cache is None:
+                    print(f"[WARN] Could not create NemotronHHybridDynamicCache - generation may show warnings", file=sys.stderr)
+    except Exception as e:
+        print(f"[DEBUG] Error detecting NemotronH model: {e}", file=sys.stderr)
+        import traceback
+        traceback.print_exc(file=sys.stderr)
+    
     # Format prompt based on model type
     if model_type == "instruct":
         # Use chat template for instruct models
@@ -371,7 +606,6 @@ def generate_text(tokenizer, model, prompt, max_new_tokens=128, temperature=0.7,
             )
         except Exception as e:
             # Fallback if tokenizer doesn't have chat template - manually format
-            import sys
             print(f"[WARN] Chat template not available: {e}. Using manual formatting.", file=sys.stderr)
             if system_prompt:
                 formatted_prompt = f"{system_prompt}\n\n{prompt}"
@@ -403,7 +637,19 @@ def generate_text(tokenizer, model, prompt, max_new_tokens=128, temperature=0.7,
         "max_new_tokens": max_new_tokens,
         "pad_token_id": tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id,
         "eos_token_id": tokenizer.eos_token_id,
+        "use_cache": True,  # Enable caching
     }
+    
+    # Add cache for NemotronH models (must use 'cache' parameter, not 'past_key_values')
+    if is_nemotron_h:
+        if nemotron_cache is not None:
+            gen_kwargs["cache"] = nemotron_cache
+            print(f"[INFO] Using NemotronHHybridDynamicCache for generation", file=sys.stderr)
+        else:
+            # If we couldn't create the cache, the model will show a warning but should still work
+            # The warning is just informational - the model will work without explicit cache
+            print(f"[WARN] NemotronH cache not initialized - model will use default caching (may show warning)", file=sys.stderr)
+            # Don't set cache=None as that might cause issues - let the model handle it
     
     # Only add sampling parameters if temperature > 0
     if temperature > 0:

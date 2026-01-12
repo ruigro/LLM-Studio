@@ -129,6 +129,12 @@ class WheelhouseManager:
                 # Can't validate complex specifiers without packaging
                 # Assume OK if we can't verify (conservative approach)
                 return True
+
+        # Normalize bare versions like "6.8.1" or "12.6.*" into valid specifiers.
+        # SpecifierSet requires an operator (e.g. "==6.8.1").
+        requirement_spec = str(requirement_spec or "").strip()
+        if requirement_spec and not requirement_spec.startswith(("==", ">=", "<=", ">", "<", "!=")) and "," not in requirement_spec:
+            requirement_spec = f"=={requirement_spec}"
         
         try:
             # Parse requirement specifier
@@ -236,7 +242,7 @@ class WheelhouseManager:
             # Validate ALL packages from profile, not just a hardcoded list
             # Profile is the single source of truth - every package must match exactly
             for pkg_name in package_versions.keys():
-                    expected_version = package_versions[pkg_name]
+                    expected_version = str(package_versions[pkg_name]).strip()
                     wheel_versions = self._get_all_wheel_versions(pkg_name)
 
                     if not wheel_versions:
@@ -244,53 +250,39 @@ class WheelhouseManager:
                         # Don't add error - this is expected after removing wrong versions
                         continue
 
-                    # Check if expected_version is a range (contains >=, <, etc.) or exact version
-                    is_version_range = any(op in expected_version for op in [">=", "<=", ">", "<", "!=", ","])
-                    
-                    if is_version_range:
-                        # Version range: check if any wheel version satisfies the range
-                        if PACKAGING_AVAILABLE:
-                            try:
-                                spec = SpecifierSet(expected_version)
-                                # Check if any wheel version satisfies the range
-                                matching_versions = [
-                                    v for v in wheel_versions 
-                                    if spec.contains(pkg_version.parse(v))
-                                ]
-                                
-                                if not matching_versions:
-                                    # No wheel version satisfies the range - mark for removal
-                                    packages_to_remove.append((pkg_name, wheel_versions[0] if wheel_versions else "none", expected_version))
-                                    validation_errors.append(
-                                        f"{pkg_name}: wheel version(s) {wheel_versions} do not satisfy range {expected_version}"
-                                    )
-                                elif len(matching_versions) < len(wheel_versions):
-                                    # Some versions don't match - remove non-matching ones
-                                    for wheel_ver in wheel_versions:
-                                        if wheel_ver not in matching_versions:
-                                            # Remove this specific version wheel
-                                            self._remove_package_wheels(pkg_name, specific_version=wheel_ver)
-                                    # Refresh list after cleanup
-                                    wheel_versions = self._get_all_wheel_versions(pkg_name)
-                            except Exception as e:
-                                # If range parsing fails, log warning but don't fail validation
-                                self.log(f"  ⚠ Could not parse version range {expected_version} for {pkg_name}: {e}")
-                        else:
-                            # Packaging not available - fall back to simple string check
-                            # This is not ideal but better than failing
-                            self.log(f"  ⚠ Packaging library not available - cannot validate version range for {pkg_name}")
-                    else:
-                        # Exact version: check if it matches
-                        # STRICT: if multiple versions exist, remove everything except the expected version.
-                        if len(wheel_versions) > 1:
-                            removed = self._remove_nonmatching_package_wheels(pkg_name, expected_version)
-                            if removed > 0:
-                                # Refresh list after cleanup
+                    # Normalize profile versions into a SpecifierSet (supports exact, ranges, and wildcards like "12.6.*")
+                    # Examples:
+                    # - "6.8.1"      -> "==6.8.1"
+                    # - "12.6.*"     -> "==12.6.*"
+                    # - ">=0.7,<0.8" -> ">=0.7,<0.8"
+                    if PACKAGING_AVAILABLE:
+                        try:
+                            spec_str = expected_version
+                            if spec_str and not spec_str.startswith(("==", ">=", "<=", ">", "<", "!=")) and "," not in spec_str:
+                                spec_str = f"=={spec_str}"
+
+                            spec = SpecifierSet(spec_str)
+                            matching_versions = [
+                                v for v in wheel_versions
+                                if spec.contains(pkg_version.parse(str(v).split("+")[0]))
+                            ]
+
+                            if not matching_versions:
+                                packages_to_remove.append((pkg_name, wheel_versions[0] if wheel_versions else "none", expected_version))
+                                validation_errors.append(
+                                    f"{pkg_name}: wheel version(s) {wheel_versions} do not satisfy {spec_str}"
+                                )
+                            elif len(matching_versions) < len(wheel_versions):
+                                # Remove non-matching versions to keep wheelhouse deterministic
+                                for wheel_ver in wheel_versions:
+                                    if wheel_ver not in matching_versions:
+                                        self._remove_package_wheels(pkg_name, specific_version=wheel_ver)
                                 wheel_versions = self._get_all_wheel_versions(pkg_name)
-                        
-                        # After cleanup, the ONLY acceptable wheel version is the expected one.
+                        except Exception as e:
+                            self.log(f"  ⚠ Could not validate version spec {expected_version} for {pkg_name}: {e}")
+                    else:
+                        # Packaging not available - fall back to string equality.
                         if expected_version not in wheel_versions:
-                            # Mark for removal - wrong version detected
                             packages_to_remove.append((pkg_name, wheel_versions[0] if wheel_versions else "none", expected_version))
                             validation_errors.append(
                                 f"{pkg_name}: wheel version(s) {wheel_versions} do not include expected {expected_version}"
@@ -314,7 +306,10 @@ class WheelhouseManager:
                 if not dep.get("critical", False):
                     continue
                 
-                version_spec = dep["version"]
+                version_spec = str(dep["version"]).strip()
+                # Normalize bare versions like "6.8.1" / "12.6.*" into "==6.8.1" / "==12.6.*"
+                if version_spec and not version_spec.startswith(("==", ">=", "<=", ">", "<", "!=")) and "," not in version_spec:
+                    version_spec = f"=={version_spec}"
                 wheel_version = self._get_wheel_version(pkg_name)
                 
                 if not wheel_version:
@@ -717,15 +712,19 @@ class WheelhouseManager:
                 Profile versions can be:
                 - exact: "2.5.1+cu121"
                 - ranges: ">=0.7.0,<0.8.0"
-                - wildcards: "12.1.*"
+                - wildcards: "12.6.*"
                 """
                 ver = str(ver).strip()
-                # If it's already a spec/range/wildcard, don't prepend '=='.
-                if any(op in ver for op in [">=", "<=", ">", "<", "!=", ","]) or ".*" in ver:
+                # If it's already a spec/range (has operators), use as-is
+                if any(op in ver for op in [">=", "<=", ">", "<", "!=", ","]):
                     return f"{name}{ver}"
                 # If caller accidentally provides "==x", keep as-is.
                 if ver.startswith("=="):
                     return f"{name}{ver}"
+                # For wildcards (e.g., "12.6.*") or exact versions, use ==
+                # Wildcards need == too: "nvidia-cuda-runtime-cu12==12.6.*"
+                if ".*" in ver:
+                    return f"{name}=={ver}"
                 return f"{name}=={ver}"
 
             # Get torch index URL
@@ -823,15 +822,67 @@ class WheelhouseManager:
                     else:
                         self.log(f"  WARNING: Failed to download optional package {pkg_name}: {error}")
             
-            # Phase 3: Verify no blacklisted packages
-            self.log("Phase 3: Verifying no blacklisted packages")
+            # Phase 3: Download dependencies from dependencies.json that aren't in profile
+            # This ensures packages like urllib3, certifi, etc. are available even if not in profile
+            self.log("Phase 3: Downloading additional dependencies from dependencies.json")
+            deps = sorted(self.manifest.get("core_dependencies", []), key=lambda x: x.get("order", 999))
+            
+            for dep in deps:
+                pkg_name = dep["name"]
+                
+                # Skip if already downloaded (in profile)
+                if pkg_name in package_versions:
+                    continue
+                
+                # Skip CUDA packages
+                if dep.get("version") == "FROM_CUDA_CONFIG":
+                    continue
+                
+                # Skip platform-specific packages
+                if "platform" in dep and dep["platform"] != sys.platform:
+                    continue
+                
+                version_spec = dep["version"]
+                # Ensure we always build a valid pip requirement; many manifest entries are bare versions.
+                ver = str(version_spec or "").strip()
+                if ver and not ver.startswith(("==", ">=", "<=", ">", "<", "!=")) and "," not in ver:
+                    ver = f"=={ver}"
+                spec = f"{pkg_name}{ver}"
+                
+                # Check if wheel already exists
+                wheel_files = list(self.wheelhouse.glob(f"{pkg_name.replace('-', '_')}-*.whl"))
+                if not wheel_files:
+                    # Try with hyphen
+                    wheel_files = list(self.wheelhouse.glob(f"{pkg_name}-*.whl"))
+                
+                if wheel_files:
+                    self.log(f"  {pkg_name} already in wheelhouse, skipping")
+                    continue
+                
+                self.log(f"  Downloading {spec}")
+                success, error = self._download_wheel(
+                    package=spec,
+                    index_url=None,  # Use PyPI
+                    no_deps=True,  # Don't resolve dependencies (we're downloading explicitly)
+                    python_version=python_version
+                )
+                
+                if not success:
+                    # Non-critical packages can fail
+                    if dep.get("critical", False):
+                        self.log(f"  WARNING: Failed to download critical dependency {pkg_name}: {error}")
+                    else:
+                        self.log(f"  WARNING: Failed to download optional dependency {pkg_name}: {error}")
+            
+            # Phase 4: Verify no blacklisted packages
+            self.log("Phase 4: Verifying no blacklisted packages")
             success, error = self._verify_no_blacklist()
             if not success:
                 return False, error
             
-            # Phase 4: Count wheels
+            # Phase 5: Count wheels
             wheel_count = len(list(self.wheelhouse.glob("*.whl")))
-            self.log(f"Phase 4: Verification complete ({wheel_count} wheels)")
+            self.log(f"Phase 5: Verification complete ({wheel_count} wheels)")
             self.log("✓ Wheelhouse preparation complete")
             
             return True, ""
@@ -878,7 +929,10 @@ class WheelhouseManager:
                     self.log(f"  Skipping {pkg_name} (platform mismatch)")
                     continue
                 
-                version_spec = dep["version"]
+                version_spec = str(dep["version"]).strip()
+                # Normalize bare versions like "6.8.1" / "12.6.*" into "==6.8.1" / "==12.6.*"
+                if version_spec and not version_spec.startswith(("==", ">=", "<=", ">", "<", "!=")) and "," not in version_spec:
+                    version_spec = f"=={version_spec}"
                 no_deps = "--no-deps" in dep.get("install_args", [])
                 
                 self.log(f"  Downloading {pkg_name}{version_spec}")

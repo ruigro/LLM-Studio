@@ -487,16 +487,23 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     }
     
     use_python:
-    // Step 2: Check if venv exists, if not, create it or launch installer GUI
+    // Step 2: Check if venv exists and is complete, if not, launch installer GUI
     std::wstring pythonwExe = exeDir + L"\\.venv\\Scripts\\pythonw.exe";
     std::wstring pythonExe = exeDir + L"\\.venv\\Scripts\\python.exe";
+    std::wstring pyvenvCfg = exeDir + L"\\.venv\\pyvenv.cfg";
     std::wstring venvPython = systemPython;  // Default to system Python
     
-    if (FileExists(pythonwExe)) {
+    // Check if venv is complete: must have both Python executable AND pyvenv.cfg
+    bool venvComplete = false;
+    if (FileExists(pythonwExe) && FileExists(pyvenvCfg)) {
         venvPython = pythonwExe;
-    } else if (FileExists(pythonExe)) {
+        venvComplete = true;
+    } else if (FileExists(pythonExe) && FileExists(pyvenvCfg)) {
         venvPython = pythonExe;
-    } else {
+        venvComplete = true;
+    }
+    
+    if (!venvComplete) {
         // Venv doesn't exist - launch installer GUI via bootstrap
         std::wstring runInstallerBat = exeDir + L"\\run_installer.bat";
         if (FileExists(runInstallerBat)) {
@@ -662,11 +669,49 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
 
     int exitCode = LaunchPythonApp(exeDir, venvPython, scriptArgs, logFile);
     if (exitCode != 0) {
-        // App failed - open log in Notepad
+        // App failed - try automatic fallback to debug launcher or installer
+        std::wstring debugLauncher = exeDir + L"\\LAUNCHER_DEBUG.bat";
+        std::wstring runInstallerBat = exeDir + L"\\run_installer.bat";
+        std::wstring bootstrapBat = exeDir + L"\\bootstrap_launcher.bat";
+        std::wstring installerGui = exeDir + L"\\installer_gui.py";
+        
+        // Try debug launcher first (most helpful for troubleshooting)
+        if (FileExists(debugLauncher)) {
+            ShellExecuteW(NULL, L"open", debugLauncher.c_str(), NULL, exeDir.c_str(), SW_SHOW);
+            return 0;
+        }
+        
+        // Fallback to installer
+        if (FileExists(runInstallerBat)) {
+            ShellExecuteW(NULL, L"open", runInstallerBat.c_str(), NULL, exeDir.c_str(), SW_SHOW);
+            return 0;
+        }
+        
+        if (FileExists(bootstrapBat)) {
+            ShellExecuteW(NULL, L"open", bootstrapBat.c_str(), NULL, exeDir.c_str(), SW_SHOW);
+            return 0;
+        }
+        
+        if (FileExists(installerGui)) {
+            // Try to find Python to run installer (use systemPython from earlier in function)
+            std::wstring pythonToUse = systemPython;
+            if (pythonToUse.empty()) {
+                pythonToUse = CheckSelfContainedPython(exeDir);
+            }
+            if (pythonToUse.empty()) {
+                pythonToUse = FindSystemPython();
+            }
+            if (!pythonToUse.empty()) {
+                ShellExecuteW(NULL, L"open", pythonToUse.c_str(), installerGui.c_str(), exeDir.c_str(), SW_SHOW);
+                return 0;
+            }
+        }
+        
+        // Last resort: show error and open log
         MessageBoxW(NULL, 
                    L"Application failed to start!\n\n"
-                   L"The error log will open in Notepad.\n"
-                   L"Please review the errors.",
+                   L"Attempting to launch debug launcher or installer...\n"
+                   L"If that doesn't work, the error log will open in Notepad.",
                    L"Application Error", 
                    MB_OK | MB_ICONERROR);
         OpenLogInNotepad(logFile);
