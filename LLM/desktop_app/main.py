@@ -2505,14 +2505,15 @@ class MainWindow(QMainWindow):
         When user clicks the window X:
         1) trigger server stop
         2) wait for server to actually stop (or timeout)
-        3) close
+        3) clean up all threads
+        4) close
         """
         # If we're already in the final close pass, allow it.
         if getattr(self, "_shutdown_in_progress", False):
             event.accept()
             return
 
-        print("[DEBUG] closeEvent triggered - shutting down server...")
+        print("[DEBUG] closeEvent triggered - shutting down...")
         server_page = getattr(self, "server_page", None)
         
         # Mark that we are shutting down
@@ -2521,9 +2522,34 @@ class MainWindow(QMainWindow):
         # Prevent immediate close
         event.ignore()
         
+        def _cleanup_all_pages():
+            """Clean up all pages with threads."""
+            print("[DEBUG] Cleaning up all page threads...")
+            try:
+                # Clean up MCP page and its sub-pages
+                if hasattr(self, 'tabs') and self.tabs:
+                    mcp_page = self.tabs.widget(6)  # MCP is at index 6
+                    if mcp_page and hasattr(mcp_page, '_cleanup_threads'):
+                        try:
+                            mcp_page._cleanup_threads()
+                        except Exception as e:
+                            print(f"[DEBUG] Error cleaning up MCP page: {e}")
+                    
+                    # Also trigger cleanup on all created sub-pages
+                    if mcp_page and hasattr(mcp_page, '_created_pages'):
+                        for page in mcp_page._created_pages.values():
+                            if page and hasattr(page, '_cleanup_threads'):
+                                try:
+                                    page._cleanup_threads()
+                                except Exception as e:
+                                    print(f"[DEBUG] Error cleaning up MCP sub-page: {e}")
+            except Exception as e:
+                print(f"[DEBUG] Error during page cleanup: {e}")
+        
         def _do_close():
-            """Actually close the window after server has stopped"""
-            print("[DEBUG] Server stopped (or timed out) - closing window...")
+            """Actually close the window after server has stopped and threads cleaned up"""
+            print("[DEBUG] Server stopped (or timed out) - cleaning up and closing window...")
+            _cleanup_all_pages()
             self._shutdown_in_progress = True  # Ensure flag is set
             self.close()  # This will trigger closeEvent again, but flag will allow it
         
@@ -8870,34 +8896,66 @@ except Exception as e:
         return w
     
     def _build_environments_subtab(self) -> QWidget:
-        """Build the Environments management tab"""
+        """Build professional Environments management interface with embedded terminal"""
         w = QWidget()
+        w.setStyleSheet("background: transparent;")
         main_layout = QVBoxLayout(w)
-        main_layout.setContentsMargins(20, 20, 20, 20)
-        main_layout.setSpacing(15)
+        main_layout.setContentsMargins(25, 25, 25, 25)
+        main_layout.setSpacing(20)
         
-        # Header with title and Create button
-        header = QWidget()
-        header.setStyleSheet("background: transparent;")
-        header_layout = QHBoxLayout(header)
-        header_layout.setContentsMargins(0, 0, 0, 0)
+        # Top Action Bar
+        action_bar = QWidget()
+        action_bar.setStyleSheet("""
+            QWidget {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 rgba(102, 126, 234, 0.15), stop:1 rgba(118, 75, 162, 0.15));
+                border-radius: 12px;
+                border: 1px solid rgba(255, 255, 255, 0.1);
+            }
+        """)
+        action_layout = QHBoxLayout(action_bar)
+        action_layout.setContentsMargins(20, 15, 20, 15)
         
-        title = QLabel("🔧 Environments")
-        title.setStyleSheet("font-size: 20pt; font-weight: bold; color: #ffffff; background: transparent;")
-        header_layout.addWidget(title)
+        title = QLabel("🔧 Python Environments")
+        title.setStyleSheet("font-size: 18pt; font-weight: bold; color: white; background: transparent; border: none;")
+        action_layout.addWidget(title)
         
-        header_layout.addStretch(1)
+        action_layout.addStretch(1)
         
-        create_env_btn = QPushButton("+ New Environment")
-        create_env_btn.setFixedHeight(35)
-        create_env_btn.setStyleSheet("""
+        # Action buttons
+        refresh_btn = QPushButton("🔄 Refresh")
+        refresh_btn.setFixedSize(120, 40)
+        refresh_btn.setCursor(QCursor(Qt.PointingHandCursor))
+        refresh_btn.setStyleSheet("""
+            QPushButton {
+                background: rgba(255, 255, 255, 0.1);
+                color: white;
+                border: 1px solid rgba(255, 255, 255, 0.2);
+                border-radius: 8px;
+                font-size: 11pt;
+                font-weight: 600;
+            }
+            QPushButton:hover {
+                background: rgba(255, 255, 255, 0.2);
+                border: 1px solid rgba(255, 255, 255, 0.3);
+            }
+            QPushButton:pressed {
+                background: rgba(255, 255, 255, 0.15);
+            }
+        """)
+        refresh_btn.clicked.connect(self._refresh_environment_list)
+        action_layout.addWidget(refresh_btn)
+        
+        create_btn = QPushButton("+ New Environment")
+        create_btn.setFixedSize(180, 40)
+        create_btn.setCursor(QCursor(Qt.PointingHandCursor))
+        create_btn.setStyleSheet("""
             QPushButton {
                 background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
                     stop:0 #667eea, stop:1 #764ba2);
                 color: white;
                 border: none;
-                border-radius: 6px;
-                padding: 8px 16px;
+                border-radius: 8px;
                 font-size: 11pt;
                 font-weight: bold;
             }
@@ -8905,179 +8963,364 @@ except Exception as e:
                 background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
                     stop:0 #7a8efc, stop:1 #875fb8);
             }
+            QPushButton:pressed {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #5566d8, stop:1 #653990);
+            }
         """)
-        create_env_btn.clicked.connect(self._show_create_environment_dialog)
-        header_layout.addWidget(create_env_btn)
+        create_btn.clicked.connect(self._show_create_environment_dialog)
+        action_layout.addWidget(create_btn)
         
-        main_layout.addWidget(header)
+        main_layout.addWidget(action_bar)
         
-        # Splitter for list and detail panels
-        splitter = QSplitter(Qt.Horizontal)
+        # Main content area - 3 columns
+        content_splitter = QSplitter(Qt.Horizontal)
         
-        # Left panel: Environment list
+        # LEFT: Environment Cards
         left_panel = QWidget()
+        left_panel.setStyleSheet("background: transparent;")
         left_layout = QVBoxLayout(left_panel)
         left_layout.setContentsMargins(0, 0, 0, 0)
         left_layout.setSpacing(10)
         
-        list_label = QLabel("Installed Environments")
-        list_label.setStyleSheet("font-size: 12pt; font-weight: bold; color: #ffffff; background: transparent;")
-        left_layout.addWidget(list_label)
+        env_label = QLabel("Environments")
+        env_label.setStyleSheet("font-size: 13pt; font-weight: bold; color: rgba(255, 255, 255, 0.9); background: transparent;")
+        left_layout.addWidget(env_label)
         
-        self.env_list = QListWidget()
-        self.env_list.setStyleSheet("""
-            QListWidget {
-                background: rgba(30, 30, 50, 0.4);
-                border: 1px solid rgba(255, 255, 255, 0.2);
-                border-radius: 8px;
-                padding: 5px;
-                color: white;
-                font-size: 10pt;
+        # Scrollable environment cards
+        env_scroll = QScrollArea()
+        env_scroll.setWidgetResizable(True)
+        env_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        env_scroll.setStyleSheet("""
+            QScrollArea {
+                background: transparent;
+                border: none;
             }
-            QListWidget::item {
-                padding: 12px;
-                border-radius: 6px;
-                margin: 3px;
+            QScrollBar:vertical {
+                background: rgba(30, 30, 50, 0.3);
+                width: 8px;
+                border-radius: 4px;
             }
-            QListWidget::item:selected {
-                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                    stop:0 rgba(102, 126, 234, 0.6), stop:1 rgba(118, 75, 162, 0.6));
+            QScrollBar::handle:vertical {
+                background: rgba(102, 126, 234, 0.5);
+                border-radius: 4px;
+                min-height: 20px;
             }
-            QListWidget::item:hover {
-                background: rgba(102, 126, 234, 0.3);
-            }
-        """)
-        self.env_list.itemSelectionChanged.connect(self._on_environment_selected)
-        left_layout.addWidget(self.env_list)
-        
-        # Refresh button
-        refresh_btn = QPushButton("🔄 Refresh")
-        refresh_btn.setMinimumHeight(35)
-        refresh_btn.setStyleSheet("""
-            QPushButton {
-                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                    stop:0 rgba(102, 126, 234, 0.3), stop:1 rgba(118, 75, 162, 0.3));
-                color: white;
-                border: 1px solid rgba(255, 255, 255, 0.2);
-                border-radius: 6px;
-                padding: 8px 16px;
-                font-size: 10pt;
-                font-weight: bold;
-            }
-            QPushButton:hover {
-                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                    stop:0 rgba(102, 126, 234, 0.5), stop:1 rgba(118, 75, 162, 0.5));
+            QScrollBar::handle:vertical:hover {
+                background: rgba(102, 126, 234, 0.7);
             }
         """)
-        refresh_btn.clicked.connect(self._refresh_environment_list)
-        left_layout.addWidget(refresh_btn)
         
-        splitter.addWidget(left_panel)
+        self.env_cards_container = QWidget()
+        self.env_cards_container.setStyleSheet("background: transparent;")
+        self.env_cards_layout = QVBoxLayout(self.env_cards_container)
+        self.env_cards_layout.setContentsMargins(0, 0, 0, 0)
+        self.env_cards_layout.setSpacing(12)
+        self.env_cards_layout.addStretch(1)
         
-        # Right panel: Environment details
-        right_panel = QWidget()
-        right_layout = QVBoxLayout(right_panel)
-        right_layout.setContentsMargins(0, 0, 0, 0)
-        right_layout.setSpacing(15)
+        env_scroll.setWidget(self.env_cards_container)
+        left_layout.addWidget(env_scroll)
         
-        detail_label = QLabel("Environment Details")
-        detail_label.setStyleSheet("font-size: 12pt; font-weight: bold; color: #ffffff; background: transparent;")
-        right_layout.addWidget(detail_label)
+        content_splitter.addWidget(left_panel)
         
-        # Scrollable detail area
+        # CENTER: Environment Details
+        center_panel = QWidget()
+        center_panel.setStyleSheet("""
+            QWidget {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 rgba(30, 30, 50, 0.6), stop:1 rgba(20, 20, 40, 0.6));
+                border-radius: 12px;
+                border: 1px solid rgba(255, 255, 255, 0.1);
+            }
+        """)
+        center_layout = QVBoxLayout(center_panel)
+        center_layout.setContentsMargins(20, 20, 20, 20)
+        center_layout.setSpacing(15)
+        
+        detail_title = QLabel("Environment Details")
+        detail_title.setStyleSheet("font-size: 13pt; font-weight: bold; color: white; background: transparent; border: none;")
+        center_layout.addWidget(detail_title)
+        
+        # Details scroll area
         detail_scroll = QScrollArea()
         detail_scroll.setWidgetResizable(True)
         detail_scroll.setStyleSheet("""
             QScrollArea {
-                background: rgba(30, 30, 50, 0.4);
-                border: 1px solid rgba(255, 255, 255, 0.2);
-                border-radius: 8px;
+                background: transparent;
+                border: none;
             }
         """)
         
         self.env_detail_widget = QWidget()
+        self.env_detail_widget.setStyleSheet("background: transparent;")
         self.env_detail_layout = QVBoxLayout(self.env_detail_widget)
-        self.env_detail_layout.setContentsMargins(15, 15, 15, 15)
+        self.env_detail_layout.setContentsMargins(0, 0, 0, 0)
         self.env_detail_layout.setSpacing(15)
         
         # Placeholder
         placeholder = QLabel("Select an environment to view details")
         placeholder.setAlignment(Qt.AlignCenter)
-        placeholder.setStyleSheet("color: rgba(255, 255, 255, 0.5); font-size: 12pt;")
+        placeholder.setStyleSheet("""
+            color: rgba(255, 255, 255, 0.4); 
+            font-size: 12pt;
+            background: transparent;
+            padding: 40px;
+        """)
         self.env_detail_layout.addWidget(placeholder)
         self.env_detail_layout.addStretch(1)
         
         detail_scroll.setWidget(self.env_detail_widget)
-        right_layout.addWidget(detail_scroll)
+        center_layout.addWidget(detail_scroll)
         
-        splitter.addWidget(right_panel)
-        splitter.setStretchFactor(0, 3)  # Left: 30%
-        splitter.setStretchFactor(1, 7)  # Right: 70%
+        content_splitter.addWidget(center_panel)
         
-        main_layout.addWidget(splitter)
+        # RIGHT: Embedded Terminal
+        right_panel = QWidget()
+        right_panel.setStyleSheet("""
+            QWidget {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 rgba(20, 20, 35, 0.9), stop:1 rgba(10, 10, 25, 0.9));
+                border-radius: 12px;
+                border: 1px solid rgba(255, 255, 255, 0.1);
+            }
+        """)
+        right_layout = QVBoxLayout(right_panel)
+        right_layout.setContentsMargins(15, 15, 15, 15)
+        right_layout.setSpacing(10)
         
-        # Show loading message immediately, then load async
-        loading_item = QListWidgetItem("Loading environments...")
-        loading_item.setFlags(loading_item.flags() & ~Qt.ItemIsSelectable)
-        self.env_list.addItem(loading_item)
+        terminal_header = QWidget()
+        terminal_header.setStyleSheet("background: transparent; border: none;")
+        terminal_header_layout = QHBoxLayout(terminal_header)
+        terminal_header_layout.setContentsMargins(5, 0, 5, 0)
         
-        # Delayed load to not block UI
-        QTimer.singleShot(50, self._refresh_environment_list)
+        terminal_title = QLabel("💻 Terminal Output")
+        terminal_title.setStyleSheet("font-size: 11pt; font-weight: bold; color: #4EC9B0; background: transparent;")
+        terminal_header_layout.addWidget(terminal_title)
+        
+        terminal_header_layout.addStretch(1)
+        
+        clear_btn = QPushButton("Clear")
+        clear_btn.setFixedSize(70, 28)
+        clear_btn.setCursor(QCursor(Qt.PointingHandCursor))
+        clear_btn.setStyleSheet("""
+            QPushButton {
+                background: rgba(255, 255, 255, 0.05);
+                color: rgba(255, 255, 255, 0.6);
+                border: 1px solid rgba(255, 255, 255, 0.1);
+                border-radius: 4px;
+                font-size: 9pt;
+            }
+            QPushButton:hover {
+                background: rgba(255, 255, 255, 0.1);
+                color: white;
+            }
+        """)
+        clear_btn.clicked.connect(self._clear_env_terminal)
+        terminal_header_layout.addWidget(clear_btn)
+        
+        right_layout.addWidget(terminal_header)
+        
+        # Terminal output
+        self.env_terminal = QTextEdit()
+        self.env_terminal.setReadOnly(True)
+        self.env_terminal.setStyleSheet("""
+            QTextEdit {
+                background: rgba(0, 0, 0, 0.5);
+                color: #4EC9B0;
+                border: 1px solid rgba(255, 255, 255, 0.05);
+                border-radius: 6px;
+                padding: 10px;
+                font-family: 'Consolas', 'Courier New', monospace;
+                font-size: 9pt;
+                selection-background-color: rgba(102, 126, 234, 0.3);
+            }
+        """)
+        self.env_terminal.append("Ready. Waiting for operations...\n")
+        right_layout.addWidget(self.env_terminal)
+        
+        content_splitter.addWidget(right_panel)
+        
+        # Set splitter proportions: 20% | 30% | 50% (terminal gets most space)
+        content_splitter.setStretchFactor(0, 2)
+        content_splitter.setStretchFactor(1, 3)
+        content_splitter.setStretchFactor(2, 5)
+        
+        main_layout.addWidget(content_splitter, 1)
+        
+        # Initial load
+        self._log_to_env_terminal("🔧 Loading environments...")
+        QTimer.singleShot(100, self._refresh_environment_list)
         
         return w
     
+    def _log_to_env_terminal(self, message: str):
+        """Log a message to the environment terminal"""
+        if hasattr(self, 'env_terminal'):
+            from datetime import datetime
+            timestamp = datetime.now().strftime("%H:%M:%S")
+            # Remove emojis for Windows compatibility
+            safe_message = message.encode('ascii', errors='ignore').decode('ascii')
+            if not safe_message.strip():
+                safe_message = message  # Keep original if nothing left
+            self.env_terminal.append(f"[{timestamp}] {safe_message}")
+            # Auto-scroll to bottom
+            self.env_terminal.verticalScrollBar().setValue(
+                self.env_terminal.verticalScrollBar().maximum()
+            )
+    
+    def _clear_env_terminal(self):
+        """Clear the environment terminal"""
+        if hasattr(self, 'env_terminal'):
+            self.env_terminal.clear()
+            self._log_to_env_terminal("Terminal cleared.")
+    
     def _refresh_environment_list(self):
-        """Refresh the environment list"""
-        self.env_list.clear()
+        """Refresh the environment list with modern cards"""
+        self._log_to_env_terminal("🔄 Refreshing environment list...")
+        
+        # Clear existing cards
+        while self.env_cards_layout.count() > 1:  # Keep the stretch
+            item = self.env_cards_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
         
         try:
             envs = self.env_manager.list_all_environments()
             
             if not envs:
-                item = QListWidgetItem("No environments found\n\nClick '+ New Environment' to create one")
-                item.setFlags(item.flags() & ~Qt.ItemIsSelectable)
-                item.setTextAlignment(Qt.AlignCenter)
-                self.env_list.addItem(item)
+                # Empty state card
+                empty_card = self._create_empty_state_card()
+                self.env_cards_layout.insertWidget(0, empty_card)
+                self._log_to_env_terminal("ℹ️ No environments found.")
                 return
             
+            self._log_to_env_terminal(f"✅ Found {len(envs)} environment(s)")
+            
             for env_info in envs:
-                env_id = env_info.get("env_id", "Unknown")
-                python_ver = env_info.get("python_version", "Unknown")
-                disk_mb = env_info.get("disk_usage_mb", 0)
-                associated = env_info.get("associated_models", [])
-                pkg_count = env_info.get("package_count", 0)
-                
-                # Format display text - emphasize packages
-                display_text = f"📦 {env_id}\n"
-                display_text += f"Python {python_ver}"
-                if pkg_count > 0:
-                    display_text += f" • {pkg_count} packages"
-                if associated:
-                    display_text += f" • {len(associated)} model(s)"
-                
-                item = QListWidgetItem(display_text)
-                item.setData(Qt.UserRole, env_info)
-                self.env_list.addItem(item)
+                card = self._create_environment_card(env_info)
+                self.env_cards_layout.insertWidget(self.env_cards_layout.count() - 1, card)
                 
         except Exception as e:
-            item = QListWidgetItem(f"Error loading environments:\n{str(e)}")
-            item.setFlags(item.flags() & ~Qt.ItemIsSelectable)
-            self.env_list.addItem(item)
+            self._log_to_env_terminal(f"❌ Error: {str(e)}")
+            error_label = QLabel(f"Error loading environments:\n{str(e)}")
+            error_label.setStyleSheet("""
+                color: #ff6b6b;
+                background: rgba(255, 107, 107, 0.1);
+                border: 1px solid rgba(255, 107, 107, 0.3);
+                border-radius: 8px;
+                padding: 15px;
+                font-size: 10pt;
+            """)
+            self.env_cards_layout.insertWidget(0, error_label)
     
-    def _on_environment_selected(self):
-        """Handle environment selection"""
-        items = self.env_list.selectedItems()
-        if not items:
-            return
+    def _create_empty_state_card(self) -> QWidget:
+        """Create an empty state card"""
+        card = QWidget()
+        card.setStyleSheet("""
+            QWidget {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 rgba(102, 126, 234, 0.1), stop:1 rgba(118, 75, 162, 0.1));
+                border: 2px dashed rgba(255, 255, 255, 0.2);
+                border-radius: 12px;
+            }
+        """)
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(30, 40, 30, 40)
+        layout.setSpacing(15)
         
-        env_info = items[0].data(Qt.UserRole)
-        if not env_info:
-            return
+        icon = QLabel("🌟")
+        icon.setAlignment(Qt.AlignCenter)
+        icon.setStyleSheet("font-size: 48pt; background: transparent; border: none;")
+        layout.addWidget(icon)
         
+        title = QLabel("No Environments Yet")
+        title.setAlignment(Qt.AlignCenter)
+        title.setStyleSheet("font-size: 14pt; font-weight: bold; color: white; background: transparent; border: none;")
+        layout.addWidget(title)
+        
+        desc = QLabel("Create your first environment to get started.\nEnvironments isolate packages for each model.")
+        desc.setAlignment(Qt.AlignCenter)
+        desc.setWordWrap(True)
+        desc.setStyleSheet("color: rgba(255, 255, 255, 0.6); font-size: 10pt; background: transparent; border: none;")
+        layout.addWidget(desc)
+        
+        return card
+    
+    def _create_environment_card(self, env_info: Dict) -> QWidget:
+        """Create a modern environment card"""
+        card = QWidget()
+        card.setCursor(QCursor(Qt.PointingHandCursor))
+        card.setStyleSheet("""
+            QWidget {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 rgba(40, 40, 65, 0.6), stop:1 rgba(30, 30, 55, 0.6));
+                border: 1px solid rgba(255, 255, 255, 0.15);
+                border-radius: 10px;
+            }
+            QWidget:hover {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 rgba(102, 126, 234, 0.3), stop:1 rgba(118, 75, 162, 0.3));
+                border: 1px solid rgba(102, 126, 234, 0.5);
+            }
+        """)
+        
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(15, 12, 15, 12)
+        layout.setSpacing(8)
+        
+        # Header row
+        header_layout = QHBoxLayout()
+        header_layout.setSpacing(8)
+        
+        icon = QLabel("📦")
+        icon.setStyleSheet("font-size: 18pt; background: transparent; border: none;")
+        header_layout.addWidget(icon)
+        
+        env_name = QLabel(env_info.get("env_id", "Unknown"))
+        env_name.setStyleSheet("font-size: 11pt; font-weight: bold; color: white; background: transparent; border: none;")
+        header_layout.addWidget(env_name, 1)
+        
+        layout.addLayout(header_layout)
+        
+        # Info row
+        info_layout = QHBoxLayout()
+        info_layout.setSpacing(12)
+        
+        python_ver = env_info.get("python_version", "Unknown")
+        pkg_count = env_info.get("package_count", 0)
+        associated = env_info.get("associated_models", [])
+        
+        py_label = QLabel(f"🐍 {python_ver}")
+        py_label.setStyleSheet("color: rgba(255, 255, 255, 0.8); font-size: 9pt; background: transparent; border: none;")
+        info_layout.addWidget(py_label)
+        
+        pkg_label = QLabel(f"📦 {pkg_count} pkg")
+        pkg_label.setStyleSheet("color: rgba(78, 201, 176, 0.9); font-size: 9pt; font-weight: 600; background: transparent; border: none;")
+        info_layout.addWidget(pkg_label)
+        
+        if associated:
+            model_label = QLabel(f"🔗 {len(associated)}")
+            model_label.setStyleSheet("color: rgba(102, 126, 234, 0.9); font-size: 9pt; background: transparent; border: none;")
+            info_layout.addWidget(model_label)
+        
+        info_layout.addStretch(1)
+        
+        layout.addLayout(info_layout)
+        
+        # Store env_info for click handler
+        card.env_info = env_info
+        card.mousePressEvent = lambda event: self._on_environment_card_clicked(env_info)
+        
+        return card
+    
+    def _on_environment_card_clicked(self, env_info: Dict):
+        """Handle environment card click"""
+        env_id = env_info.get("env_id", "Unknown")
+        self._log_to_env_terminal(f"📂 Selected: {env_id}")
         self._display_environment_details(env_info)
     
     def _display_environment_details(self, env_info: Dict):
-        """Display detailed information about an environment"""
+        """Display detailed information about an environment with modern UI"""
         # Clear existing widgets
         while self.env_detail_layout.count():
             child = self.env_detail_layout.takeAt(0)
@@ -9091,334 +9334,541 @@ except Exception as e:
             full_info = self.env_manager.get_environment_info(model_id=env_id)
             if full_info:
                 env_info = full_info
-        except Exception:
-            pass
+                self._log_to_env_terminal(f"✅ Loaded details for: {env_id}")
+        except Exception as e:
+            self._log_to_env_terminal(f"⚠️ Could not load full details: {e}")
         
-        # Environment name/ID
-        name_label = QLabel(f"<b>Environment:</b> {env_id}")
-        name_label.setStyleSheet("font-size: 13pt; color: white; background: transparent;")
-        name_label.setWordWrap(True)
-        self.env_detail_layout.addWidget(name_label)
+        # Header card
+        header_card = QWidget()
+        header_card.setStyleSheet("""
+            QWidget {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 rgba(102, 126, 234, 0.2), stop:1 rgba(118, 75, 162, 0.2));
+                border-radius: 10px;
+                border: 1px solid rgba(255, 255, 255, 0.1);
+            }
+        """)
+        header_layout = QVBoxLayout(header_card)
+        header_layout.setContentsMargins(20, 15, 20, 15)
+        header_layout.setSpacing(8)
         
-        # Info grid
-        info_grid = QWidget()
-        info_grid.setStyleSheet("background: transparent;")
-        grid_layout = QGridLayout(info_grid)
-        grid_layout.setSpacing(10)
+        name_label = QLabel(f"📦 {env_id}")
+        name_label.setStyleSheet("font-size: 16pt; font-weight: bold; color: white; background: transparent; border: none;")
+        header_layout.addWidget(name_label)
         
-        row = 0
-        
-        # Python version
         python_ver = env_info.get("python_version", "Unknown")
-        grid_layout.addWidget(self._create_info_label("🐍 Python:"), row, 0, Qt.AlignLeft)
-        grid_layout.addWidget(self._create_info_value(python_ver), row, 1, Qt.AlignLeft)
-        row += 1
+        py_label = QLabel(f"🐍 Python {python_ver}")
+        py_label.setStyleSheet("font-size: 11pt; color: rgba(255, 255, 255, 0.8); background: transparent; border: none;")
+        header_layout.addWidget(py_label)
         
-        # Location
-        location = env_info.get("path", "Unknown")
-        grid_layout.addWidget(self._create_info_label("📁 Location:"), row, 0, Qt.AlignLeft)
-        loc_label = self._create_info_value(location)
-        loc_label.setWordWrap(True)
-        grid_layout.addWidget(loc_label, row, 1, Qt.AlignLeft)
-        row += 1
+        self.env_detail_layout.addWidget(header_card)
         
-        # Created date
-        created = env_info.get("created_at", "Unknown")
-        if created != "Unknown" and "T" in created:
-            try:
-                from datetime import datetime
-                dt = datetime.fromisoformat(created)
-                created = dt.strftime("%Y-%m-%d %H:%M")
-            except Exception:
-                pass
-        grid_layout.addWidget(self._create_info_label("📅 Created:"), row, 0, Qt.AlignLeft)
-        grid_layout.addWidget(self._create_info_value(created), row, 1, Qt.AlignLeft)
-        row += 1
+        # Stats cards row - now clickable buttons
+        stats_row = QWidget()
+        stats_row.setStyleSheet("background: transparent; border: none;")
+        stats_layout = QHBoxLayout(stats_row)
+        stats_layout.setSpacing(10)
         
-        # Disk usage
-        disk_mb = env_info.get("disk_usage_mb", 0)
-        disk_str = f"{disk_mb:.1f} MB" if disk_mb < 1024 else f"{disk_mb/1024:.2f} GB"
-        grid_layout.addWidget(self._create_info_label("💾 Disk:"), row, 0, Qt.AlignLeft)
-        grid_layout.addWidget(self._create_info_value(disk_str), row, 1, Qt.AlignLeft)
-        row += 1
-        
-        # Package count
         pkg_count = env_info.get("package_count", 0)
-        grid_layout.addWidget(self._create_info_label("📦 Packages:"), row, 0, Qt.AlignLeft)
-        grid_layout.addWidget(self._create_info_value(str(pkg_count)), row, 1, Qt.AlignLeft)
-        row += 1
-        
-        self.env_detail_layout.addWidget(info_grid)
-        
-        # Associated models
+        disk_mb = env_info.get("disk_usage_mb", 0)
         associated = env_info.get("associated_models", [])
+        
+        # Packages stat button - click to view packages
+        pkg_stat = self._create_stat_card(
+            "📦", 
+            str(pkg_count), 
+            "Packages",
+            lambda: self._view_environment_packages(env_id)
+        )
+        stats_layout.addWidget(pkg_stat)
+        
+        # Disk stat button - click to view location and manage
+        if disk_mb > 0:
+            disk_str = f"{disk_mb:.0f} MB" if disk_mb < 1024 else f"{disk_mb/1024:.1f} GB"
+        else:
+            disk_str = "---"
+        disk_stat = self._create_stat_card(
+            "💾", 
+            disk_str, 
+            "Disk Space",
+            lambda: self._show_environment_location_dialog(env_id, env_info)
+        )
+        stats_layout.addWidget(disk_stat)
+        
+        # Models stat button - click to manage associations
+        model_stat = self._create_stat_card(
+            "🔗", 
+            str(len(associated)), 
+            "Models",
+            lambda: self._show_model_associations_dialog(env_id, associated)
+        )
+        stats_layout.addWidget(model_stat)
+        
+        self.env_detail_layout.addWidget(stats_row)
+        
+        # Additional Info Section
+        info_section = QWidget()
+        info_section.setStyleSheet("""
+            QWidget {
+                background: rgba(40, 40, 65, 0.3);
+                border: 1px solid rgba(255, 255, 255, 0.1);
+                border-radius: 8px;
+            }
+        """)
+        info_layout = QVBoxLayout(info_section)
+        info_layout.setContentsMargins(15, 12, 15, 12)
+        info_layout.setSpacing(8)
+        
+        # Environment path
+        env_path = env_info.get("path", "N/A")
+        path_label = QLabel(f"📁 Path: {env_path}")
+        path_label.setWordWrap(True)
+        path_label.setStyleSheet("color: rgba(255, 255, 255, 0.7); font-size: 9pt; background: transparent; border: none;")
+        info_layout.addWidget(path_label)
+        
+        # Associated models list
         if associated:
-            assoc_label = QLabel("<b>Associated Models:</b>")
-            assoc_label.setStyleSheet("font-size: 11pt; color: white; margin-top: 10px; background: transparent;")
-            self.env_detail_layout.addWidget(assoc_label)
+            models_label = QLabel(f"🔗 Associated Models ({len(associated)}):")
+            models_label.setStyleSheet("color: rgba(255, 255, 255, 0.9); font-size: 10pt; font-weight: 600; background: transparent; border: none;")
+            info_layout.addWidget(models_label)
             
-            for model in associated:
+            for model in associated[:5]:  # Show up to 5
                 model_item = QLabel(f"  • {model}")
-                model_item.setStyleSheet("color: rgba(255, 255, 255, 0.8); font-size: 10pt; background: transparent;")
-                model_item.setWordWrap(True)
-                self.env_detail_layout.addWidget(model_item)
+                model_item.setStyleSheet("color: rgba(255, 255, 255, 0.7); font-size: 9pt; background: transparent; border: none;")
+                info_layout.addWidget(model_item)
+            
+            if len(associated) > 5:
+                more_label = QLabel(f"  ... and {len(associated) - 5} more")
+                more_label.setStyleSheet("color: rgba(255, 255, 255, 0.5); font-size: 9pt; font-style: italic; background: transparent; border: none;")
+                info_layout.addWidget(more_label)
+        else:
+            no_models_label = QLabel("🔗 No models associated yet")
+            no_models_label.setStyleSheet("color: rgba(255, 255, 255, 0.5); font-size: 9pt; font-style: italic; background: transparent; border: none;")
+            info_layout.addWidget(no_models_label)
         
-        # Action buttons
-        self.env_detail_layout.addSpacing(20)
+        # Package info preview
+        if pkg_count > 0:
+            pkg_preview = QLabel(f"📦 Top packages: torch, transformers, accelerate...")
+            pkg_preview.setStyleSheet("color: rgba(255, 255, 255, 0.6); font-size: 9pt; background: transparent; border: none;")
+            info_layout.addWidget(pkg_preview)
         
-        buttons_widget = QWidget()
-        buttons_widget.setStyleSheet("background: transparent;")
-        buttons_layout = QVBoxLayout(buttons_widget)
-        buttons_layout.setSpacing(10)
+        self.env_detail_layout.addWidget(info_section)
         
-        # Repair button
-        repair_btn = QPushButton("🔧 Repair Environment")
-        repair_btn.setFixedHeight(40)
-        repair_btn.setStyleSheet("""
-            QPushButton {
-                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                    stop:0 #667eea, stop:1 #764ba2);
-                color: white;
-                border: none;
-                border-radius: 6px;
-                font-size: 11pt;
-                font-weight: bold;
-            }
-            QPushButton:hover {
-                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                    stop:0 #7a8efc, stop:1 #875fb8);
-            }
-        """)
-        repair_btn.clicked.connect(lambda: self._repair_environment(env_id))
-        buttons_layout.addWidget(repair_btn)
+        # Action buttons - 2x2 grid
+        actions_widget = QWidget()
+        actions_widget.setStyleSheet("background: transparent; border: none;")
+        actions_layout = QGridLayout(actions_widget)
+        actions_layout.setSpacing(10)
         
-        # Associate model button
-        assoc_btn = QPushButton("🔗 Associate Model")
-        assoc_btn.setFixedHeight(40)
-        assoc_btn.setStyleSheet("""
-            QPushButton {
-                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                    stop:0 #43e97b, stop:1 #38f9d7);
-                color: #1a1a2e;
-                border: none;
-                border-radius: 6px;
-                font-size: 11pt;
-                font-weight: bold;
-            }
-            QPushButton:hover {
-                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                    stop:0 #56ff92, stop:1 #4cffe8);
-            }
-        """)
-        assoc_btn.clicked.connect(lambda: self._show_associate_model_dialog(env_id))
-        buttons_layout.addWidget(assoc_btn)
+        # Row 0, Col 0: View Packages
+        view_pkg_btn = self._create_action_button(
+            "📋 View Packages",
+            lambda: self._view_environment_packages(env_id),
+            "#4EC9B0"
+        )
+        actions_layout.addWidget(view_pkg_btn, 0, 0)
         
-        # Delete button
-        delete_btn = QPushButton("🗑️ Delete Environment")
-        delete_btn.setFixedHeight(40)
-        delete_btn.setStyleSheet("""
-            QPushButton {
-                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                    stop:0 #f093fb, stop:1 #f5576c);
-                color: white;
-                border: none;
-                border-radius: 6px;
-                font-size: 11pt;
-                font-weight: bold;
-            }
-            QPushButton:hover {
-                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                    stop:0 #ffa7ff, stop:1 #ff6b7e);
-            }
-        """)
-        delete_btn.clicked.connect(lambda: self._delete_environment(env_id))
-        buttons_layout.addWidget(delete_btn)
+        # Row 0, Col 1: Associate Model
+        assoc_btn = self._create_action_button(
+            "🔗 Associate Model",
+            lambda: self._show_associate_model_dialog(env_id),
+            "#667eea"
+        )
+        actions_layout.addWidget(assoc_btn, 0, 1)
         
-        self.env_detail_layout.addWidget(buttons_widget)
+        # Row 1, Col 0: Repair Environment
+        repair_btn = self._create_action_button(
+            "🔧 Repair",
+            lambda: self._repair_environment(env_id),
+            "#f093fb"
+        )
+        actions_layout.addWidget(repair_btn, 1, 0)
+        
+        # Row 1, Col 1: Delete Environment
+        delete_btn = self._create_action_button(
+            "🗑️ Delete",
+            lambda: self._delete_environment(env_id),
+            "#ff6b6b"
+        )
+        actions_layout.addWidget(delete_btn, 1, 1)
+        
+        self.env_detail_layout.addWidget(actions_widget)
         self.env_detail_layout.addStretch(1)
     
-    def _create_info_label(self, text: str) -> QLabel:
-        """Create a styled info label"""
-        label = QLabel(text)
-        label.setStyleSheet("color: rgba(255, 255, 255, 0.7); font-size: 10pt; background: transparent;")
-        return label
+    def _create_stat_card(self, icon: str, value: str, label: str, callback=None) -> QPushButton:
+        """Create a clickable stat display card as a button"""
+        btn = QPushButton()
+        btn.setCursor(QCursor(Qt.PointingHandCursor))
+        btn.setMinimumHeight(80)
+        btn.setStyleSheet("""
+            QPushButton {
+                background: rgba(40, 40, 65, 0.4);
+                border: 1px solid rgba(255, 255, 255, 0.1);
+                border-radius: 8px;
+                text-align: center;
+            }
+            QPushButton:hover {
+                background: rgba(102, 126, 234, 0.3);
+                border: 1px solid rgba(102, 126, 234, 0.5);
+            }
+            QPushButton:pressed {
+                background: rgba(102, 126, 234, 0.4);
+            }
+        """)
+        
+        # Create layout for button content
+        layout = QVBoxLayout()
+        layout.setContentsMargins(12, 10, 12, 10)
+        layout.setSpacing(4)
+        
+        icon_label = QLabel(icon)
+        icon_label.setAlignment(Qt.AlignCenter)
+        icon_label.setStyleSheet("font-size: 20pt; background: transparent; border: none; color: white;")
+        layout.addWidget(icon_label)
+        
+        value_label = QLabel(value)
+        value_label.setAlignment(Qt.AlignCenter)
+        value_label.setStyleSheet("font-size: 14pt; font-weight: bold; color: white; background: transparent; border: none;")
+        layout.addWidget(value_label)
+        
+        label_label = QLabel(label)
+        label_label.setAlignment(Qt.AlignCenter)
+        label_label.setStyleSheet("font-size: 9pt; color: rgba(255, 255, 255, 0.6); background: transparent; border: none;")
+        layout.addWidget(label_label)
+        
+        btn.setLayout(layout)
+        
+        if callback:
+            btn.clicked.connect(callback)
+        
+        return btn
     
-    def _create_info_value(self, text: str) -> QLabel:
-        """Create a styled info value label"""
-        label = QLabel(text)
-        label.setStyleSheet("color: white; font-size: 10pt; font-weight: bold; background: transparent;")
-        return label
+    def _create_action_button(self, text: str, callback, color: str) -> QPushButton:
+        """Create a styled action button - more compact"""
+        btn = QPushButton(text)
+        btn.setMinimumHeight(38)  # More compact
+        btn.setCursor(QCursor(Qt.PointingHandCursor))
+        btn.setStyleSheet(f"""
+            QPushButton {{
+                background: rgba({self._hex_to_rgb(color)}, 0.2);
+                color: white;
+                border: 1px solid rgba({self._hex_to_rgb(color)}, 0.4);
+                border-radius: 6px;
+                font-size: 10pt;
+                font-weight: 600;
+                padding: 8px;
+            }}
+            QPushButton:hover {{
+                background: rgba({self._hex_to_rgb(color)}, 0.3);
+                border: 1px solid rgba({self._hex_to_rgb(color)}, 0.6);
+            }}
+            QPushButton:pressed {{
+                background: rgba({self._hex_to_rgb(color)}, 0.4);
+            }}
+        """)
+        btn.clicked.connect(callback)
+        return btn
+    
+    def _hex_to_rgb(self, hex_color: str) -> str:
+        """Convert hex color to RGB string"""
+        hex_color = hex_color.lstrip('#')
+        r = int(hex_color[0:2], 16)
+        g = int(hex_color[2:4], 16)
+        b = int(hex_color[4:6], 16)
+        return f"{r}, {g}, {b}"
+    
+    def _view_environment_packages(self, env_id: str):
+        """View all packages in an environment"""
+        self._log_to_env_terminal(f"📦 Loading packages for: {env_id}")
+        
+        try:
+            packages = self.env_manager.get_environment_packages(model_id=env_id)
+            
+            if not packages:
+                self._log_to_env_terminal("⚠️ No packages found or failed to list.")
+                QMessageBox.information(self, "Packages", "No packages found in this environment.")
+                return
+            
+            # Log to terminal
+            self._log_to_env_terminal(f"✅ Found {len(packages)} packages:")
+            for i, pkg in enumerate(packages[:10], 1):
+                self._log_to_env_terminal(f"  {i}. {pkg}")
+            if len(packages) > 10:
+                self._log_to_env_terminal(f"  ... and {len(packages) - 10} more")
+            
+            # Show in dialog
+            package_text = "\n".join(packages)
+            dialog = QDialog(self)
+            dialog.setWindowTitle(f"Packages in {env_id}")
+            dialog.setMinimumSize(600, 500)
+            dialog.setStyleSheet("""
+                QDialog {
+                    background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+                        stop:0 #1a1a2e, stop:1 #16213e);
+                }
+            """)
+            
+            layout = QVBoxLayout(dialog)
+            
+            label = QLabel(f"📦 {len(packages)} packages installed:")
+            label.setStyleSheet("color: white; font-size: 12pt; font-weight: bold;")
+            layout.addWidget(label)
+            
+            text_edit = QTextEdit()
+            text_edit.setReadOnly(True)
+            text_edit.setPlainText(package_text)
+            text_edit.setStyleSheet("""
+                QTextEdit {
+                    background: rgba(0, 0, 0, 0.3);
+                    color: #4EC9B0;
+                    border: 1px solid rgba(255, 255, 255, 0.2);
+                    border-radius: 6px;
+                    padding: 10px;
+                    font-family: 'Consolas', 'Courier New', monospace;
+                    font-size: 9pt;
+                }
+            """)
+            layout.addWidget(text_edit)
+            
+            close_btn = QPushButton("Close")
+            close_btn.setFixedHeight(35)
+            close_btn.clicked.connect(dialog.accept)
+            layout.addWidget(close_btn)
+            
+            dialog.exec()
+            
+        except Exception as e:
+            self._log_to_env_terminal(f"❌ Error: {str(e)}")
+            QMessageBox.critical(self, "Error", f"Failed to load packages:\n{str(e)}")
     
     def _show_create_environment_dialog(self):
         """Show dialog to create a new environment"""
-        dialog = QDialog(self)
-        dialog.setWindowTitle("Create New Environment")
-        dialog.setMinimumWidth(550)
-        dialog.setMinimumHeight(450)
-        dialog.setStyleSheet("""
-            QDialog {
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
-                    stop:0 #1a1a2e, stop:1 #16213e);
-            }
-            QLabel {
-                color: white;
-                font-size: 10pt;
-            }
-            QLineEdit, QComboBox, QListWidget {
-                background: rgba(40, 40, 60, 0.6);
-                border: 1px solid rgba(255, 255, 255, 0.2);
-                border-radius: 5px;
-                padding: 8px;
-                color: white;
-                font-size: 10pt;
-            }
-            QListWidget::item {
-                padding: 8px;
-                border-radius: 4px;
-            }
-            QListWidget::item:selected {
-                background: rgba(102, 126, 234, 0.5);
-            }
-            QListWidget::item:hover {
-                background: rgba(102, 126, 234, 0.3);
-            }
-            QPushButton {
-                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                    stop:0 #667eea, stop:1 #764ba2);
-                color: white;
-                border: none;
-                border-radius: 6px;
-                padding: 10px 20px;
-                font-size: 10pt;
-                font-weight: bold;
-            }
-            QPushButton:hover {
-                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                    stop:0 #7a8efc, stop:1 #875fb8);
-            }
-        """)
+        self._log_to_env_terminal("🔵 Opening create environment dialog...")
         
-        layout = QVBoxLayout(dialog)
-        layout.setSpacing(15)
-        
-        # Environment name
-        name_label = QLabel("Environment Name:")
-        layout.addWidget(name_label)
-        
-        name_input = QLineEdit()
-        name_input.setPlaceholderText("e.g., my_custom_env or leave empty for auto-name")
-        layout.addWidget(name_input)
-        
-        # Model selection
-        model_label = QLabel("Associate with Model (optional):")
-        layout.addWidget(model_label)
-        
-        # Model list
-        model_list = QListWidget()
-        model_list.setSelectionMode(QListWidget.SingleSelection)
-        
-        # Scan for local models
-        local_models = []
-        models_dir = self.root / "models"
-        hf_models_dir = self.root / "hf_models"
-        
-        model_list.addItem("[None - Create empty environment]")
-        
-        # Add downloaded models
-        for base_dir in [models_dir, hf_models_dir]:
-            if base_dir.exists():
-                for model_dir in base_dir.iterdir():
-                    if model_dir.is_dir():
-                        model_name = model_dir.name
-                        display_name = f"📦 {model_name}"
-                        item = QListWidgetItem(display_name)
-                        item.setData(Qt.UserRole, str(model_dir))
-                        model_list.addItem(item)
-        
-        # Select first item by default
-        model_list.setCurrentRow(0)
-        layout.addWidget(model_list)
-        
-        # Info text
-        info_label = QLabel("Tip: Associating a model will automatically configure the environment for that model's requirements.")
-        info_label.setWordWrap(True)
-        info_label.setStyleSheet("color: rgba(255, 255, 255, 0.6); font-size: 9pt;")
-        layout.addWidget(info_label)
-        
-        # Buttons
-        button_layout = QHBoxLayout()
-        button_layout.addStretch(1)
-        
-        cancel_btn = QPushButton("Cancel")
-        cancel_btn.clicked.connect(dialog.reject)
-        button_layout.addWidget(cancel_btn)
-        
-        create_btn = QPushButton("Create")
-        create_btn.clicked.connect(dialog.accept)
-        button_layout.addWidget(create_btn)
-        
-        layout.addLayout(button_layout)
-        
-        if dialog.exec() == QDialog.Accepted:
-            env_name = name_input.text().strip()
+        try:
+            dialog = QDialog(self)
+            dialog.setWindowTitle("Create New Environment")
+            dialog.setMinimumWidth(550)
+            dialog.setMinimumHeight(450)
+            dialog.setStyleSheet("""
+                QDialog {
+                    background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+                        stop:0 #1a1a2e, stop:1 #16213e);
+                }
+                QLabel {
+                    color: white;
+                    font-size: 10pt;
+                }
+                QLineEdit, QComboBox, QListWidget {
+                    background: rgba(40, 40, 60, 0.6);
+                    border: 1px solid rgba(255, 255, 255, 0.2);
+                    border-radius: 5px;
+                    padding: 8px;
+                    color: white;
+                    font-size: 10pt;
+                }
+                QListWidget::item {
+                    padding: 8px;
+                    border-radius: 4px;
+                }
+                QListWidget::item:selected {
+                    background: rgba(102, 126, 234, 0.5);
+                }
+                QListWidget::item:hover {
+                    background: rgba(102, 126, 234, 0.3);
+                }
+                QPushButton {
+                    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                        stop:0 #667eea, stop:1 #764ba2);
+                    color: white;
+                    border: none;
+                    border-radius: 6px;
+                    padding: 10px 20px;
+                    font-size: 10pt;
+                    font-weight: bold;
+                }
+                QPushButton:hover {
+                    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                        stop:0 #7a8efc, stop:1 #875fb8);
+                }
+            """)
             
-            # Get selected model
-            selected_items = model_list.selectedItems()
-            model_path = None
-            model_name_for_env = None
-            if selected_items:
-                selected_item = selected_items[0]
-                if selected_item.row() > 0:  # Not "[None]"
-                    model_path = selected_item.data(Qt.UserRole)
-                    # Extract model name for auto-naming
-                    if model_path:
-                        from pathlib import Path
-                        model_name_for_env = Path(model_path).name
+            layout = QVBoxLayout(dialog)
+            layout.setSpacing(15)
             
-            # Auto-generate name if empty
-            if not env_name:
-                if model_name_for_env:
-                    env_name = f"env_{model_name_for_env}"
-                else:
-                    # Generate unique name
-                    from datetime import datetime
-                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                    env_name = f"env_{timestamp}"
+            # Environment name
+            name_label = QLabel("Environment Name:")
+            layout.addWidget(name_label)
             
-            # Sanitize name for filesystem
-            env_id = "".join(c for c in env_name if c.isalnum() or c in ("_", "-", "."))
-            if not env_id:
-                QMessageBox.warning(self, "Invalid Name", "Environment name must contain alphanumeric characters.")
-                return
+            name_input = QLineEdit()
+            name_input.setPlaceholderText("e.g., my_custom_env or leave empty for auto-name")
+            layout.addWidget(name_input)
             
-            # Create the environment
-            try:
-                # Show progress
-                progress = QMessageBox(self)
-                progress.setWindowTitle("Creating Environment")
-                progress.setText(f"Creating environment '{env_id}'...\n\nThis may take a few moments.")
-                progress.setStandardButtons(QMessageBox.NoButton)
-                progress.setModal(True)
-                progress.show()
-                QApplication.processEvents()
+            # Model selection
+            model_label = QLabel("Associate with Model (optional):")
+            layout.addWidget(model_label)
+            
+            # Model list
+            model_list = QListWidget()
+            model_list.setSelectionMode(QListWidget.SingleSelection)
+            
+            model_list.addItem("[None - Create empty environment]")
+            
+            # Add downloaded models
+            for base_dir in [self.root / "models", self.root / "hf_models"]:
+                if base_dir.exists():
+                    for model_dir in base_dir.iterdir():
+                        if model_dir.is_dir():
+                            model_name = model_dir.name
+                            display_name = f"📦 {model_name}"
+                            item = QListWidgetItem(display_name)
+                            item.setData(Qt.UserRole, str(model_dir))
+                            model_list.addItem(item)
+            
+            # Select first item by default
+            model_list.setCurrentRow(0)
+            layout.addWidget(model_list)
+            
+            # Info text
+            info_label = QLabel("Tip: Associating a model will automatically configure the environment for that model's requirements.")
+            info_label.setWordWrap(True)
+            info_label.setStyleSheet("color: rgba(255, 255, 255, 0.6); font-size: 9pt;")
+            layout.addWidget(info_label)
+            
+            # Buttons
+            button_layout = QHBoxLayout()
+            button_layout.addStretch(1)
+            
+            cancel_btn = QPushButton("Cancel")
+            cancel_btn.clicked.connect(dialog.reject)
+            button_layout.addWidget(cancel_btn)
+            
+            create_btn = QPushButton("Create")
+            create_btn.clicked.connect(dialog.accept)
+            button_layout.addWidget(create_btn)
+            
+            layout.addLayout(button_layout)
+            
+            self._log_to_env_terminal("✅ Dialog created, showing...")
+            
+            if dialog.exec() == QDialog.Accepted:
+                self._log_to_env_terminal("✅ User clicked Create")
                 
-                success, error = self.env_manager.create_environment(model_id=env_id)
+                env_name = name_input.text().strip()
                 
-                progress.close()
+                # Get selected model
+                selected_items = model_list.selectedItems()
+                model_path = None
+                model_name_for_env = None
+                if selected_items:
+                    selected_item = selected_items[0]
+                    row_index = model_list.row(selected_item)  # Get row from list widget
+                    if row_index > 0:  # Not "[None]"
+                        model_path = selected_item.data(Qt.UserRole)
+                        # Extract model name for auto-naming
+                        if model_path:
+                            from pathlib import Path
+                            model_name_for_env = Path(model_path).name
                 
-                if success:
-                    # Associate model if selected
-                    if model_path:
-                        self.env_manager.associate_model(env_id, model_path)
+                # Auto-generate name if empty
+                if not env_name:
+                    if model_name_for_env:
+                        env_name = f"env_{model_name_for_env}"
+                    else:
+                        # Generate unique name
+                        from datetime import datetime
+                        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                        env_name = f"env_{timestamp}"
+                
+                self._log_to_env_terminal(f"📝 Environment name: {env_name}")
+                
+                # Sanitize name for filesystem
+                env_id = "".join(c for c in env_name if c.isalnum() or c in ("_", "-", "."))
+                if not env_id:
+                    self._log_to_env_terminal("❌ Invalid environment name")
+                    QMessageBox.warning(self, "Invalid Name", "Environment name must contain alphanumeric characters.")
+                    return
+                
+                self._log_to_env_terminal("=" * 60)
+                self._log_to_env_terminal(f"🚀 CREATING NEW ENVIRONMENT: {env_id}")
+                self._log_to_env_terminal("=" * 60)
+                
+                # Create in background thread to show progress
+                self._create_environment_async(env_id, model_path)
+            else:
+                self._log_to_env_terminal("❌ User cancelled")
+                
+        except Exception as e:
+            import traceback
+            error_msg = traceback.format_exc()
+            self._log_to_env_terminal(f"💥 DIALOG ERROR: {str(e)}")
+            self._log_to_env_terminal(error_msg)
+            QMessageBox.critical(self, "Error", f"Failed to show dialog:\n{str(e)}")
+    
+    def _create_environment_async(self, env_id: str, model_path: str = None):
+        """Create environment asynchronously with terminal output"""
+        from PySide6.QtCore import QThread, Signal
+        
+        class EnvCreatorThread(QThread):
+            log_signal = Signal(str)
+            finished_signal = Signal(bool, str)
+            
+            def __init__(self, env_manager, env_id, model_path):
+                super().__init__()
+                self.env_manager = env_manager
+                self.env_id = env_id
+                self.model_path = model_path
+            
+            def run(self):
+                try:
+                    self.log_signal.emit(f"📁 Creating virtual environment directory...")
                     
-                    QMessageBox.information(self, "Success", f"Environment '{env_id}' created successfully!")
-                    self._refresh_environment_list()
-                else:
-                    QMessageBox.critical(self, "Error", f"Failed to create environment:\n{error}")
-            except Exception as e:
-                import traceback
-                error_details = traceback.format_exc()
-                QMessageBox.critical(self, "Error", f"Failed to create environment:\n{str(e)}\n\nDetails:\n{error_details}")
+                    # Create the environment with our enhanced version
+                    success, error = self.env_manager.create_environment_with_logging(
+                        model_id=self.env_id,
+                        log_callback=lambda msg: self.log_signal.emit(msg)
+                    )
+                    
+                    if success:
+                        self.log_signal.emit(f"✅ Environment '{self.env_id}' created successfully!")
+                        
+                        # Associate model if provided
+                        if self.model_path:
+                            self.log_signal.emit(f"🔗 Associating with model: {self.model_path}")
+                            self.env_manager.associate_model(self.env_id, self.model_path)
+                            self.log_signal.emit(f"✅ Model associated!")
+                        
+                        self.finished_signal.emit(True, "")
+                    else:
+                        self.log_signal.emit(f"❌ ERROR: {error}")
+                        self.finished_signal.emit(False, error)
+                        
+                except Exception as e:
+                    import traceback
+                    error_details = traceback.format_exc()
+                    self.log_signal.emit(f"❌ EXCEPTION: {str(e)}")
+                    self.log_signal.emit(error_details)
+                    self.finished_signal.emit(False, str(e))
+        
+        # Create and start thread
+        self.env_creator_thread = EnvCreatorThread(self.env_manager, env_id, model_path)
+        self.env_creator_thread.log_signal.connect(self._log_to_env_terminal)
+        self.env_creator_thread.finished_signal.connect(self._on_environment_created)
+        self.env_creator_thread.start()
+    
+    def _on_environment_created(self, success: bool, error: str):
+        """Handle environment creation completion"""
+        if success:
+            self._log_to_env_terminal("=" * 60)
+            self._log_to_env_terminal("🎉 ENVIRONMENT READY!")
+            self._log_to_env_terminal("=" * 60)
+            QMessageBox.information(self, "Success", "Environment created successfully!")
+            self._refresh_environment_list()
+        else:
+            self._log_to_env_terminal("=" * 60)
+            self._log_to_env_terminal("💥 CREATION FAILED")
+            self._log_to_env_terminal("=" * 60)
+            QMessageBox.critical(self, "Error", f"Failed to create environment:\n{error}")
     
     def _show_associate_model_dialog(self, env_id: str):
         """Show dialog to associate a model with an environment"""
@@ -9568,6 +10018,275 @@ except Exception as e:
                 
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to repair environment:\n{str(e)}")
+    
+    def _show_environment_location_dialog(self, env_id: str, env_info: Dict):
+        """Show dialog with environment location and management options"""
+        env_path = env_info.get("path", "N/A")
+        
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"Environment Location - {env_id}")
+        dialog.setMinimumSize(600, 300)
+        dialog.setStyleSheet("""
+            QDialog {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+                    stop:0 #1a1a2e, stop:1 #16213e);
+            }
+            QLabel {
+                color: white;
+            }
+            QPushButton {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #667eea, stop:1 #764ba2);
+                color: white;
+                border: none;
+                border-radius: 6px;
+                padding: 10px 20px;
+                font-size: 10pt;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #7a8efc, stop:1 #875fb8);
+            }
+        """)
+        
+        layout = QVBoxLayout(dialog)
+        layout.setSpacing(15)
+        
+        # Title
+        title = QLabel("💾 Environment Location")
+        title.setStyleSheet("font-size: 14pt; font-weight: bold; color: white;")
+        layout.addWidget(title)
+        
+        # Path info
+        path_info = QLabel(f"Path:\n{env_path}")
+        path_info.setWordWrap(True)
+        path_info.setStyleSheet("font-size: 10pt; color: rgba(255, 255, 255, 0.8); padding: 10px; background: rgba(0, 0, 0, 0.3); border-radius: 6px;")
+        layout.addWidget(path_info)
+        
+        # Disk usage
+        disk_mb = env_info.get("disk_usage_mb", 0)
+        if disk_mb > 0:
+            disk_str = f"{disk_mb:.0f} MB" if disk_mb < 1024 else f"{disk_mb/1024:.1f} GB"
+            disk_label = QLabel(f"Disk Usage: {disk_str}")
+            disk_label.setStyleSheet("font-size: 10pt; color: rgba(255, 255, 255, 0.7);")
+            layout.addWidget(disk_label)
+        
+        layout.addStretch(1)
+        
+        # Action buttons
+        btn_layout = QHBoxLayout()
+        btn_layout.setSpacing(10)
+        
+        # Browse button - open in file explorer
+        browse_btn = QPushButton("📂 Browse")
+        browse_btn.clicked.connect(lambda: self._open_in_explorer(env_path))
+        btn_layout.addWidget(browse_btn)
+        
+        # Rename button
+        rename_btn = QPushButton("✏️ Rename")
+        rename_btn.clicked.connect(lambda: self._rename_environment(env_id, dialog))
+        btn_layout.addWidget(rename_btn)
+        
+        # Close button
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(dialog.accept)
+        btn_layout.addWidget(close_btn)
+        
+        layout.addLayout(btn_layout)
+        
+        dialog.exec()
+    
+    def _open_in_explorer(self, path: str):
+        """Open path in file explorer"""
+        import subprocess
+        import os
+        
+        try:
+            if os.name == 'nt':  # Windows
+                os.startfile(path)
+            elif os.name == 'posix':  # macOS/Linux
+                subprocess.Popen(['xdg-open', path])
+            self._log_to_env_terminal(f"Opened: {path}")
+        except Exception as e:
+            self._log_to_env_terminal(f"Failed to open: {e}")
+            QMessageBox.warning(self, "Error", f"Could not open location:\n{e}")
+    
+    def _rename_environment(self, old_id: str, parent_dialog: QDialog):
+        """Rename an environment"""
+        new_name, ok = QInputDialog.getText(
+            parent_dialog,
+            "Rename Environment",
+            f"Enter new name for '{old_id}':",
+            text=old_id
+        )
+        
+        if ok and new_name and new_name != old_id:
+            try:
+                old_path = self.env_manager.get_environment_path(model_id=old_id)
+                new_path = old_path.parent / new_name
+                
+                if new_path.exists():
+                    QMessageBox.warning(parent_dialog, "Error", "An environment with that name already exists.")
+                    return
+                
+                import shutil
+                shutil.move(str(old_path), str(new_path))
+                
+                self._log_to_env_terminal(f"Renamed: {old_id} -> {new_name}")
+                QMessageBox.information(parent_dialog, "Success", f"Environment renamed to: {new_name}")
+                
+                parent_dialog.accept()
+                self._refresh_environment_list()
+                
+            except Exception as e:
+                self._log_to_env_terminal(f"Rename failed: {e}")
+                QMessageBox.critical(parent_dialog, "Error", f"Failed to rename:\n{e}")
+    
+    def _show_model_associations_dialog(self, env_id: str, associated: list):
+        """Show dialog to manage model associations"""
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"Model Associations - {env_id}")
+        dialog.setMinimumSize(700, 500)
+        dialog.setStyleSheet("""
+            QDialog {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+                    stop:0 #1a1a2e, stop:1 #16213e);
+            }
+            QLabel {
+                color: white;
+            }
+            QListWidget {
+                background: rgba(40, 40, 60, 0.6);
+                border: 1px solid rgba(255, 255, 255, 0.2);
+                border-radius: 5px;
+                padding: 8px;
+                color: white;
+                font-size: 10pt;
+            }
+            QListWidget::item {
+                padding: 8px;
+                border-radius: 4px;
+            }
+            QListWidget::item:selected {
+                background: rgba(102, 126, 234, 0.5);
+            }
+            QListWidget::item:hover {
+                background: rgba(102, 126, 234, 0.3);
+            }
+            QPushButton {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #667eea, stop:1 #764ba2);
+                color: white;
+                border: none;
+                border-radius: 6px;
+                padding: 10px 20px;
+                font-size: 10pt;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #7a8efc, stop:1 #875fb8);
+            }
+        """)
+        
+        layout = QVBoxLayout(dialog)
+        layout.setSpacing(15)
+        
+        # Title
+        title = QLabel("🔗 Model Associations")
+        title.setStyleSheet("font-size: 14pt; font-weight: bold; color: white;")
+        layout.addWidget(title)
+        
+        # Splitter for two lists
+        splitter = QSplitter(Qt.Horizontal)
+        
+        # LEFT: Currently associated
+        left_widget = QWidget()
+        left_layout = QVBoxLayout(left_widget)
+        
+        assoc_label = QLabel(f"✅ Associated ({len(associated)})")
+        assoc_label.setStyleSheet("font-size: 11pt; font-weight: 600; color: #4EC9B0;")
+        left_layout.addWidget(assoc_label)
+        
+        assoc_list = QListWidget()
+        if associated:
+            for model in associated:
+                assoc_list.addItem(f"📦 {model}")
+        else:
+            assoc_list.addItem("[No models associated]")
+        left_layout.addWidget(assoc_list)
+        
+        splitter.addWidget(left_widget)
+        
+        # RIGHT: Available models
+        right_widget = QWidget()
+        right_layout = QVBoxLayout(right_widget)
+        
+        avail_label = QLabel("💡 Available Models")
+        avail_label.setStyleSheet("font-size: 11pt; font-weight: 600; color: #f093fb;")
+        right_layout.addWidget(avail_label)
+        
+        avail_list = QListWidget()
+        avail_list.setSelectionMode(QListWidget.MultiSelection)
+        
+        # Scan for models
+        for base_dir in [self.root / "models", self.root / "hf_models"]:
+            if base_dir.exists():
+                for model_dir in base_dir.iterdir():
+                    if model_dir.is_dir():
+                        model_name = model_dir.name
+                        if model_name not in associated:
+                            avail_list.addItem(f"📦 {model_name}")
+        
+        if avail_list.count() == 0:
+            avail_list.addItem("[All models already associated]")
+        
+        right_layout.addWidget(avail_list)
+        
+        splitter.addWidget(right_widget)
+        layout.addWidget(splitter)
+        
+        # Buttons
+        btn_layout = QHBoxLayout()
+        btn_layout.addStretch(1)
+        
+        add_btn = QPushButton("➕ Add Selected")
+        add_btn.clicked.connect(lambda: self._add_model_associations(env_id, avail_list, dialog))
+        btn_layout.addWidget(add_btn)
+        
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(dialog.accept)
+        btn_layout.addWidget(close_btn)
+        
+        layout.addLayout(btn_layout)
+        
+        dialog.exec()
+    
+    def _add_model_associations(self, env_id: str, list_widget: QListWidget, dialog: QDialog):
+        """Add selected models to environment associations"""
+        selected_items = list_widget.selectedItems()
+        
+        if not selected_items:
+            QMessageBox.information(dialog, "No Selection", "Please select models to associate.")
+            return
+        
+        added = []
+        for item in selected_items:
+            model_name = item.text().replace("📦 ", "").strip()
+            try:
+                self.env_manager.associate_model_with_environment(model_name, env_id)
+                added.append(model_name)
+                self._log_to_env_terminal(f"Associated: {model_name} -> {env_id}")
+            except Exception as e:
+                self._log_to_env_terminal(f"Failed to associate {model_name}: {e}")
+        
+        if added:
+            QMessageBox.information(dialog, "Success", f"Associated {len(added)} model(s) with {env_id}")
+            dialog.accept()
+            self._refresh_environment_list()
+        else:
+            QMessageBox.warning(dialog, "Failed", "No models were associated.")
     
     def _delete_environment(self, env_id: str):
         """Delete an environment with confirmation"""

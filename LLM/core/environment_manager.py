@@ -240,6 +240,186 @@ class EnvironmentManager:
         except Exception as e:
             return False, str(e)
     
+    def create_environment_with_logging(
+        self,
+        model_id: str = None,
+        model_path: str = None,
+        python_runtime: Path = None,
+        profile_name: str = None,
+        log_callback=None
+    ) -> Tuple[bool, str]:
+        """
+        Create an isolated environment with real-time logging.
+        
+        Args:
+            model_id: HuggingFace model ID
+            model_path: Local model path
+            python_runtime: Path to self-contained Python runtime
+            profile_name: Hardware profile name
+            log_callback: Function to call with log messages
+            
+        Returns:
+            Tuple of (success: bool, error_message: str)
+        """
+        def log(msg):
+            if log_callback:
+                log_callback(msg)
+            # Remove emojis for Windows console compatibility
+            try:
+                print(msg)
+            except UnicodeEncodeError:
+                # Fallback: strip non-ascii characters
+                safe_msg = msg.encode('ascii', errors='ignore').decode('ascii')
+                print(safe_msg)
+        
+        env_path = self.get_environment_path(model_id, model_path)
+        venv_path = env_path / ".venv"
+        
+        # Use self-contained Python runtime if provided, otherwise system Python
+        if python_runtime and python_runtime.exists():
+            python_exe = python_runtime
+        else:
+            python_exe = Path(sys.executable)
+        
+        log(f"📍 Environment path: {env_path}")
+        log(f"🐍 Using Python: {python_exe}")
+        
+        try:
+            # Create venv
+            log("⏳ Creating virtual environment...")
+            result = subprocess.run(
+                [str(python_exe), "-m", "venv", str(venv_path), "--clear"],
+                capture_output=True,
+                text=True,
+                timeout=120,
+                **self.subprocess_flags
+            )
+            
+            if result.returncode != 0:
+                log(f"❌ Venv creation failed!")
+                return False, f"Failed to create venv: {result.stderr}"
+            
+            log("✅ Virtual environment created")
+            
+            # Get venv Python path
+            if sys.platform == 'win32':
+                venv_python = venv_path / "Scripts" / "python.exe"
+            else:
+                venv_python = venv_path / "bin" / "python"
+            
+            if not venv_python.exists():
+                return False, f"Venv created but Python not found at {venv_python}"
+            
+            log(f"🔍 Venv Python: {venv_python}")
+            
+            # Get Python version
+            log("🔍 Detecting Python version...")
+            python_version = None
+            try:
+                result = subprocess.run(
+                    [str(venv_python), "--version"],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                    **self.subprocess_flags
+                )
+                if result.returncode == 0:
+                    version_str = result.stdout.strip()
+                    if "Python " in version_str:
+                        python_version = version_str.split("Python ")[1]
+                        log(f"✅ Python version: {python_version}")
+            except Exception:
+                pass
+            
+            # Upgrade pip first
+            log("⬆️ Upgrading pip...")
+            try:
+                result = subprocess.run(
+                    [str(venv_python), "-m", "pip", "install", "--upgrade", "pip"],
+                    capture_output=True,
+                    text=True,
+                    timeout=120,
+                    **self.subprocess_flags
+                )
+                if result.returncode == 0:
+                    log("✅ Pip upgraded")
+                else:
+                    log(f"⚠️ Pip upgrade had issues: {result.stderr[:200]}")
+            except Exception as e:
+                log(f"⚠️ Pip upgrade failed: {e}")
+            
+            # Install base packages
+            log("📦 Installing base packages...")
+            base_packages = [
+                "setuptools",
+                "wheel",
+                "torch",
+                "transformers",
+                "accelerate",
+                "safetensors",
+                "huggingface-hub"
+            ]
+            
+            for pkg in base_packages:
+                log(f"  ⏳ Installing {pkg}...")
+                try:
+                    result = subprocess.run(
+                        [str(venv_python), "-m", "pip", "install", pkg],
+                        capture_output=True,
+                        text=True,
+                        timeout=600,  # 10 minutes per package
+                        **self.subprocess_flags
+                    )
+                    if result.returncode == 0:
+                        log(f"  ✅ {pkg} installed")
+                    else:
+                        log(f"  ⚠️ {pkg} had issues: {result.stderr[:200]}")
+                except Exception as e:
+                    log(f"  ❌ {pkg} failed: {e}")
+            
+            # Count installed packages
+            log("📊 Counting installed packages...")
+            package_count = 0
+            try:
+                result = subprocess.run(
+                    [str(venv_python), "-m", "pip", "list", "--format=freeze"],
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                    **self.subprocess_flags
+                )
+                if result.returncode == 0:
+                    packages = [line.strip() for line in result.stdout.strip().split('\n') if line.strip()]
+                    package_count = len(packages)
+                    log(f"✅ Total packages: {package_count}")
+            except Exception:
+                pass
+            
+            # Store metadata
+            log("💾 Saving environment metadata...")
+            metadata = {
+                "model_id": model_id,
+                "model_path": model_path,
+                "profile_name": profile_name,
+                "python_runtime": str(python_runtime) if python_runtime else None,
+                "python_version": python_version,
+                "created_at": datetime.now().isoformat(),
+                "associated_models": [],
+                "package_count": package_count,
+                "base_packages": base_packages
+            }
+            metadata_file = env_path / "environment_metadata.json"
+            with open(metadata_file, 'w', encoding='utf-8') as f:
+                json.dump(metadata, f, indent=2)
+            
+            log("✅ Metadata saved")
+            
+            return True, ""
+            
+        except Exception as e:
+            log(f"❌ FATAL ERROR: {str(e)}")
+            return False, str(e)
+    
     def delete_environment(self, model_id: str = None, model_path: str = None) -> bool:
         """
         Delete a model's environment.

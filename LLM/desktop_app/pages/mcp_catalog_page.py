@@ -107,6 +107,43 @@ class MCPCatalogPage(QWidget):
         # Now safe to refresh
         QTimer.singleShot(400, self._refresh_servers)
     
+    def closeEvent(self, event):
+        """Clean up threads when page/widget is closed."""
+        self._cleanup_threads()
+        super().closeEvent(event)
+    
+    def _cleanup_threads(self):
+        """Stop and clean up any running threads."""
+        # Clean up fetch thread
+        if self._fetch_thread is not None:
+            try:
+                if self._fetch_thread.isRunning():
+                    self._fetch_thread.quit()
+                    if not self._fetch_thread.wait(500):
+                        self._fetch_thread.terminate()
+                        self._fetch_thread.wait(500)
+            except RuntimeError:
+                pass
+            except Exception:
+                pass
+            finally:
+                self._fetch_thread = None
+        
+        # Clean up install thread
+        if self._install_thread is not None:
+            try:
+                if self._install_thread.isRunning():
+                    self._install_thread.quit()
+                    if not self._install_thread.wait(500):
+                        self._install_thread.terminate()
+                        self._install_thread.wait(500)
+            except RuntimeError:
+                pass
+            except Exception:
+                pass
+            finally:
+                self._install_thread = None
+    
     def _setup_ui(self):
         """Setup the UI."""
         layout = QVBoxLayout(self)
@@ -227,10 +264,18 @@ class MCPCatalogPage(QWidget):
             search = self.search_edit.text().strip() or None
             sort = self.sort_combo.currentText().lower()
             
-            # Cancel previous fetch if running (non-blocking)
-            if self._fetch_thread and self._fetch_thread.isRunning():
-                self._fetch_thread.terminate()
-                # Don't wait() here - it blocks the UI thread. Let it terminate asynchronously.
+            # Cancel previous fetch if running
+            if self._fetch_thread is not None:
+                try:
+                    if self._fetch_thread.isRunning():
+                        self._fetch_thread.quit()
+                        if not self._fetch_thread.wait(300):
+                            self._fetch_thread.terminate()
+                            self._fetch_thread.wait(200)
+                except (RuntimeError, Exception):
+                    pass
+                finally:
+                    self._fetch_thread = None
             
             self._fetch_thread = FetchServersThread(
                 self.registry_client,
@@ -241,6 +286,7 @@ class MCPCatalogPage(QWidget):
             self._fetch_thread.servers_fetched.connect(self._on_servers_fetched)
             self._fetch_thread.error.connect(self._on_fetch_error)
             self._fetch_thread.finished.connect(lambda: self.refresh_btn.setEnabled(True))
+            self._fetch_thread.finished.connect(self._fetch_thread.deleteLater)
             self._fetch_thread.start()
         except Exception as e:
             self._show_status(f"Error refreshing servers: {str(e)}")

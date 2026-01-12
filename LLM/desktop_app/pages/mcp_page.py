@@ -118,3 +118,16 @@ class MCPPage(QWidget):
     def get_connections_page(self):
         """Get connections page if it exists."""
         return self._created_pages.get(1) or getattr(self, 'connections_page', None)
+    
+    def closeEvent(self, event):
+        """Clean up all sub-pages when container is closed."""
+        # Clean up any created pages
+        for page in self._created_pages.values():
+            if page and hasattr(page, 'closeEvent'):
+                try:
+                    # Manually trigger cleanup
+                    if hasattr(page, '_cleanup_threads'):
+                        page._cleanup_threads()
+                except Exception:
+                    pass
+        super().closeEvent(event)

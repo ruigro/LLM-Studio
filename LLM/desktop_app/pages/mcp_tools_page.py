@@ -167,6 +167,7 @@ class ToolsRefreshWorker(QObject):
     """Worker object for refreshing tools in background thread."""
     tools_ready = Signal(list)  # Emits list of tools
     error = Signal(str)  # Emits error message
+    finished = Signal()  # Emits when work is complete (success or error)
     
     def __init__(self, connection_manager):
         super().__init__()
@@ -186,6 +187,9 @@ class ToolsRefreshWorker(QObject):
             print(f"[MCP Tools] Worker: Error: {error_str}", file=sys.stderr, flush=True)
             print(traceback.format_exc(), file=sys.stderr, flush=True)
             self.error.emit(error_str)
+        finally:
+            # Always emit finished, whether success or error
+            self.finished.emit()
 
 
 class MCPToolsPage(QWidget):
@@ -516,10 +520,30 @@ class MCPToolsPage(QWidget):
     
     def closeEvent(self, event):
         """Clean up threads when page/widget is closed."""
-        if self._refresh_thread and self._refresh_thread.isRunning():
-            self._refresh_thread.terminate()
-            self._refresh_thread.wait(1000)
+        self._cleanup_threads()
         super().closeEvent(event)
+    
+    def _cleanup_threads(self):
+        """Stop and clean up any running threads."""
+        if self._refresh_thread is not None:
+            try:
+                if self._refresh_thread.isRunning():
+                    # Request thread to quit gracefully
+                    self._refresh_thread.quit()
+                    # Wait briefly for clean shutdown
+                    if not self._refresh_thread.wait(500):
+                        # If still running after 500ms, terminate it
+                        self._refresh_thread.terminate()
+                        self._refresh_thread.wait(500)
+            except RuntimeError:
+                # C++ object already deleted
+                pass
+            except Exception:
+                # Other errors, continue cleanup
+                pass
+            finally:
+                self._refresh_thread = None
+                self._refresh_worker = None
     
     def _show_status_banner(self, message: str, is_info: bool = False):
         """Show status banner."""
@@ -552,6 +576,9 @@ class MCPToolsPage(QWidget):
             QTimer.singleShot(100, self._refresh_tools)
             return
         
+        # Clean up any existing thread first
+        self._cleanup_threads()
+        
         self._hide_status_banner()
         self.refresh_btn.setEnabled(False)
         self.refresh_btn.setText("🔄 Refreshing...")
@@ -562,6 +589,7 @@ class MCPToolsPage(QWidget):
         self._refresh_thread.started.connect(self._refresh_worker.refresh)
         self._refresh_worker.tools_ready.connect(self._on_tools_refreshed)
         self._refresh_worker.error.connect(self._on_refresh_error)
+        self._refresh_worker.finished.connect(self._refresh_thread.quit)
         self._refresh_thread.finished.connect(self._refresh_thread.deleteLater)
         self._refresh_thread.start()
 

@@ -10,7 +10,9 @@
   "expose_to_lan": true,
   "enabled_tools": {
     "read_file": false,
-    "git_status": false
+    "git_status": false,
+    "list_dir": false,
+    "run_shell": false
   },
   "require_auth_for_tools_list": false
 }
