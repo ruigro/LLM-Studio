@@ -1,0 +1,308 @@
+#!/usr/bin/env python3
+"""
+FastAPI server for persistent LLM inference.
+Loads model once at startup and serves generation requests over HTTP.
+Provides both native API and OpenAI-compatible endpoints.
+"""
+import os
+import logging
+import time
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field
+from typing import Optional, List, Literal, Union
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+# Import backend functions
+from core.llm_backends.run_adapter_backend import load_model, generate_text
+
+# Create FastAPI app
+app = FastAPI(
+    title="LLM Inference Server",
+    description="Local LLM server with OpenAI-compatible API",
+    version="1.0.0"
+)
+
+# Add CORS middleware for external tool access
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Global model state
+tokenizer = None
+model = None
+model_type = "base"
+system_prompt = ""
+model_name = "local-llm"
+
+
+# ============================================================================
+# Native API Models
+# ============================================================================
+
+class GenerateRequest(BaseModel):
+    prompt: str
+    max_new_tokens: int = 256
+    temperature: float = 0.7
+
+
+class GenerateResponse(BaseModel):
+    text: str
+
+
+# ============================================================================
+# OpenAI-Compatible API Models
+# ============================================================================
+
+class ChatMessage(BaseModel):
+    role: Literal["system", "user", "assistant"]
+    content: str
+
+
+class ChatCompletionRequest(BaseModel):
+    model: str = "local-llm"
+    messages: List[ChatMessage]
+    temperature: float = 0.7
+    max_tokens: int = 256
+    stream: bool = False
+    stop: Optional[Union[str, List[str]]] = None
+
+
+class ChatCompletionChoice(BaseModel):
+    index: int
+    message: ChatMessage
+    finish_reason: str
+
+
+class ChatCompletionUsage(BaseModel):
+    prompt_tokens: int
+    completion_tokens: int
+    total_tokens: int
+
+
+class ChatCompletionResponse(BaseModel):
+    id: str
+    object: str = "chat.completion"
+    created: int
+    model: str
+    choices: List[ChatCompletionChoice]
+    usage: ChatCompletionUsage
+
+
+class ModelInfo(BaseModel):
+    id: str
+    object: str = "model"
+    created: int
+    owned_by: str = "local"
+
+
+class ModelsListResponse(BaseModel):
+    object: str = "list"
+    data: List[ModelInfo]
+
+
+# ============================================================================
+# Startup & Shutdown
+# ============================================================================
+
+@app.on_event("startup")
+async def startup_event():
+    """Load model once at startup"""
+    global tokenizer, model, model_type, system_prompt, model_name
+    
+    logger.info("Starting LLM server...")
+    
+    # Read configuration from environment variables
+    base_model = os.environ.get("BASE_MODEL")
+    if not base_model:
+        raise RuntimeError("BASE_MODEL environment variable is required")
+    
+    adapter_dir = os.environ.get("ADAPTER_DIR")
+    model_type = os.environ.get("MODEL_TYPE", "base")
+    system_prompt = os.environ.get("SYSTEM_PROMPT", "")
+    model_name = os.environ.get("MODEL_NAME", "local-llm")
+    use_4bit_str = os.environ.get("USE_4BIT", "true").lower()
+    use_4bit = use_4bit_str in ("true", "1", "yes")
+    
+    logger.info(f"Loading model: {base_model}")
+    if adapter_dir:
+        logger.info(f"With adapter: {adapter_dir}")
+    logger.info(f"Model type: {model_type}")
+    logger.info(f"Model name: {model_name}")
+    logger.info(f"Quantization (4-bit): {use_4bit}")
+    
+    try:
+        # Load model using backend
+        tokenizer, model = load_model(
+            base_model=base_model,
+            adapter_dir=adapter_dir,
+            use_4bit=use_4bit,
+            offload=True
+        )
+        logger.info("Model loaded successfully!")
+        logger.info("OpenAI-compatible API available at:")
+        logger.info("  POST /v1/chat/completions")
+        logger.info("  GET  /v1/models")
+    except Exception as e:
+        logger.error(f"Failed to load model: {e}")
+        raise
+
+
+# ============================================================================
+# Native API Endpoints
+# ============================================================================
+
+@app.get("/health")
+async def health_check():
+    """Health check endpoint"""
+    if model is None or tokenizer is None:
+        raise HTTPException(status_code=503, detail="Model not loaded")
+    return {"status": "ok", "model": model_name}
+
+
+@app.post("/generate", response_model=GenerateResponse)
+async def generate(request: GenerateRequest):
+    """Generate text from prompt (native API)"""
+    if model is None or tokenizer is None:
+        raise HTTPException(status_code=503, detail="Model not loaded")
+    
+    try:
+        # Call generation function
+        text = generate_text(
+            tokenizer=tokenizer,
+            model=model,
+            prompt=request.prompt,
+            max_new_tokens=request.max_new_tokens,
+            temperature=request.temperature,
+            model_type=model_type,
+            system_prompt=system_prompt
+        )
+        
+        # Return ONLY the clean text
+        return GenerateResponse(text=text)
+        
+    except Exception as e:
+        logger.error(f"Generation failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Generation failed: {str(e)}")
+
+
+# ============================================================================
+# OpenAI-Compatible API Endpoints
+# ============================================================================
+
+@app.get("/v1/models", response_model=ModelsListResponse)
+async def list_models():
+    """List available models (OpenAI-compatible)"""
+    return ModelsListResponse(
+        data=[
+            ModelInfo(
+                id=model_name,
+                created=int(time.time())
+            )
+        ]
+    )
+
+
+@app.post("/v1/chat/completions", response_model=ChatCompletionResponse)
+async def chat_completions(request: ChatCompletionRequest):
+    """Chat completions endpoint (OpenAI-compatible)"""
+    if model is None or tokenizer is None:
+        raise HTTPException(status_code=503, detail="Model not loaded")
+    
+    if request.stream:
+        raise HTTPException(status_code=400, detail="Streaming not yet supported")
+    
+    try:
+        # Build prompt from messages
+        prompt_parts = []
+        
+        # Add system messages
+        system_messages = [msg.content for msg in request.messages if msg.role == "system"]
+        if system_messages:
+            prompt_parts.append(system_messages[0])  # Use first system message
+        elif system_prompt:
+            prompt_parts.append(system_prompt)
+        
+        # Add conversation history
+        for msg in request.messages:
+            if msg.role == "user":
+                prompt_parts.append(f"User: {msg.content}")
+            elif msg.role == "assistant":
+                prompt_parts.append(f"Assistant: {msg.content}")
+        
+        # Add final prompt
+        prompt_parts.append("Assistant:")
+        
+        full_prompt = "\n\n".join(prompt_parts)
+        
+        # Generate response
+        generated_text = generate_text(
+            tokenizer=tokenizer,
+            model=model,
+            prompt=full_prompt,
+            max_new_tokens=request.max_tokens,
+            temperature=request.temperature,
+            model_type=model_type,
+            system_prompt=""  # Already included in prompt
+        )
+        
+        # Create response in OpenAI format
+        response = ChatCompletionResponse(
+            id=f"chatcmpl-{int(time.time())}",
+            created=int(time.time()),
+            model=request.model,
+            choices=[
+                ChatCompletionChoice(
+                    index=0,
+                    message=ChatMessage(
+                        role="assistant",
+                        content=generated_text.strip()
+                    ),
+                    finish_reason="stop"
+                )
+            ],
+            usage=ChatCompletionUsage(
+                prompt_tokens=len(full_prompt.split()),  # Rough estimate
+                completion_tokens=len(generated_text.split()),  # Rough estimate
+                total_tokens=len(full_prompt.split()) + len(generated_text.split())
+            )
+        )
+        
+        return response
+        
+    except Exception as e:
+        logger.error(f"Chat completion failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Chat completion failed: {str(e)}")
+
+
+@app.get("/")
+async def root():
+    """Root endpoint with API information"""
+    return {
+        "name": "LLM Inference Server",
+        "version": "1.0.0",
+        "model": model_name,
+        "endpoints": {
+            "health": "GET /health",
+            "native_generate": "POST /generate",
+            "openai_chat": "POST /v1/chat/completions",
+            "openai_models": "GET /v1/models"
+        },
+        "status": "ready" if model is not None else "loading"
+    }
+
+
+if __name__ == "__main__":
+    import uvicorn
+    port = int(os.environ.get("PORT", "9100"))
+    uvicorn.run(app, host="127.0.0.1", port=port)

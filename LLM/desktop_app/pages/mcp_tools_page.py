@@ -669,6 +669,14 @@ class MCPToolsPage(QWidget):
         self._log(f"Displaying {len(self.tool_cards)} tools.")
 
     def _on_tool_enabled_changed(self, tool_name: str, enabled: bool):
+        """Handle tool enabled/disabled state change."""
+        # Update the tool data in self.tools
+        for tool in self.tools:
+            if tool.get("name") == tool_name:
+                tool["enabled"] = enabled
+                break
+        
+        # Save to config
         if not self.config_manager: return
         config = self.config_manager.load()
         if "enabled_tools" not in config: config["enabled_tools"] = {}
@@ -681,9 +689,9 @@ class MCPToolsPage(QWidget):
         if not tool_data:
             self._log(f"Tool '{tool_name}' not found.")
             return
-        if not tool_data.get("enabled", True):
-            QMessageBox.warning(self, "Tool Disabled", f"Tool '{tool_name}' is disabled.")
-            return
+        
+        # Note: We removed the enabled check - let users run any tool
+        # The checkbox is just for visual organization/preference
         
         self.current_tool_data = tool_data
         

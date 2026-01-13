@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional, List
+from typing import Optional, List, Callable, Tuple
 import subprocess
 import sys
 import os
@@ -15,10 +15,22 @@ def get_app_root() -> Path:
 @dataclass
 class InferenceConfig:
     prompt: str
+    model_id: str = "default"  # Required for server-based inference
     base_model: Optional[str] = None
     adapter_dir: Optional[Path] = None
     max_new_tokens: int = 256
     temperature: float = 0.7
+
+
+@dataclass
+class ToolEnabledInferenceConfig(InferenceConfig):
+    """Extended inference config with tool calling support"""
+    enable_tools: bool = True
+    tool_server_url: str = "http://127.0.0.1:8763"
+    tool_server_token: str = ""
+    auto_execute_safe_tools: bool = True
+    max_tool_iterations: int = 5  # Prevent infinite loops
+    system_prompt: str = ""  # System prompt for tool instructions
 
 
 def build_run_adapter_cmd(cfg: InferenceConfig) -> List[str]:
@@ -32,12 +44,158 @@ def build_run_adapter_cmd(cfg: InferenceConfig) -> List[str]:
 
 
 def run_inference(cfg: InferenceConfig, env: Optional[dict] = None) -> str:
-    workdir = str(get_app_root())
-    proc_env = os.environ.copy()
-    if env:
-        proc_env.update(env)
+    """
+    Run inference using persistent server.
+    
+    Args:
+        cfg: Inference configuration (must include model_id)
+        env: Optional environment variables (unused in server mode)
+        
+    Returns:
+        Generated text from the model
+    """
+    from core.llm_server_manager import get_global_server_manager
+    from core.inference_client import InferenceClient
+    
+    # Ensure server is running for this model
+    manager = get_global_server_manager()
+    server_url = manager.ensure_server_running(cfg.model_id)
+    
+    # Call persistent server via HTTP
+    client = InferenceClient(server_url)
+    return client.generate(
+        prompt=cfg.prompt,
+        max_new_tokens=cfg.max_new_tokens,
+        temperature=cfg.temperature
+    )
 
-    cmd = build_run_adapter_cmd(cfg)
-    p = subprocess.run(cmd, cwd=workdir, env=proc_env, capture_output=True, text=True, encoding="utf-8", errors="replace")
-    out = (p.stdout or "") + ("\n" + p.stderr if p.stderr else "")
-    return out
+
+def run_inference_with_tools(
+    cfg: ToolEnabledInferenceConfig,
+    tool_callback: Optional[Callable[[str, dict, any], None]] = None,
+    approval_callback: Optional[Callable[[str, dict], bool]] = None,
+    env: Optional[dict] = None
+) -> Tuple[str, List[dict]]:
+    """
+    Run inference with tool calling support.
+    
+    Iterative loop:
+    1. Generate response from LLM
+    2. Detect tool calls in output
+    3. Execute tools (with approval if needed)
+    4. Feed results back to LLM
+    5. Repeat until no more tool calls or max iterations
+    
+    Args:
+        cfg: Tool-enabled inference configuration
+        tool_callback: Called with (tool_name, args, result) for each tool execution
+        approval_callback: Called with (tool_name, args), returns True if approved
+        env: Optional environment variables
+        
+    Returns:
+        Tuple of (final_output, tool_execution_log)
+        tool_execution_log is list of dicts with tool execution details
+    """
+    from core.tool_calling import (
+        ToolCallDetector,
+        ToolExecutor,
+        ToolApprovalManager,
+        format_tool_result_for_llm
+    )
+    
+    if not cfg.enable_tools:
+        # Tools disabled, run normal inference
+        output = run_inference(cfg, env)
+        return output, []
+    
+    # Initialize tool infrastructure
+    executor = ToolExecutor(cfg.tool_server_url, cfg.tool_server_token)
+    approval_manager = ToolApprovalManager(cfg.auto_execute_safe_tools)
+    detector = ToolCallDetector()
+    
+    tool_log = []
+    conversation_history = cfg.prompt
+    
+    # Add system prompt if provided
+    if cfg.system_prompt:
+        conversation_history = f"{cfg.system_prompt}\n\n{conversation_history}"
+    
+    iteration = 0
+    final_output = ""
+    
+    while iteration < cfg.max_tool_iterations:
+        iteration += 1
+        
+        # Run inference with current conversation
+        inference_cfg = InferenceConfig(
+            prompt=conversation_history,
+            model_id=cfg.model_id,  # Pass model_id to InferenceConfig
+            base_model=cfg.base_model,
+            adapter_dir=cfg.adapter_dir,
+            max_new_tokens=cfg.max_new_tokens,
+            temperature=cfg.temperature
+        )
+        
+        # Call LLM
+        assistant_text = run_inference(inference_cfg, env)
+        final_output = assistant_text
+        
+        # Append assistant output ONCE (before tool loop)
+        conversation_history += "\n" + assistant_text
+        
+        # Detect tool calls in output
+        tool_calls = detector.detect(assistant_text)
+        
+        if not tool_calls:
+            # No more tool calls, we're done
+            break
+        
+        # Process each tool call
+        any_executed = False
+        for tool_call in tool_calls:
+            # Check if approval is needed
+            requires_approval = approval_manager.requires_approval(tool_call.name)
+            
+            if requires_approval and approval_callback:
+                approved = approval_callback(tool_call.name, tool_call.arguments)
+                if not approved:
+                    # Tool denied, skip execution
+                    tool_log.append({
+                        "tool": tool_call.name,
+                        "args": tool_call.arguments,
+                        "status": "denied",
+                        "iteration": iteration
+                    })
+                    continue
+            
+            # Execute the tool
+            result = executor.execute(tool_call)
+            any_executed = True
+            
+            # Log execution
+            log_entry = {
+                "tool": tool_call.name,
+                "args": tool_call.arguments,
+                "status": "success" if result.success else "error",
+                "result": result.result if result.success else None,
+                "error": result.error if not result.success else None,
+                "iteration": iteration
+            }
+            tool_log.append(log_entry)
+            
+            # Call tool callback if provided
+            if tool_callback:
+                tool_callback(tool_call.name, tool_call.arguments, result.result if result.success else result.error)
+            
+            # Format result for LLM and append to history
+            result_text = format_tool_result_for_llm(tool_call, result)
+            conversation_history += "\n" + result_text
+        
+        if not any_executed:
+            # No tools were executed (all denied or errored), stop iteration
+            break
+        
+        # Update prompt with full history for next iteration
+        cfg.prompt = conversation_history
+    
+    return final_output, tool_log

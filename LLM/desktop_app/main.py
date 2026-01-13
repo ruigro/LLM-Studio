@@ -173,6 +173,67 @@ class PipPackageThread(QThread):
             self.finished_signal.emit(False)
 
 
+class ToolInferenceWorker(QThread):
+    """Thread for running tool-enabled inference without blocking UI"""
+    progress_update = Signal(str)  # Progress messages
+    tool_call_detected = Signal(str, dict, str)  # tool_name, args, model_column
+    tool_result_received = Signal(str, object, bool, str)  # tool_name, result, success, model_column
+    inference_finished = Signal(str, list, str)  # final_output, tool_log, model_column
+    inference_failed = Signal(str, str)  # error_message, model_column
+    
+    def __init__(self, prompt: str, model_id: str, model_column: str, system_prompt: str = ""):
+        super().__init__()
+        self.prompt = prompt
+        self.model_id = model_id
+        self.model_column = model_column
+        self.system_prompt = system_prompt
+    
+    def run(self):
+        """Run tool-enabled inference in background"""
+        try:
+            from core.inference import ToolEnabledInferenceConfig, run_inference_with_tools
+            
+            self.progress_update.emit("[INFO] Initializing tool-enabled inference...")
+            
+            # Create config
+            cfg = ToolEnabledInferenceConfig(
+                prompt=self.prompt,
+                model_id=self.model_id,
+                enable_tools=True,
+                tool_server_url="http://127.0.0.1:8763",
+                auto_execute_safe_tools=True,
+                max_tool_iterations=5,
+                system_prompt=self.system_prompt,
+                max_new_tokens=256,
+                temperature=0.7
+            )
+            
+            # Tool callback to emit signals
+            def tool_callback(tool_name: str, args: dict, result):
+                self.tool_call_detected.emit(tool_name, args, self.model_column)
+                if isinstance(result, dict) and result.get("success"):
+                    self.tool_result_received.emit(tool_name, result, True, self.model_column)
+                else:
+                    self.tool_result_received.emit(tool_name, result, False, self.model_column)
+            
+            self.progress_update.emit("[INFO] Starting server (this may take several minutes on first run)...")
+            
+            # Run inference
+            final_output, tool_log = run_inference_with_tools(
+                cfg=cfg,
+                tool_callback=tool_callback,
+                approval_callback=None  # Auto-approve in test mode
+            )
+            
+            # Emit success
+            self.inference_finished.emit(final_output, tool_log, self.model_column)
+            
+        except Exception as e:
+            import traceback
+            error_msg = f"[ERROR] Tool-enabled inference failed: {e}\n\nTraceback:\n{traceback.format_exc()}"
+            self.inference_failed.emit(error_msg, self.model_column)
+
+
 class CudaBootstrapThread(QThread):
     """Thread to run SmartInstaller CUDA linker bootstrap without freezing UI."""
     log_output = Signal(str)
@@ -1842,12 +1903,13 @@ class MainWindow(QMainWindow):
         self.logs_btn = QPushButton("📊 Logs")
         self.server_btn = QPushButton("🖧 Server")
         self.mcp_btn = QPushButton("🧩 MCP")
-        self.envs_btn = QPushButton("🔧 Environment")
+        self.tool_chat_btn = QPushButton("🔧 Tool Chat")
+        self.envs_btn = QPushButton("⚙️ Environment")
         self.info_btn = QPushButton("ℹ️ Info")
         
         # Navigation buttons will be styled by theme system
         
-        for btn in [self.home_btn, self.train_btn, self.download_btn, self.test_btn, self.logs_btn, self.server_btn, self.mcp_btn, self.envs_btn, self.info_btn]:
+        for btn in [self.home_btn, self.train_btn, self.download_btn, self.test_btn, self.logs_btn, self.server_btn, self.mcp_btn, self.tool_chat_btn, self.envs_btn, self.info_btn]:
             btn.setCheckable(True)
             # Navigation buttons will be styled by theme system
         
@@ -1858,6 +1920,7 @@ class MainWindow(QMainWindow):
         navbar_layout.addWidget(self.test_btn)
         navbar_layout.addWidget(self.server_btn)
         navbar_layout.addWidget(self.mcp_btn)
+        navbar_layout.addWidget(self.tool_chat_btn)
         navbar_layout.addWidget(self.envs_btn)
         
         # Add stretch to consume remaining space
@@ -1883,6 +1946,11 @@ class MainWindow(QMainWindow):
         self.server_page = ServerPage(self)
         tabs.addTab(self.server_page, "Server")
         tabs.addTab(MCPPage(self), "MCP")
+        
+        # Add Tool Chat tab
+        from desktop_app.pages.tool_chat_page import ToolChatPage
+        tabs.addTab(ToolChatPage(self), "🔧 Tool Chat")
+        
         tabs.addTab(self._build_environment_management_page(), "Environment Manager")
         tabs.addTab(self._build_info_tab(), "Info")
         
@@ -1894,8 +1962,9 @@ class MainWindow(QMainWindow):
         self.logs_btn.clicked.connect(lambda: self._switch_tab(tabs, 4))
         self.server_btn.clicked.connect(lambda: self._switch_tab(tabs, 5))
         self.mcp_btn.clicked.connect(lambda: self._switch_tab(tabs, 6))
-        self.envs_btn.clicked.connect(lambda: self._switch_tab(tabs, 7))
-        self.info_btn.clicked.connect(lambda: self._switch_tab(tabs, 8))
+        self.tool_chat_btn.clicked.connect(lambda: self._switch_tab(tabs, 7))
+        self.envs_btn.clicked.connect(lambda: self._switch_tab(tabs, 8))
+        self.info_btn.clicked.connect(lambda: self._switch_tab(tabs, 9))
         
         # Also connect to tab widget's currentChanged signal to handle programmatic changes
         tabs.currentChanged.connect(self._update_frame_corner_br)
@@ -3378,7 +3447,7 @@ class MainWindow(QMainWindow):
         self.home_status_summary.setWordWrap(True)
         self.home_status_summary.setCursor(Qt.PointingHandCursor)
         # Clicking the warning takes you to the Requirements tab
-        self.home_status_summary.mousePressEvent = lambda e: self._switch_tab(self.tabs, 7)
+        self.home_status_summary.mousePressEvent = lambda e: self._switch_tab(self.tabs, 8)
         self.home_status_summary.hide()
         title_layout.addWidget(self.home_status_summary)
         
@@ -5698,19 +5767,23 @@ class MainWindow(QMainWindow):
         
         # Checkbox for 2 models
         self.test_model_count_2 = QCheckBox("2")
-        self.test_model_count_2.setChecked(False)  # Default to 3 models
+        self.test_model_count_2.setChecked(True)  # Default to 2 models
         self.test_model_count_2.setTristate(False)
         self.test_model_count_2.toggled.connect(self._on_model_count_2_toggled)
         title_row.addWidget(self.test_model_count_2)
         
         # Checkbox for 3 models
         self.test_model_count_3 = QCheckBox("3")
-        self.test_model_count_3.setChecked(True)  # Default to 3 models
+        self.test_model_count_3.setChecked(False)  # Default to 2 models
         self.test_model_count_3.setTristate(False)
         self.test_model_count_3.toggled.connect(self._on_model_count_3_toggled)
         title_row.addWidget(self.test_model_count_3)
         left_layout.addLayout(title_row)
-        
+
+        # Hardware Settings and Tool Calling side by side
+        settings_row = QHBoxLayout()
+        settings_row.setSpacing(15)
+
         # GPU selection for inference
         gpu_frame = QGroupBox("⚙️ Hardware Settings")
         gpu_layout = QVBoxLayout(gpu_frame)
@@ -5745,7 +5818,25 @@ class MainWindow(QMainWindow):
         self.test_gpu_info.setWordWrap(True)
         gpu_layout.addWidget(self.test_gpu_info)
         
-        left_layout.addWidget(gpu_frame)
+        settings_row.addWidget(gpu_frame, 2)  # 2/3 of space
+        
+        # Tool calling toggle
+        tool_frame = QGroupBox("🔧 Tool Calling")
+        tool_layout = QVBoxLayout(tool_frame)
+        
+        self.test_enable_tools = QCheckBox("Enable Tool Use")
+        self.test_enable_tools.setChecked(False)
+        self.test_enable_tools.setStyleSheet("color: white; font-weight: bold;")
+        tool_layout.addWidget(self.test_enable_tools)
+        
+        tool_info = QLabel("Models can call tools autonomously. You'll approve dangerous operations.")
+        tool_info.setStyleSheet("color: #888; padding: 5px; font-size: 9pt;")
+        tool_info.setWordWrap(True)
+        tool_layout.addWidget(tool_info)
+        
+        settings_row.addWidget(tool_frame, 1)  # 1/3 of space
+        
+        left_layout.addLayout(settings_row)
 
         # Side-by-side model comparison (TOP - Chat)
         # Headers and model selectors (outside scroll)
@@ -5801,46 +5892,52 @@ class MainWindow(QMainWindow):
         self.test_model_c.setEditable(True)
         model_c_header_layout.addWidget(self.test_model_c)
         headers_layout.addWidget(model_c_header_widget, 1)
-        model_c_header_widget.setVisible(True)  # Visible by default (3 models)
+        model_c_header_widget.setVisible(False)  # Hidden by default (start with 2 models)
         self.test_model_c_header_widget = model_c_header_widget
         
         left_layout.addLayout(headers_layout)
         
         # SYNCHRONIZED CHAT DISPLAY
         from desktop_app.synchronized_chat_display import SynchronizedChatDisplay
-        self.chat_display = SynchronizedChatDisplay(num_models=3)  # Start with 3 models
+        self.chat_display = SynchronizedChatDisplay(num_models=2)  # Start with 2 models (default)
         left_layout.addWidget(self.chat_display, 1)
 
         # Shared prompt input area (BOTTOM)
         prompt_layout = QVBoxLayout()
         prompt_layout.addWidget(QLabel("<b>💬 Type your message:</b>"))
+
+        # Input box and buttons in horizontal layout
+        input_row = QHBoxLayout()
         
         self.test_prompt = QTextEdit()
         self.test_prompt.setPlaceholderText("Type your message here...")
-        self.test_prompt.setMinimumHeight(120)
-        self.test_prompt.setMaximumHeight(120)
+        self.test_prompt.setMinimumHeight(90)  # 3 lines height
+        self.test_prompt.setMaximumHeight(90)
         self.test_prompt.textChanged.connect(self._update_token_count)
-        prompt_layout.addWidget(self.test_prompt)
+        input_row.addWidget(self.test_prompt, 1)
         
-        # Buttons row
-        btn_layout = QHBoxLayout()
+        # Buttons column on the right
+        btn_column = QVBoxLayout()
+        btn_column.setSpacing(8)
+        
         self.test_send_btn = QPushButton("📤 Send")
         self.test_send_btn.clicked.connect(self._run_side_by_side_test)
-        self.test_send_btn.setMinimumHeight(50)
+        self.test_send_btn.setMinimumHeight(40)
         self.test_send_btn.setStyleSheet("""
             QPushButton {
-                font-size: 14pt;
+                font-size: 12pt;
                 font-weight: bold;
             }
         """)
-        btn_layout.addWidget(self.test_send_btn)
-        
+        btn_column.addWidget(self.test_send_btn)
+
         self.test_clear_btn = QPushButton("🗑️ Clear")
         self.test_clear_btn.clicked.connect(self._clear_test_chat)
-        btn_layout.addWidget(self.test_clear_btn)
-        btn_layout.addStretch(1)
-        
-        prompt_layout.addLayout(btn_layout)
+        self.test_clear_btn.setMinimumHeight(40)
+        btn_column.addWidget(self.test_clear_btn)
+
+        input_row.addLayout(btn_column)
+        prompt_layout.addLayout(input_row)
         left_layout.addLayout(prompt_layout)
 
         # RIGHT COLUMN (1/4 width) - Instruction adjustment tools
@@ -6314,6 +6411,11 @@ class MainWindow(QMainWindow):
     
     def _run_inference_a(self, model_path: str, prompt: str, system_prompt: str = ""):
         """Run inference for Model A using QProcess"""
+        # Check if tools are enabled
+        if hasattr(self, 'test_enable_tools') and self.test_enable_tools.isChecked():
+            self._run_inference_a_with_tools(model_path, prompt, system_prompt)
+            return
+        
         # Reset buffer
         self.inference_buffer_a = ""
         self._model_env_popup_shown = False
@@ -6523,8 +6625,62 @@ class MainWindow(QMainWindow):
         
         self.test_proc_a = None
     
+    
+    def _run_inference_a_with_tools(self, model_path: str, prompt: str, system_prompt: str = ""):
+        """Run inference for Model A with tool calling support (non-blocking)"""
+        # Show starting message
+        self.chat_display.update_model_a_response("[INFO] Starting tool-enabled inference...\n(This may take several minutes on first run)")
+        
+        # Stop any existing worker
+        if hasattr(self, 'tool_worker_a') and self.tool_worker_a is not None:
+            if self.tool_worker_a.isRunning():
+                self.tool_worker_a.quit()
+                self.tool_worker_a.wait()
+        
+        # Create worker thread
+        self.tool_worker_a = ToolInferenceWorker(
+            prompt=prompt,
+            model_id="default",
+            model_column="model_a",
+            system_prompt=system_prompt
+        )
+        
+        # Connect signals
+        self.tool_worker_a.progress_update.connect(
+            lambda msg: self.chat_display.update_model_a_response(
+                self.chat_display.model_a_bubble.toPlainText() + "\n" + msg
+            )
+        )
+        self.tool_worker_a.tool_call_detected.connect(
+            lambda name, args, col: self.chat_display.add_tool_call(name, args, col)
+        )
+        self.tool_worker_a.tool_result_received.connect(
+            lambda name, result, success, col: self.chat_display.add_tool_result(name, result, success, col)
+        )
+        self.tool_worker_a.inference_finished.connect(self._on_tool_inference_finished_a)
+        self.tool_worker_a.inference_failed.connect(
+            lambda error, col: self.chat_display.update_model_a_response(error)
+        )
+        
+        # Start worker
+        self.tool_worker_a.start()
+    
+    def _on_tool_inference_finished_a(self, final_output: str, tool_log: list, model_column: str):
+        """Handle completion of tool inference for Model A"""
+        self.chat_display.update_model_a_response(final_output)
+        if tool_log:
+            summary = f"\n\n[Tools Used: {len(tool_log)}]"
+            self.chat_display.update_model_a_response(
+                self.chat_display.model_a_bubble.toPlainText() + summary
+            )
+    
     def _run_inference_b(self, model_path: str, prompt: str, system_prompt: str = ""):
         """Run inference for Model B using QProcess"""
+        # Check if tools are enabled
+        if hasattr(self, 'test_enable_tools') and self.test_enable_tools.isChecked():
+            self._run_inference_b_with_tools(model_path, prompt, system_prompt)
+            return
+        
         # Reset buffer
         self.inference_buffer_b = ""
         self._model_env_popup_shown = False
@@ -6729,8 +6885,57 @@ class MainWindow(QMainWindow):
                 
         self.test_proc_b = None
     
+    
+    def _run_inference_b_with_tools(self, model_path: str, prompt: str, system_prompt: str = ""):
+        """Run inference for Model B with tool calling support (non-blocking)"""
+        self.chat_display.update_model_b_response("[INFO] Starting tool-enabled inference...\n(This may take several minutes on first run)")
+        
+        if hasattr(self, 'tool_worker_b') and self.tool_worker_b is not None:
+            if self.tool_worker_b.isRunning():
+                self.tool_worker_b.quit()
+                self.tool_worker_b.wait()
+        
+        self.tool_worker_b = ToolInferenceWorker(
+            prompt=prompt,
+            model_id="default",
+            model_column="model_b",
+            system_prompt=system_prompt
+        )
+        
+        self.tool_worker_b.progress_update.connect(
+            lambda msg: self.chat_display.update_model_b_response(
+                self.chat_display.model_b_bubble.toPlainText() + "\n" + msg
+            )
+        )
+        self.tool_worker_b.tool_call_detected.connect(
+            lambda name, args, col: self.chat_display.add_tool_call(name, args, col)
+        )
+        self.tool_worker_b.tool_result_received.connect(
+            lambda name, result, success, col: self.chat_display.add_tool_result(name, result, success, col)
+        )
+        self.tool_worker_b.inference_finished.connect(self._on_tool_inference_finished_b)
+        self.tool_worker_b.inference_failed.connect(
+            lambda error, col: self.chat_display.update_model_b_response(error)
+        )
+        
+        self.tool_worker_b.start()
+    
+    def _on_tool_inference_finished_b(self, final_output: str, tool_log: list, model_column: str):
+        """Handle completion of tool inference for Model B"""
+        self.chat_display.update_model_b_response(final_output)
+        if tool_log:
+            summary = f"\n\n[Tools Used: {len(tool_log)}]"
+            self.chat_display.update_model_b_response(
+                self.chat_display.model_b_bubble.toPlainText() + summary
+            )
+    
     def _run_inference_c(self, model_path: str, prompt: str, system_prompt: str = ""):
         """Run inference for Model C using QProcess"""
+        # Check if tools are enabled
+        if hasattr(self, 'test_enable_tools') and self.test_enable_tools.isChecked():
+            self._run_inference_c_with_tools(model_path, prompt, system_prompt)
+            return
+        
         # Reset buffer
         if not hasattr(self, 'inference_buffer_c'):
             self.inference_buffer_c = ""
@@ -6923,6 +7128,49 @@ class MainWindow(QMainWindow):
         filtered_output = self._filter_inference_output(self.inference_buffer_c)
         if filtered_output:
             self.chat_display.update_model_c_response(filtered_output)
+    
+    def _run_inference_c_with_tools(self, model_path: str, prompt: str, system_prompt: str = ""):
+        """Run inference for Model C with tool calling support (non-blocking)"""
+        self.chat_display.update_model_c_response("[INFO] Starting tool-enabled inference...\n(This may take several minutes on first run)")
+        
+        if hasattr(self, 'tool_worker_c') and self.tool_worker_c is not None:
+            if self.tool_worker_c.isRunning():
+                self.tool_worker_c.quit()
+                self.tool_worker_c.wait()
+        
+        self.tool_worker_c = ToolInferenceWorker(
+            prompt=prompt,
+            model_id="default",
+            model_column="model_c",
+            system_prompt=system_prompt
+        )
+        
+        self.tool_worker_c.progress_update.connect(
+            lambda msg: self.chat_display.update_model_c_response(
+                self.chat_display.model_c_bubble.toPlainText() + "\n" + msg
+            )
+        )
+        self.tool_worker_c.tool_call_detected.connect(
+            lambda name, args, col: self.chat_display.add_tool_call(name, args, col)
+        )
+        self.tool_worker_c.tool_result_received.connect(
+            lambda name, result, success, col: self.chat_display.add_tool_result(name, result, success, col)
+        )
+        self.tool_worker_c.inference_finished.connect(self._on_tool_inference_finished_c)
+        self.tool_worker_c.inference_failed.connect(
+            lambda error, col: self.chat_display.update_model_c_response(error)
+        )
+        
+        self.tool_worker_c.start()
+    
+    def _on_tool_inference_finished_c(self, final_output: str, tool_log: list, model_column: str):
+        """Handle completion of tool inference for Model C"""
+        self.chat_display.update_model_c_response(final_output)
+        if tool_log:
+            summary = f"\n\n[Tools Used: {len(tool_log)}]"
+            self.chat_display.update_model_c_response(
+                self.chat_display.model_c_bubble.toPlainText() + summary
+            )
     
     def _on_inference_finished_c(self, exit_code: int = 0, exit_status=None):
         """Called when Model C inference finishes"""

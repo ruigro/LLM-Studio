@@ -12,7 +12,8 @@ from typing import Optional
 from PySide6.QtCore import QThread, Signal, Qt, QUrl, QTimer
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QLineEdit,
-    QCheckBox, QTextEdit, QFileDialog, QGroupBox, QFrame, QMessageBox, QApplication
+    QCheckBox, QTextEdit, QFileDialog, QGroupBox, QFrame, QMessageBox, QApplication,
+    QGridLayout
 )
 from PySide6.QtGui import QDesktopServices, QClipboard
 
@@ -168,126 +169,224 @@ class ServerPage(QWidget):
         layout.setContentsMargins(16, 16, 16, 16)
         layout.setSpacing(12)
 
-        title = QLabel("🖧 Server")
+        title = QLabel("🖧 Servers")
         title.setProperty("class", "page_title")
         layout.addWidget(title)
 
+        # TWO COLUMN LAYOUT
         cols = QHBoxLayout()
-        cols.setSpacing(12)
+        cols.setSpacing(16)
 
-        # LEFT: Controls
-        left = QWidget()
-        left_layout = QVBoxLayout(left)
+        # ===================================================================
+        # LEFT COLUMN: TOOL SERVER (MCP Server)
+        # ===================================================================
+        left_col = QWidget()
+        left_layout = QVBoxLayout(left_col)
         left_layout.setContentsMargins(0, 0, 0, 0)
-        left_layout.setSpacing(12)
+        left_layout.setSpacing(10)
 
-        control_group = QGroupBox("Server Control")
-        control_layout = QVBoxLayout(control_group)
-        control_layout.setSpacing(10)
+        tool_server_group = QGroupBox("🛠️ Tool Server (MCP)")
+        tool_server_layout = QVBoxLayout(tool_server_group)
+        tool_server_layout.setSpacing(8)
 
-        self.start_stop_btn = QPushButton("Start Server")
-        self.start_stop_btn.clicked.connect(self._toggle_server)
-        control_layout.addWidget(self.start_stop_btn)
-
-        port_layout = QHBoxLayout()
-        port_layout.addWidget(QLabel("Port:"))
-        self.port_edit = QLineEdit("8765")
-        port_layout.addWidget(self.port_edit)
-        control_layout.addLayout(port_layout)
-
-        token_layout = QHBoxLayout()
-        token_layout.addWidget(QLabel("Token:"))
-        self.token_edit = QLineEdit()
-        self.token_edit.setEchoMode(QLineEdit.Password)
-        self.token_edit.setPlaceholderText("Auth token for /tools and /call")
-        token_layout.addWidget(self.token_edit, 1)
+        # Status
+        self.status_label = QLabel("● Stopped")
+        self.status_label.setStyleSheet("font-weight: bold;")
+        tool_server_layout.addWidget(self.status_label)
         
-        # Generate token button
-        generate_token_btn = QPushButton("🎲 Generate")
-        generate_token_btn.setToolTip("Generate a random secure token")
-        generate_token_btn.clicked.connect(self._generate_token)
-        token_layout.addWidget(generate_token_btn)
-        
-        control_layout.addLayout(token_layout)
-
-        root_layout = QHBoxLayout()
-        root_layout.addWidget(QLabel("Root:"))
-        self.root_edit = QLineEdit(str(Path.cwd()))
-        root_layout.addWidget(self.root_edit)
-        browse_btn = QPushButton("Browse...")
-        browse_btn.clicked.connect(self._select_root)
-        root_layout.addWidget(browse_btn)
-        control_layout.addLayout(root_layout)
-
-        self.expose_to_lan_check = QCheckBox("Expose to LAN (0.0.0.0)")
-        control_layout.addWidget(self.expose_to_lan_check)
-
-        left_layout.addWidget(control_group)
-
-        # Permissions
-        perm_group = QGroupBox("Permissions")
-        perm_layout = QVBoxLayout(perm_group)
-        self.allow_shell_check = QCheckBox("Allow Shell Commands")
-        self.allow_write_check = QCheckBox("Allow File Write")
-        self.allow_git_check = QCheckBox("Allow Git Operations")
-        self.allow_git_check.setChecked(True)
-        self.allow_network_check = QCheckBox("Allow Network Access")
-        perm_layout.addWidget(self.allow_shell_check)
-        perm_layout.addWidget(self.allow_write_check)
-        perm_layout.addWidget(self.allow_git_check)
-        perm_layout.addWidget(self.allow_network_check)
-        left_layout.addWidget(perm_group)
-
-        # Config buttons
-        config_layout = QHBoxLayout()
-        save_btn = QPushButton("Save Config")
-        save_btn.clicked.connect(self._save_config)
-        config_layout.addWidget(save_btn)
-        left_layout.addLayout(config_layout)
-
-        self.config_path_label = QLabel("Config: -")
-        self.config_path_label.setWordWrap(True)
-        left_layout.addWidget(self.config_path_label)
-
-        left_layout.addStretch()
-        cols.addWidget(left)
-
-        # RIGHT: Status & Logs
-        right = QWidget()
-        right_layout = QVBoxLayout(right)
-        right_layout.setContentsMargins(0, 0, 0, 0)
-        right_layout.setSpacing(12)
-
-        status_group = QGroupBox("Status")
-        self.status_layout = QVBoxLayout(status_group)  # Store as instance variable
-        self.status_label = QLabel("Status: Stopped")
         self.address_label = QLabel("Address: -")
-        self.status_layout.addWidget(self.status_label)
-        self.status_layout.addWidget(self.address_label)
+        tool_server_layout.addWidget(self.address_label)
         
-        # LAN address label and copy button (created dynamically when needed)
+        # LAN address (dynamic)
         self.lan_address_label = None
         self.copy_lan_btn = None
+        self.status_layout = tool_server_layout  # For backward compatibility
 
-        self.health_btn = QPushButton("Check Health")
+        # Start/Stop button
+        self.start_stop_btn = QPushButton("▶ Start Server")
+        self.start_stop_btn.clicked.connect(self._toggle_server)
+        tool_server_layout.addWidget(self.start_stop_btn)
+
+        # Compact settings grid
+        settings_grid = QGridLayout()
+        settings_grid.setSpacing(6)
+        
+        # Port
+        settings_grid.addWidget(QLabel("Port:"), 0, 0)
+        self.port_edit = QLineEdit("8765")
+        self.port_edit.setMaximumWidth(80)
+        settings_grid.addWidget(self.port_edit, 0, 1)
+        
+        # Expose to LAN checkbox
+        self.expose_to_lan_check = QCheckBox("LAN")
+        self.expose_to_lan_check.setToolTip("Expose to LAN (0.0.0.0)")
+        settings_grid.addWidget(self.expose_to_lan_check, 0, 2)
+        
+        # Token
+        settings_grid.addWidget(QLabel("Token:"), 1, 0)
+        self.token_edit = QLineEdit()
+        self.token_edit.setEchoMode(QLineEdit.Password)
+        self.token_edit.setPlaceholderText("Auth token")
+        settings_grid.addWidget(self.token_edit, 1, 1, 1, 2)
+        
+        generate_token_btn = QPushButton("🎲")
+        generate_token_btn.setMaximumWidth(30)
+        generate_token_btn.setToolTip("Generate random token")
+        generate_token_btn.clicked.connect(self._generate_token)
+        settings_grid.addWidget(generate_token_btn, 1, 3)
+        
+        # Root directory
+        settings_grid.addWidget(QLabel("Root:"), 2, 0)
+        self.root_edit = QLineEdit(str(Path.cwd()))
+        settings_grid.addWidget(self.root_edit, 2, 1, 1, 2)
+        browse_btn = QPushButton("📁")
+        browse_btn.setMaximumWidth(30)
+        browse_btn.setToolTip("Browse...")
+        browse_btn.clicked.connect(self._select_root)
+        settings_grid.addWidget(browse_btn, 2, 3)
+        
+        tool_server_layout.addLayout(settings_grid)
+
+        # Permissions (compact)
+        perm_label = QLabel("<b>Permissions:</b>")
+        tool_server_layout.addWidget(perm_label)
+        
+        perm_grid = QGridLayout()
+        perm_grid.setSpacing(4)
+        self.allow_shell_check = QCheckBox("Shell")
+        self.allow_write_check = QCheckBox("Write")
+        self.allow_git_check = QCheckBox("Git")
+        self.allow_git_check.setChecked(True)
+        self.allow_network_check = QCheckBox("Network")
+        perm_grid.addWidget(self.allow_shell_check, 0, 0)
+        perm_grid.addWidget(self.allow_write_check, 0, 1)
+        perm_grid.addWidget(self.allow_git_check, 1, 0)
+        perm_grid.addWidget(self.allow_network_check, 1, 1)
+        tool_server_layout.addLayout(perm_grid)
+
+        # Compact buttons
+        tool_btn_layout = QHBoxLayout()
+        tool_btn_layout.setSpacing(4)
+        
+        self.health_btn = QPushButton("♥ Health")
         self.health_btn.clicked.connect(self._check_health)
         self.health_btn.setEnabled(False)
-        self.status_layout.addWidget(self.health_btn)
-        right_layout.addWidget(status_group)
+        tool_btn_layout.addWidget(self.health_btn)
+        
+        save_btn = QPushButton("💾 Save")
+        save_btn.setToolTip("Save Configuration")
+        save_btn.clicked.connect(self._save_config)
+        tool_btn_layout.addWidget(save_btn)
+        
+        tool_server_layout.addLayout(tool_btn_layout)
+        
+        self.config_path_label = QLabel("Config: -")
+        self.config_path_label.setWordWrap(True)
+        self.config_path_label.setStyleSheet("font-size: 9pt; color: gray;")
+        tool_server_layout.addWidget(self.config_path_label)
 
-        log_group = QGroupBox("Server Log")
+        left_layout.addWidget(tool_server_group)
+        left_layout.addStretch()
+
+        # ===================================================================
+        # RIGHT COLUMN: LLM INFERENCE SERVER
+        # ===================================================================
+        right_col = QWidget()
+        right_layout = QVBoxLayout(right_col)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        right_layout.setSpacing(10)
+
+        llm_server_group = QGroupBox("🤖 LLM Inference Server")
+        llm_server_layout = QVBoxLayout(llm_server_group)
+        llm_server_layout.setSpacing(8)
+
+        # Status
+        self.llm_server_status_label = QLabel("● Not running")
+        self.llm_server_status_label.setStyleSheet("font-weight: bold;")
+        llm_server_layout.addWidget(self.llm_server_status_label)
+        
+        # Compact info grid
+        info_grid = QGridLayout()
+        info_grid.setSpacing(4)
+        
+        info_grid.addWidget(QLabel("Model:"), 0, 0)
+        self.llm_model_label = QLabel("-")
+        self.llm_model_label.setWordWrap(True)
+        info_grid.addWidget(self.llm_model_label, 0, 1)
+        
+        info_grid.addWidget(QLabel("Port:"), 1, 0)
+        self.llm_port_label = QLabel("-")
+        info_grid.addWidget(self.llm_port_label, 1, 1)
+        
+        llm_server_layout.addLayout(info_grid)
+        
+        # API URL (full width)
+        api_label_header = QLabel("OpenAI API:")
+        api_label_header.setStyleSheet("font-weight: bold; font-size: 9pt;")
+        llm_server_layout.addWidget(api_label_header)
+        
+        self.llm_api_label = QLabel("-")
+        self.llm_api_label.setWordWrap(True)
+        self.llm_api_label.setStyleSheet("font-size: 9pt; color: #0066cc;")
+        self.llm_api_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        llm_server_layout.addWidget(self.llm_api_label)
+
+        # Control buttons
+        llm_btn_layout = QHBoxLayout()
+        llm_btn_layout.setSpacing(4)
+        
+        self.llm_start_btn = QPushButton("▶ Start")
+        self.llm_start_btn.clicked.connect(self._start_llm_server)
+        llm_btn_layout.addWidget(self.llm_start_btn)
+        
+        self.llm_stop_btn = QPushButton("⏹ Stop")
+        self.llm_stop_btn.clicked.connect(self._stop_llm_server)
+        self.llm_stop_btn.setEnabled(False)
+        llm_btn_layout.addWidget(self.llm_stop_btn)
+        
+        llm_server_layout.addLayout(llm_btn_layout)
+        
+        # Copy and help buttons
+        self.copy_api_btn = QPushButton("📋 Copy API URL")
+        self.copy_api_btn.setToolTip("Copy for Cursor/VS Code")
+        self.copy_api_btn.clicked.connect(self._copy_api_url)
+        self.copy_api_btn.setEnabled(False)
+        llm_server_layout.addWidget(self.copy_api_btn)
+        
+        help_btn = QPushButton("📖 Setup Guide")
+        help_btn.setToolTip("How to use with Cursor/VS Code")
+        help_btn.clicked.connect(self._show_llm_api_help)
+        llm_server_layout.addWidget(help_btn)
+        
+        # Status timer
+        self.llm_status_timer = QTimer()
+        self.llm_status_timer.timeout.connect(self._update_llm_server_status)
+        self.llm_status_timer.start(2000)
+
+        right_layout.addWidget(llm_server_group)
+        
+        # Server Log (shared by both servers)
+        log_group = QGroupBox("📋 Server Log")
         log_layout = QVBoxLayout(log_group)
+        log_layout.setSpacing(6)
+        
         self.log_text = QTextEdit()
         self.log_text.setReadOnly(True)
-        self.log_text.setMinimumHeight(200)
+        self.log_text.setMinimumHeight(300)
+        self.log_text.setMaximumHeight(400)
         log_layout.addWidget(self.log_text)
 
-        clear_btn = QPushButton("Clear Log")
+        clear_btn = QPushButton("🗑️ Clear")
+        clear_btn.setMaximumWidth(80)
         clear_btn.clicked.connect(self.log_text.clear)
         log_layout.addWidget(clear_btn)
+        
         right_layout.addWidget(log_group)
+        right_layout.addStretch()
 
-        cols.addWidget(right)
+        # Add columns to main layout
+        cols.addWidget(left_col, 1)
+        cols.addWidget(right_col, 1)
         layout.addLayout(cols)
     
     def _initialize_config(self):
@@ -527,12 +626,13 @@ class ServerPage(QWidget):
                 lan_url = f"http://{lan_ip}:{port}"
         
         # Update UI
-        self.start_stop_btn.setText("Stop Server")
+        self.start_stop_btn.setText("⏹ Stop Server")
         self.start_stop_btn.setEnabled(True)
-        self.status_label.setText("Status: Running")
+        self.status_label.setText("● Running")
+        self.status_label.setStyleSheet("font-weight: bold; color: #4CAF50;")
         
         # Display localhost address (never show 0.0.0.0)
-        self.address_label.setText(f"Local: http://{connection_address}")
+        self.address_label.setText(f"http://{connection_address}")
         
         # Add LAN address display and copy button if available
         if lan_url:
@@ -585,9 +685,10 @@ class ServerPage(QWidget):
         self.health_btn.setEnabled(True)
 
     def _on_stopped(self):
-        self.start_stop_btn.setText("Start Server")
+        self.start_stop_btn.setText("▶ Start Server")
         self.start_stop_btn.setEnabled(True)
-        self.status_label.setText("Status: Stopped")
+        self.status_label.setText("● Stopped")
+        self.status_label.setStyleSheet("font-weight: bold; color: #888;")
         self.address_label.setText("Address: -")
         if self.lan_address_label is not None:
             self.lan_address_label.setVisible(False)
@@ -690,3 +791,220 @@ class ServerPage(QWidget):
         self.health_btn.setEnabled(True)
         self.health_btn.setText("Check Health")
         self._append_log(message)
+    
+    # ========================================================================
+    # LLM Server Management Methods
+    # ========================================================================
+    
+    def _start_llm_server(self):
+        """Start the LLM inference server"""
+        try:
+            from core.llm_server_manager import get_global_server_manager
+            
+            self.llm_start_btn.setEnabled(False)
+            self.llm_start_btn.setText("⏳ Starting...")
+            self.llm_server_status_label.setText("● Starting...")
+            self.llm_server_status_label.setStyleSheet("font-weight: bold; color: #FF9800;")
+            self._append_log("[LLM] Starting server (may take 2-3 minutes)...")
+            
+            # Start in background thread to avoid blocking UI
+            import threading
+            def worker():
+                try:
+                    manager = get_global_server_manager()
+                    url = manager.ensure_server_running("default")
+                    QTimer.singleShot(0, lambda: self._on_llm_server_started(url))
+                except Exception as e:
+                    import traceback
+                    error_details = f"{str(e)}\n\nTraceback:\n{traceback.format_exc()}"
+                    QTimer.singleShot(0, lambda: self._on_llm_server_error(error_details))
+            
+            thread = threading.Thread(target=worker, daemon=True)
+            thread.start()
+            
+        except Exception as e:
+            self._on_llm_server_error(str(e))
+    
+    def _stop_llm_server(self):
+        """Stop the LLM inference server"""
+        try:
+            from core.llm_server_manager import get_global_server_manager
+            
+            self.llm_stop_btn.setEnabled(False)
+            self._append_log("[LLM] Stopping server...")
+            
+            manager = get_global_server_manager()
+            manager.shutdown_server("default")
+            
+            self.llm_server_status_label.setText("● Stopped")
+            self.llm_server_status_label.setStyleSheet("font-weight: bold; color: #888;")
+            self.llm_model_label.setText("-")
+            self.llm_port_label.setText("-")
+            self.llm_api_label.setText("-")
+            self.llm_start_btn.setEnabled(True)
+            self.llm_start_btn.setText("▶ Start")
+            self.copy_api_btn.setEnabled(False)
+            
+            self._append_log("[LLM] Server stopped")
+            
+        except Exception as e:
+            self._append_log(f"[LLM Server] Error stopping: {e}")
+            self.llm_stop_btn.setEnabled(True)
+    
+    def _on_llm_server_started(self, url: str):
+        """Called when LLM server successfully starts"""
+        self.llm_server_status_label.setText("● Running")
+        self.llm_server_status_label.setStyleSheet("font-weight: bold; color: #4CAF50;")
+        self.llm_port_label.setText(url.split(':')[-1])
+        self.llm_api_label.setText(f"{url}/v1")
+        
+        # Load model name from config
+        try:
+            import yaml
+            from pathlib import Path
+            config_path = Path(__file__).parent.parent.parent / "configs" / "llm_backends.yaml"
+            with open(config_path, 'r') as f:
+                config = yaml.safe_load(f)
+                model_path = config['models']['default']['base_model']
+                model_name = Path(model_path).name
+                self.llm_model_label.setText(model_name)
+        except Exception:
+            self.llm_model_label.setText("default")
+        
+        self.llm_start_btn.setEnabled(False)
+        self.llm_start_btn.setText("● Running")
+        self.llm_stop_btn.setEnabled(True)
+        self.copy_api_btn.setEnabled(True)
+        
+        self._append_log(f"[LLM] Server ready at {url}")
+        self._append_log(f"[LLM] OpenAI API: {url}/v1")
+    
+    def _on_llm_server_error(self, error: str):
+        """Called when LLM server fails to start"""
+        self.llm_server_status_label.setText("● Error")
+        self.llm_server_status_label.setStyleSheet("font-weight: bold; color: #f44336;")
+        self.llm_start_btn.setEnabled(True)
+        self.llm_start_btn.setText("▶ Start")
+        
+        # Log full error
+        self._append_log(f"[LLM] ❌ Error starting server:")
+        error_lines = error.split('\n')
+        for line in error_lines:
+            if line.strip():
+                self._append_log(f"[LLM]   {line}")
+        
+        # Show error dialog with full details
+        msg = QMessageBox(self)
+        msg.setWindowTitle("LLM Server Error")
+        msg.setIcon(QMessageBox.Warning)
+        msg.setText("Failed to start LLM server")
+        msg.setDetailedText(error)
+        msg.setStandardButtons(QMessageBox.Ok)
+        msg.exec()
+    
+    def _update_llm_server_status(self):
+        """Periodically check LLM server status"""
+        try:
+            from core.llm_server_manager import get_global_server_manager
+            import requests
+            
+            manager = get_global_server_manager()
+            
+            # Check if server is in running_servers dict
+            if "default" in manager.running_servers:
+                process = manager.running_servers["default"]
+                if process.poll() is None:  # Process is alive
+                    # Try health check
+                    try:
+                        url = manager._get_server_url("default")
+                        response = requests.get(f"{url}/health", timeout=1)
+                        if response.status_code == 200:
+                            # Server is healthy - update UI if not already showing running
+                            if self.llm_start_btn.isEnabled():
+                                self._on_llm_server_started(url)
+                            return
+                    except:
+                        pass
+            
+            # Server not running - reset UI if showing as running
+            if not self.llm_start_btn.isEnabled():
+                self.llm_server_status_label.setText("● Not running")
+                self.llm_server_status_label.setStyleSheet("font-weight: bold; color: #888;")
+                self.llm_model_label.setText("-")
+                self.llm_port_label.setText("-")
+                self.llm_api_label.setText("-")
+                self.llm_start_btn.setEnabled(True)
+                self.llm_start_btn.setText("▶ Start")
+                self.llm_stop_btn.setEnabled(False)
+                self.copy_api_btn.setEnabled(False)
+                
+        except Exception:
+            # Manager not initialized or other error - ignore
+            pass
+    
+    def _copy_api_url(self):
+        """Copy OpenAI-compatible API URL to clipboard"""
+        try:
+            from core.llm_server_manager import get_global_server_manager
+            manager = get_global_server_manager()
+            url = manager._get_server_url("default")
+            api_url = f"{url}/v1"
+            
+            clipboard = QApplication.clipboard()
+            clipboard.setText(api_url)
+            
+            QMessageBox.information(
+                self,
+                "API URL Copied",
+                f"OpenAI-compatible API URL copied to clipboard:\n\n"
+                f"{api_url}\n\n"
+                f"Use this in Cursor, VS Code, Continue, etc.\n"
+                f"Model name: local-llm\n"
+                f"API Key: (any text works)"
+            )
+        except Exception as e:
+            QMessageBox.warning(self, "Error", f"Failed to copy URL: {e}")
+    
+    def _show_llm_api_help(self):
+        """Show help dialog for using LLM API with external tools"""
+        help_text = """
+<h3>Using Your Local LLM with External Tools</h3>
+
+<p><b>Your LLM server provides an OpenAI-compatible API that works with:</b></p>
+<ul>
+  <li>Cursor IDE</li>
+  <li>VS Code + Continue extension</li>
+  <li>Open-WebUI</li>
+  <li>LibreChat</li>
+  <li>Any tool that supports OpenAI API</li>
+</ul>
+
+<h4>Quick Setup for Cursor:</h4>
+<ol>
+  <li><b>Start the LLM Server</b> (click "Start LLM Server" button above)</li>
+  <li><b>Copy the API URL</b> (click "Copy API URL for Cursor" button)</li>
+  <li><b>Open Cursor Settings</b> (Ctrl+,)</li>
+  <li><b>Find OpenAI API settings</b></li>
+  <li><b>Set Base URL</b> to the copied URL</li>
+  <li><b>Set API Key</b> to any text (e.g., "sk-local")</li>
+  <li><b>Set Model</b> to "local-llm"</li>
+</ol>
+
+<h4>Benefits:</h4>
+<ul>
+  <li>✅ <b>Privacy</b> - Code never leaves your machine</li>
+  <li>✅ <b>No costs</b> - Use your local GPU for free</li>
+  <li>✅ <b>Offline</b> - Works without internet</li>
+  <li>✅ <b>Fast</b> - No network latency</li>
+</ul>
+
+<p><b>📖 Full Documentation:</b><br>
+See <code>OPENAI_COMPATIBLE_API.md</code> in the project root for detailed setup instructions.</p>
+        """
+        
+        msg = QMessageBox(self)
+        msg.setWindowTitle("LLM API Usage Guide")
+        msg.setTextFormat(Qt.RichText)
+        msg.setText(help_text)
+        msg.setIcon(QMessageBox.Information)
+        msg.exec()

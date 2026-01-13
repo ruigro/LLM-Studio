@@ -1,0 +1,108 @@
+#!/usr/bin/env python3
+"""
+LLM Server Launcher Script
+Runs inside a model's isolated Python environment to start the FastAPI server.
+"""
+import os
+import sys
+import yaml
+import subprocess
+from pathlib import Path
+
+def main():
+    # Validate arguments
+    if len(sys.argv) < 2:
+        print("Usage: python llm_server_start.py <model_id>", file=sys.stderr)
+        print("Example: python llm_server_start.py default", file=sys.stderr)
+        sys.exit(1)
+
+    model_id = sys.argv[1]
+
+    # Resolve config path relative to script location
+    script_dir = Path(__file__).parent
+    config_file = script_dir.parent / "configs" / "llm_backends.yaml"
+
+    if not config_file.exists():
+        print(f"ERROR: Config file not found: {config_file}", file=sys.stderr)
+        sys.exit(1)
+
+    # Load configuration
+    try:
+        with open(config_file, 'r', encoding='utf-8') as f:
+            cfg = yaml.safe_load(f)
+    except Exception as e:
+        print(f"ERROR: Failed to load config: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    # Validate model_id
+    if "models" not in cfg or model_id not in cfg["models"]:
+        print(f"ERROR: Model '{model_id}' not found in config", file=sys.stderr)
+        if "models" in cfg:
+            print(f"Available models: {list(cfg['models'].keys())}", file=sys.stderr)
+        sys.exit(1)
+
+    model_cfg = cfg["models"][model_id]
+
+    # Set environment variables for server_app.py to read
+    os.environ["BASE_MODEL"] = model_cfg["base_model"]
+    
+    if model_cfg.get("adapter_dir"):
+        os.environ["ADAPTER_DIR"] = model_cfg["adapter_dir"]
+    
+    os.environ["MODEL_TYPE"] = model_cfg.get("model_type", "base")
+    os.environ["USE_4BIT"] = str(model_cfg.get("use_4bit", True)).lower()
+    
+    if model_cfg.get("system_prompt"):
+        os.environ["SYSTEM_PROMPT"] = model_cfg["system_prompt"]
+
+    port = model_cfg.get("port", 9100)
+
+    print(f"Starting LLM server for model: {model_id}")
+    print(f"Port: {port}")
+    print(f"Base model: {model_cfg['base_model']}")
+    if model_cfg.get("adapter_dir"):
+        print(f"Adapter: {model_cfg['adapter_dir']}")
+    print(f"Model type: {os.environ['MODEL_TYPE']}")
+    print(f"4-bit quantization: {os.environ['USE_4BIT']}")
+    print("-" * 50)
+
+    # We're running from LLM directory, so use relative import
+    # The working directory is set to app_root (LLM/) by llm_server_manager
+    import_path = "core.llm_backends.server_app:app"
+    
+    # Set PYTHONPATH to ensure imports work
+    app_root = script_dir.parent  # LLM directory
+    env = os.environ.copy()
+    if "PYTHONPATH" in env:
+        env["PYTHONPATH"] = str(app_root) + os.pathsep + env["PYTHONPATH"]
+    else:
+        env["PYTHONPATH"] = str(app_root)
+    
+    print(f"Launching uvicorn with: {sys.executable} -m uvicorn {import_path}")
+    print(f"Working directory: {app_root}")
+    print(f"PYTHONPATH: {env['PYTHONPATH']}")
+    
+    # Launch FastAPI server using -m uvicorn (module-safe, avoids PATH issues)
+    try:
+        subprocess.run([
+            sys.executable, "-m", "uvicorn",
+            import_path,
+            "--host", "127.0.0.1",
+            "--port", str(port),
+            "--log-level", "info"
+        ], check=True, cwd=str(app_root), env=env)
+    except KeyboardInterrupt:
+        print("\nServer stopped by user")
+        sys.exit(0)
+    except subprocess.CalledProcessError as e:
+        print(f"ERROR: Server process failed with exit code {e.returncode}", file=sys.stderr)
+        sys.exit(1)
+    except Exception as e:
+        print(f"ERROR: Failed to start server: {e}", file=sys.stderr)
+        import traceback
+        traceback.print_exc(file=sys.stderr)
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

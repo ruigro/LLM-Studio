@@ -1,0 +1,29 @@
+# LLM Backend Server Configuration
+# Defines model configurations for persistent inference servers
+
+models:
+  # Default model - Phi-4 (4-bit quantized)
+  default:
+    base_model: "C:/1_GitHome/Local-LLM-Server/LLM/models/unsloth__Phi-4-bnb-4bit"
+    adapter_dir: null
+    model_type: "instruct"
+    port: 10500
+    use_4bit: true
+    system_prompt: ""
+  
+  # Example: Phi-4 with custom system prompt
+  phi4_assistant:
+    base_model: "C:/1_GitHome/Local-LLM-Server/LLM/models/unsloth__Phi-4-bnb-4bit"
+    adapter_dir: null
+    model_type: "instruct"
+    port: 10501
+    use_4bit: true
+    system_prompt: "You are a helpful AI assistant."
+
+# Configuration Notes:
+# - Each model entry must have a unique port
+# - base_model: Path to model directory or HuggingFace model ID
+# - adapter_dir: Path to LoRA adapter (null for base-only)
+# - model_type: "base" or "instruct" (affects prompt formatting)
+# - use_4bit: Enable 4-bit quantization (requires bitsandbytes)
+# - system_prompt: Optional system prompt for instruct models

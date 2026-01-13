@@ -3,8 +3,8 @@
   "port": 8763,
   "token": "-_GsVShVXOcethzEQBsLI-MmdNqdClTvbti4kVP2u1Q",
   "workspace_root": "C:\\1_GitHome\\Local-LLM-Server\\LLM",
-  "allow_shell": false,
-  "allow_write": false,
+  "allow_shell": true,
+  "allow_write": true,
   "allow_git": true,
   "allow_network": false,
   "expose_to_lan": true,
@@ -12,7 +12,7 @@
     "read_file": false,
     "git_status": false,
     "list_dir": false,
-    "run_shell": false
-  },
-  "require_auth_for_tools_list": false
+    "run_shell": false,
+    "write_file": false
+  }
 }
