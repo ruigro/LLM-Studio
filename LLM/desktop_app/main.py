@@ -225,6 +225,121 @@ class PipPackageThread(QThread):
             self.finished_signal.emit(False)
 
 
+class EnvironmentSetupDialog(QDialog):
+    """Progress dialog for per-model environment creation/installation"""
+    
+    def __init__(self, parent=None, model_name: str = ""):
+        super().__init__(parent)
+        self.setWindowTitle("Setting Up Model Environment")
+        self.setMinimumWidth(500)
+        self.setModal(False)  # Non-modal so it doesn't block other UI
+        
+        # Dark theme styling
+        self.setStyleSheet("""
+            QDialog {
+                background-color: #1e1e1e;
+                color: white;
+            }
+            QLabel {
+                color: white;
+                background: transparent;
+            }
+        """)
+        
+        layout = QVBoxLayout(self)
+        layout.setSpacing(15)
+        layout.setContentsMargins(20, 20, 20, 20)
+        
+        # Title
+        title = QLabel(f"<h3>Preparing environment for: {model_name or 'model'}</h3>")
+        title.setStyleSheet("color: white; font-weight: bold; background: transparent;")
+        layout.addWidget(title)
+        
+        # Status label
+        self.status_label = QLabel("Initializing...")
+        self.status_label.setStyleSheet("color: #cccccc; font-size: 11pt; background: transparent;")
+        self.status_label.setWordWrap(True)
+        layout.addWidget(self.status_label)
+        
+        # Progress bar (indeterminate until we know steps)
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setMinimum(0)
+        self.progress_bar.setMaximum(0)  # Indeterminate
+        self.progress_bar.setTextVisible(True)
+        self.progress_bar.setFormat("Working...")
+        self.progress_bar.setStyleSheet("""
+            QProgressBar {
+                border: 2px solid #444;
+                border-radius: 6px;
+                text-align: center;
+                background-color: #1e1e1e;
+                color: white;
+                font-weight: bold;
+                height: 30px;
+            }
+            QProgressBar::chunk {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, 
+                    stop:0 #667eea, stop:1 #764ba2);
+                border-radius: 4px;
+            }
+        """)
+        layout.addWidget(self.progress_bar)
+        
+        # Info text
+        info = QLabel(
+            "This may take several minutes on first run.\n"
+            "The environment is being created and dependencies installed.\n"
+            "Please wait..."
+        )
+        info.setStyleSheet("color: #888; font-size: 9pt; background: transparent;")
+        info.setWordWrap(True)
+        layout.addWidget(info)
+        
+        # Track installation phases for progress
+        self.phase = 0
+        self.phases = [
+            "Creating virtual environment...",
+            "Installing server framework...",
+            "Installing CUDA PyTorch...",
+            "Installing ML dependencies...",
+            "Verifying installation...",
+        ]
+    
+    def update_status(self, message: str):
+        """Update status text and progress based on message content"""
+        self.status_label.setText(message)
+        
+        # Detect phase from message keywords
+        msg_lower = message.lower()
+        if "creating virtual environment" in msg_lower or "environment for" in msg_lower:
+            self.phase = 0
+        elif "server framework" in msg_lower or "uvicorn" in msg_lower:
+            self.phase = 1
+            self.progress_bar.setMaximum(len(self.phases))
+            self.progress_bar.setValue(1)
+        elif "torch" in msg_lower and ("installing" in msg_lower or "ensuring" in msg_lower):
+            self.phase = 2
+            self.progress_bar.setValue(2)
+        elif "installing" in msg_lower and ("transformers" in msg_lower or "minimal inference" in msg_lower):
+            self.phase = 3
+            self.progress_bar.setValue(3)
+        elif "verifying" in msg_lower or "dependencies installed" in msg_lower:
+            self.phase = 4
+            self.progress_bar.setValue(4)
+        
+        if self.progress_bar.maximum() > 0:
+            self.progress_bar.setFormat(f"{self.phases[self.phase]} ({self.phase + 1}/{len(self.phases)})")
+        else:
+            self.progress_bar.setFormat(message[:50] + "..." if len(message) > 50 else message)
+    
+    def set_complete(self):
+        """Mark installation as complete"""
+        self.progress_bar.setMaximum(100)
+        self.progress_bar.setValue(100)
+        self.progress_bar.setFormat("Complete!")
+        self.status_label.setText("Environment setup complete. Starting server...")
+
+
 class ToolInferenceWorker(QThread):
     """Thread for running tool-enabled inference without blocking UI"""
     progress_update = Signal(str)  # Progress messages
@@ -6782,7 +6897,8 @@ class MainWindow(QMainWindow):
         )
         self.tool_chat_worker_a.inference_finished.connect(self._on_tool_chat_finished_a)
         self.tool_chat_worker_a.inference_failed.connect(
-            lambda error, col: self.tool_chat_display.update_model_a_response(error)
+            lambda error, col: (self.tool_chat_display.update_model_a_response(error),
+                                self._close_env_dialog("a", is_tool_chat=True))
         )
         self.tool_chat_worker_a.start()
     
@@ -6814,7 +6930,8 @@ class MainWindow(QMainWindow):
         )
         self.tool_chat_worker_b.inference_finished.connect(self._on_tool_chat_finished_b)
         self.tool_chat_worker_b.inference_failed.connect(
-            lambda error, col: self.tool_chat_display.update_model_b_response(error)
+            lambda error, col: (self.tool_chat_display.update_model_b_response(error),
+                                self._close_env_dialog("b", is_tool_chat=True))
         )
         self.tool_chat_worker_b.start()
     
@@ -6846,7 +6963,8 @@ class MainWindow(QMainWindow):
         )
         self.tool_chat_worker_c.inference_finished.connect(self._on_tool_chat_finished_c)
         self.tool_chat_worker_c.inference_failed.connect(
-            lambda error, col: self.tool_chat_display.update_model_c_response(error)
+            lambda error, col: (self.tool_chat_display.update_model_c_response(error),
+                                self._close_env_dialog("c", is_tool_chat=True))
         )
         self.tool_chat_worker_c.start()
     
@@ -6865,6 +6983,12 @@ class MainWindow(QMainWindow):
     
     def _on_tool_chat_finished_a(self, final_output: str, tool_log: list, model_column: str):
         """Handle completion for Model A in tool chat"""
+        # Close environment dialog if open
+        dialog = getattr(self, "_env_dialog_tool_a", None)
+        if dialog:
+            dialog.close()
+            setattr(self, "_env_dialog_tool_a", None)
+        
         text = final_output
         if tool_log:
             text += f"\n\n[Tools Used: {len(tool_log)}]"
@@ -6874,6 +6998,12 @@ class MainWindow(QMainWindow):
     
     def _on_tool_chat_finished_b(self, final_output: str, tool_log: list, model_column: str):
         """Handle completion for Model B in tool chat"""
+        # Close environment dialog if open
+        dialog = getattr(self, "_env_dialog_tool_b", None)
+        if dialog:
+            dialog.close()
+            setattr(self, "_env_dialog_tool_b", None)
+        
         text = final_output
         if tool_log:
             text += f"\n\n[Tools Used: {len(tool_log)}]"
@@ -6883,6 +7013,12 @@ class MainWindow(QMainWindow):
     
     def _on_tool_chat_finished_c(self, final_output: str, tool_log: list, model_column: str):
         """Handle completion for Model C in tool chat"""
+        # Close environment dialog if open
+        dialog = getattr(self, "_env_dialog_tool_c", None)
+        if dialog:
+            dialog.close()
+            setattr(self, "_env_dialog_tool_c", None)
+        
         text = final_output
         if tool_log:
             text += f"\n\n[Tools Used: {len(tool_log)}]"
@@ -6892,6 +7028,40 @@ class MainWindow(QMainWindow):
 
     def _on_tool_chat_progress_update(self, which: str, msg: str):
         """Append progress text to the correct model bubble (tool chat)."""
+        # Detect environment creation and show progress dialog
+        msg_lower = msg.lower()
+        env_key = f"_env_dialog_tool_{which}"
+        if ("environment for" in msg_lower and "doesn't exist" in msg_lower) or \
+           ("installing dependencies for server environment" in msg_lower) or \
+           ("creating virtual environment" in msg_lower):
+            if not hasattr(self, env_key) or getattr(self, env_key) is None:
+                # Extract model name from message or use default
+                model_name = "model"
+                if "environment for" in msg_lower:
+                    try:
+                        parts = msg.split("environment for")[-1].split("doesn't")[0].strip()
+                        model_name = Path(parts).name if parts else "model"
+                    except:
+                        pass
+                dialog = EnvironmentSetupDialog(self, model_name=model_name)
+                setattr(self, env_key, dialog)
+                # Center dialog on parent window
+                if parent := self:
+                    parent_geom = parent.geometry()
+                    dialog_geom = dialog.geometry()
+                    x = parent_geom.x() + (parent_geom.width() - dialog_geom.width()) // 2
+                    y = parent_geom.y() + (parent_geom.height() - dialog_geom.height()) // 2
+                    dialog.move(x, y)
+                dialog.show()
+        
+        # Update dialog if it exists
+        dialog = getattr(self, env_key, None)
+        if dialog:
+            dialog.update_status(msg)
+            if "dependencies installed" in msg_lower or "using environment:" in msg_lower:
+                dialog.set_complete()
+                QTimer.singleShot(1000, lambda: self._close_env_dialog(which, is_tool_chat=True))
+        
         if which == "a":
             current = getattr(self, "_tool_chat_progress_a", "") or ""
             current = (current + "\n" + msg).strip() if current else msg
@@ -7409,7 +7579,8 @@ class MainWindow(QMainWindow):
         )
         self.tool_worker_a.inference_finished.connect(self._on_tool_inference_finished_a)
         self.tool_worker_a.inference_failed.connect(
-            lambda error, col: self.chat_display.update_model_a_response(error)
+            lambda error, col: (self.chat_display.update_model_a_response(error),
+                                self._close_env_dialog("a", is_tool_chat=False))
         )
         
         # Start worker
@@ -7417,14 +7588,63 @@ class MainWindow(QMainWindow):
     
     def _on_tool_inference_finished_a(self, final_output: str, tool_log: list, model_column: str):
         """Handle completion of tool inference for Model A"""
+        # Close environment dialog if open
+        dialog = getattr(self, "_env_dialog_a", None)
+        if dialog:
+            dialog.close()
+            setattr(self, "_env_dialog_a", None)
+        
         text = final_output
         if tool_log:
             text += f"\n\n[Tools Used: {len(tool_log)}]"
         self._tool_progress_a = text
         self.chat_display.update_model_a_response(text)
 
+    def _close_env_dialog(self, which: str, is_tool_chat: bool = False):
+        """Close environment setup dialog for a model"""
+        prefix = "_env_dialog_tool_" if is_tool_chat else "_env_dialog_"
+        env_key = f"{prefix}{which}"
+        dialog = getattr(self, env_key, None)
+        if dialog:
+            dialog.close()
+            setattr(self, env_key, None)
+    
     def _on_tool_progress_update(self, which: str, msg: str):
         """Append progress text to the correct model bubble (test chat)."""
+        # Detect environment creation and show progress dialog
+        msg_lower = msg.lower()
+        env_key = f"_env_dialog_{which}"
+        if ("environment for" in msg_lower and "doesn't exist" in msg_lower) or \
+           ("installing dependencies for server environment" in msg_lower) or \
+           ("creating virtual environment" in msg_lower):
+            if not hasattr(self, env_key) or getattr(self, env_key) is None:
+                # Extract model name from message or use default
+                model_name = "model"
+                if "environment for" in msg_lower:
+                    try:
+                        parts = msg.split("environment for")[-1].split("doesn't")[0].strip()
+                        model_name = Path(parts).name if parts else "model"
+                    except:
+                        pass
+                dialog = EnvironmentSetupDialog(self, model_name=model_name)
+                setattr(self, env_key, dialog)
+                # Center dialog on parent window
+                if parent := self:
+                    parent_geom = parent.geometry()
+                    dialog_geom = dialog.geometry()
+                    x = parent_geom.x() + (parent_geom.width() - dialog_geom.width()) // 2
+                    y = parent_geom.y() + (parent_geom.height() - dialog_geom.height()) // 2
+                    dialog.move(x, y)
+                dialog.show()
+        
+        # Update dialog if it exists
+        dialog = getattr(self, env_key, None)
+        if dialog:
+            dialog.update_status(msg)
+            if "dependencies installed" in msg_lower or "using environment:" in msg_lower:
+                dialog.set_complete()
+                QTimer.singleShot(1000, lambda: self._close_env_dialog(which, is_tool_chat=False))
+        
         if which == "a":
             current = getattr(self, "_tool_progress_a", "") or ""
             current = (current + "\n" + msg).strip() if current else msg
@@ -7691,13 +7911,20 @@ class MainWindow(QMainWindow):
         )
         self.tool_worker_b.inference_finished.connect(self._on_tool_inference_finished_b)
         self.tool_worker_b.inference_failed.connect(
-            lambda error, col: self.chat_display.update_model_b_response(error)
+            lambda error, col: (self.chat_display.update_model_b_response(error),
+                                self._close_env_dialog("b", is_tool_chat=False))
         )
         
         self.tool_worker_b.start()
     
     def _on_tool_inference_finished_b(self, final_output: str, tool_log: list, model_column: str):
         """Handle completion of tool inference for Model B"""
+        # Close environment dialog if open
+        dialog = getattr(self, "_env_dialog_b", None)
+        if dialog:
+            dialog.close()
+            setattr(self, "_env_dialog_b", None)
+        
         text = final_output
         if tool_log:
             text += f"\n\n[Tools Used: {len(tool_log)}]"
@@ -7943,13 +8170,20 @@ class MainWindow(QMainWindow):
         )
         self.tool_worker_c.inference_finished.connect(self._on_tool_inference_finished_c)
         self.tool_worker_c.inference_failed.connect(
-            lambda error, col: self.chat_display.update_model_c_response(error)
+            lambda error, col: (self.chat_display.update_model_c_response(error),
+                                self._close_env_dialog("c", is_tool_chat=False))
         )
         
         self.tool_worker_c.start()
     
     def _on_tool_inference_finished_c(self, final_output: str, tool_log: list, model_column: str):
         """Handle completion of tool inference for Model C"""
+        # Close environment dialog if open
+        dialog = getattr(self, "_env_dialog_c", None)
+        if dialog:
+            dialog.close()
+            setattr(self, "_env_dialog_c", None)
+        
         text = final_output
         if tool_log:
             text += f"\n\n[Tools Used: {len(tool_log)}]"

@@ -14,6 +14,5 @@
     "list_dir": false,
     "run_shell": false,
     "write_file": false
-  },
-  "require_auth_for_tools_list": false
+  }
 }

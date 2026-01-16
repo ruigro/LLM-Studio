@@ -24,6 +24,17 @@ class EnvRegistry:
     def __init__(self):
         from core.environment_manager import EnvironmentManager
         self.env_manager = EnvironmentManager()
+        
+        # Windows subprocess flags to prevent CMD window flashing
+        self.subprocess_flags = {}
+        if sys.platform == 'win32':
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            startupinfo.wShowWindow = subprocess.SW_HIDE
+            self.subprocess_flags = {
+                'startupinfo': startupinfo,
+                'creationflags': subprocess.CREATE_NO_WINDOW
+            }
 
     def _get_active_profile_data(self) -> Optional[dict]:
         """
@@ -63,6 +74,7 @@ class EnvRegistry:
             capture_output=True,
             text=True,
             timeout=timeout,
+            **self.subprocess_flags
         )
 
     def _env_needs_cuda_torch(self, python_exe: Path, profile_data: Optional[dict]) -> bool:
@@ -135,6 +147,7 @@ class EnvRegistry:
                     capture_output=True,
                     text=True,
                     timeout=300,
+                    **self.subprocess_flags
                 )
             except Exception:
                 pass
@@ -157,6 +170,7 @@ class EnvRegistry:
                 capture_output=True,
                 text=True,
                 timeout=1800,
+                **self.subprocess_flags
             )
             if r.returncode != 0:
                 err = (r.stderr or r.stdout or "").strip()
@@ -238,7 +252,8 @@ class EnvRegistry:
                      "uvicorn[standard]", "fastapi", "pydantic", "pyyaml", "-q"],
                     capture_output=True,
                     text=True,
-                    timeout=300
+                    timeout=300,
+                    **self.subprocess_flags
                 )
                 if result.returncode != 0:
                     log(f"Warning: Failed to install server framework: {result.stderr}")
@@ -286,6 +301,7 @@ class EnvRegistry:
                         capture_output=True,
                         text=True,
                         timeout=1800,
+                        **self.subprocess_flags
                     )
                     if r.returncode != 0:
                         err = (r.stderr or r.stdout or "").strip()
@@ -354,7 +370,7 @@ class EnvRegistry:
             if require_cuda:
                 code += "assert torch.cuda.is_available()\n"
                 code += "assert '+cu' in torch.__version__\n"
-            result = subprocess.run([str(python_exe), "-c", code], capture_output=True, timeout=30)
+            result = subprocess.run([str(python_exe), "-c", code], capture_output=True, timeout=30, **self.subprocess_flags)
             return result.returncode == 0
         except Exception:
             return False
