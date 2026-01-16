@@ -204,6 +204,8 @@ class ServerPage(QWidget):
 
         # Start/Stop button
         self.start_stop_btn = QPushButton("▶ Start Server")
+        # Prevent starting with wrong defaults before config loads (port/token mismatch)
+        self.start_stop_btn.setEnabled(False)
         self.start_stop_btn.clicked.connect(self._toggle_server)
         tool_server_layout.addWidget(self.start_stop_btn)
 
@@ -213,7 +215,7 @@ class ServerPage(QWidget):
         
         # Port
         settings_grid.addWidget(QLabel("Port:"), 0, 0)
-        self.port_edit = QLineEdit("8765")
+        self.port_edit = QLineEdit("8763")
         self.port_edit.setMaximumWidth(80)
         settings_grid.addWidget(self.port_edit, 0, 1)
         
@@ -376,10 +378,15 @@ class ServerPage(QWidget):
         self.log_text.setMaximumHeight(400)
         log_layout.addWidget(self.log_text)
 
+        # Clear button in horizontal layout to ensure it's fully visible
+        clear_btn_layout = QHBoxLayout()
+        clear_btn_layout.setContentsMargins(0, 0, 0, 0)
         clear_btn = QPushButton("🗑️ Clear")
-        clear_btn.setMaximumWidth(80)
+        clear_btn.setFixedWidth(100)  # Fixed width instead of max to ensure visibility
         clear_btn.clicked.connect(self.log_text.clear)
-        log_layout.addWidget(clear_btn)
+        clear_btn_layout.addWidget(clear_btn)
+        clear_btn_layout.addStretch()  # Push button to the left
+        log_layout.addLayout(clear_btn_layout)
         
         right_layout.addWidget(log_group)
         right_layout.addStretch()
@@ -402,6 +409,9 @@ class ServerPage(QWidget):
             # Non-critical - continue without config
             pass
         finally:
+            # Always enable the button after init attempt; starting with defaults is better than a dead UI.
+            if hasattr(self, "start_stop_btn"):
+                self.start_stop_btn.setEnabled(True)
             self._loading_config = False
 
     def _select_root(self):
@@ -423,7 +433,7 @@ class ServerPage(QWidget):
             return
         try:
             config = self.config_manager.load()
-            self.port_edit.setText(str(config.get("port", 8765)))
+            self.port_edit.setText(str(config.get("port", 8763)))
             self.token_edit.setText(config.get("token", ""))
             self.root_edit.setText(config.get("workspace_root", str(Path.cwd())))
             self.allow_shell_check.setChecked(config.get("allow_shell", False))
@@ -574,13 +584,27 @@ class ServerPage(QWidget):
                 finally:
                     self.server_thread = None
             
-            port = int(self.port_edit.text() or "8765")
+            port = int(self.port_edit.text() or "8763")
             token = self.token_edit.text().strip() or "CHANGE_ME"
             root = Path(self.root_edit.text().strip() or ".")
             expose = self.expose_to_lan_check.isChecked()
             host = "0.0.0.0" if expose else "127.0.0.1"
 
-            # Keep start lightweight: skip config save/load here
+            # Persist config before starting so tool-calling uses the same host/port/token.
+            self._save_config_silent()
+
+            # If the selected port is busy, automatically pick the next free port and persist it.
+            if not self._is_port_available(host, port):
+                alt = self._find_free_port(host, port)
+                if alt is None:
+                    raise RuntimeError(f"Port {port} is already in use and no free port was found nearby.")
+                if alt != port:
+                    self._append_log(f"[server] port {port} is in use; switching to {alt}")
+                    port = alt
+                    self.port_edit.setText(str(port))
+                    self._save_config_silent()
+
+            # Keep start lightweight: skip config save/load beyond what's needed
             ctx = ToolContext(
                 root=root,
                 token=token,
@@ -664,17 +688,19 @@ class ServerPage(QWidget):
             self.copy_lan_btn.setVisible(True)
             # Update lambda to use current lan_url
             
-            # Disconnect all existing connections (if any) before connecting new one
+            # Keep a stable slot reference to avoid Qt disconnect warnings.
             try:
-                # In PySide6, disconnect() raises a RuntimeError if no slots are connected.
-                # It may also emit a RuntimeWarning which we can't easily suppress without the 'warnings' module.
-                # However, calling it inside a try-except is standard.
-                self.copy_lan_btn.clicked.disconnect()
-            except (TypeError, RuntimeError, Exception):
-                # No connections to disconnect or already disconnected - ignore safely
+                prev = getattr(self, "_copy_lan_slot", None)
+                if prev is not None:
+                    try:
+                        self.copy_lan_btn.clicked.disconnect(prev)
+                    except Exception:
+                        pass
+            except Exception:
                 pass
-                
-            self.copy_lan_btn.clicked.connect(lambda checked=False, url=lan_url: self._copy_lan_url(url))
+
+            self._copy_lan_slot = (lambda checked=False, url=lan_url: self._copy_lan_url(url))
+            self.copy_lan_btn.clicked.connect(self._copy_lan_slot)
         else:
             # Hide LAN UI if not available
             if self.lan_address_label is not None:
@@ -731,6 +757,32 @@ class ServerPage(QWidget):
             return None
         except Exception:
             return None
+
+    def _is_port_available(self, host: str, port: int) -> bool:
+        """Best-effort check whether (host, port) can be bound."""
+        s = None
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            s.bind((host, int(port)))
+            return True
+        except Exception:
+            return False
+        finally:
+            try:
+                if s is not None:
+                    s.close()
+            except Exception:
+                pass
+
+    def _find_free_port(self, host: str, start_port: int, max_tries: int = 50) -> Optional[int]:
+        """Find a free port near start_port."""
+        p = max(1, int(start_port))
+        for _ in range(max_tries):
+            if self._is_port_available(host, p):
+                return p
+            p += 1
+        return None
     
     def _normalize_connection_address(self, address: str) -> str:
         """Convert server bind address to client connection address."""
@@ -811,8 +863,12 @@ class ServerPage(QWidget):
             import threading
             def worker():
                 try:
+                    # Callback to append logs to UI from worker thread
+                    def log_cb(msg):
+                        QTimer.singleShot(0, lambda: self._append_log(f"[LLM] {msg}"))
+
                     manager = get_global_server_manager()
-                    url = manager.ensure_server_running("default")
+                    url = manager.ensure_server_running("default", log_callback=log_cb)
                     QTimer.singleShot(0, lambda: self._on_llm_server_started(url))
                 except Exception as e:
                     import traceback
@@ -907,6 +963,7 @@ class ServerPage(QWidget):
         try:
             from core.llm_server_manager import get_global_server_manager
             import requests
+            from pathlib import Path
             
             manager = get_global_server_manager()
             
@@ -919,9 +976,34 @@ class ServerPage(QWidget):
                         url = manager._get_server_url("default")
                         response = requests.get(f"{url}/health", timeout=1)
                         if response.status_code == 200:
-                            # Server is healthy - update UI if not already showing running
-                            if self.llm_start_btn.isEnabled():
-                                self._on_llm_server_started(url)
+                            # Server is healthy - ALWAYS update UI with current info
+                            port = url.split(':')[-1]
+                            api_url = f"{url}/v1"
+                            
+                            # Update status
+                            self.llm_server_status_label.setText("● Running")
+                            self.llm_server_status_label.setStyleSheet("font-weight: bold; color: #4CAF50;")
+                            
+                            # Update port
+                            self.llm_port_label.setText(port)
+                            
+                            # Update API URL
+                            self.llm_api_label.setText(api_url)
+                            
+                            # Update model name from config
+                            try:
+                                model_cfg = manager.config["models"]["default"]
+                                base_model = model_cfg["base_model"]
+                                model_name = Path(base_model).name
+                                self.llm_model_label.setText(model_name)
+                            except Exception:
+                                self.llm_model_label.setText("default")
+                            
+                            # Update button states
+                            self.llm_start_btn.setEnabled(False)
+                            self.llm_start_btn.setText("● Running")
+                            self.llm_stop_btn.setEnabled(True)
+                            self.copy_api_btn.setEnabled(True)
                             return
                     except:
                         pass

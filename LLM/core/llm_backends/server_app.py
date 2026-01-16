@@ -7,10 +7,11 @@ Provides both native API and OpenAI-compatible endpoints.
 import os
 import logging
 import time
+import threading
+from typing import Optional, List, Literal, Union, Dict, Any
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
-from typing import Optional, List, Literal, Union
 
 # Configure logging
 logging.basicConfig(
@@ -19,8 +20,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Import backend functions
-from core.llm_backends.run_adapter_backend import load_model, generate_text
+# NOTE:
+# Keep module import lightweight so Uvicorn can bind quickly and /health responds immediately.
+# Heavy imports (torch/transformers) are deferred into the background loader / request handlers.
 
 # Create FastAPI app
 app = FastAPI(
@@ -44,6 +46,12 @@ model = None
 model_type = "base"
 system_prompt = ""
 model_name = "local-llm"
+
+# Loading status (so the server can come up immediately)
+_load_state: str = "not_started"  # not_started|loading|ready|error
+_load_error: str = ""
+_load_started_at: float = 0.0
+_load_finished_at: float = 0.0
 
 
 # ============================================================================
@@ -117,8 +125,12 @@ class ModelsListResponse(BaseModel):
 
 @app.on_event("startup")
 async def startup_event():
-    """Load model once at startup"""
+    """
+    Start model loading in background.
+    IMPORTANT: Do not block startup, or Uvicorn won't bind the port and /health will fail.
+    """
     global tokenizer, model, model_type, system_prompt, model_name
+    global _load_state, _load_error, _load_started_at, _load_finished_at
     
     logger.info("Starting LLM server...")
     
@@ -134,28 +146,45 @@ async def startup_event():
     use_4bit_str = os.environ.get("USE_4BIT", "true").lower()
     use_4bit = use_4bit_str in ("true", "1", "yes")
     
-    logger.info(f"Loading model: {base_model}")
+    # Kick off background load (server binds immediately)
+    _load_state = "loading"
+    _load_error = ""
+    _load_started_at = time.time()
+    _load_finished_at = 0.0
+
+    logger.info(f"Queued model load: {base_model}")
     if adapter_dir:
         logger.info(f"With adapter: {adapter_dir}")
     logger.info(f"Model type: {model_type}")
     logger.info(f"Model name: {model_name}")
     logger.info(f"Quantization (4-bit): {use_4bit}")
-    
-    try:
-        # Load model using backend
-        tokenizer, model = load_model(
-            base_model=base_model,
-            adapter_dir=adapter_dir,
-            use_4bit=use_4bit,
-            offload=True
-        )
-        logger.info("Model loaded successfully!")
-        logger.info("OpenAI-compatible API available at:")
-        logger.info("  POST /v1/chat/completions")
-        logger.info("  GET  /v1/models")
-    except Exception as e:
-        logger.error(f"Failed to load model: {e}")
-        raise
+
+    def _loader():
+        nonlocal base_model, adapter_dir, use_4bit
+        global tokenizer, model
+        global _load_state, _load_error, _load_finished_at
+        try:
+            logger.info("Background model load started...")
+            # Lazy import heavy backend inside background thread.
+            from core.llm_backends.run_adapter_backend import load_model
+            tok, mdl = load_model(
+                base_model=base_model,
+                adapter_dir=adapter_dir,
+                use_4bit=use_4bit,
+                offload=True
+            )
+            tokenizer = tok
+            model = mdl
+            _load_state = "ready"
+            _load_finished_at = time.time()
+            logger.info("Model loaded successfully!")
+        except Exception as e:
+            _load_state = "error"
+            _load_error = f"{type(e).__name__}: {e}"
+            _load_finished_at = time.time()
+            logger.exception("Failed to load model")
+
+    threading.Thread(target=_loader, daemon=True).start()
 
 
 # ============================================================================
@@ -165,18 +194,31 @@ async def startup_event():
 @app.get("/health")
 async def health_check():
     """Health check endpoint"""
-    if model is None or tokenizer is None:
-        raise HTTPException(status_code=503, detail="Model not loaded")
-    return {"status": "ok", "model": model_name}
+    # Always return 200 once the server is up; indicate readiness in JSON.
+    # This allows the process to be detectable even while the model loads.
+    payload: Dict[str, Any] = {
+        "status": "ok" if (model is not None and tokenizer is not None and _load_state == "ready") else _load_state,
+        "model": model_name,
+    }
+    if _load_state == "error":
+        payload["error"] = _load_error
+    if _load_started_at:
+        payload["loading_seconds"] = round((time.time() - _load_started_at), 1)
+    return payload
 
 
 @app.post("/generate", response_model=GenerateResponse)
 async def generate(request: GenerateRequest):
     """Generate text from prompt (native API)"""
-    if model is None or tokenizer is None:
-        raise HTTPException(status_code=503, detail="Model not loaded")
+    if model is None or tokenizer is None or _load_state != "ready":
+        detail = "Model not ready"
+        if _load_state == "error" and _load_error:
+            detail = f"Model load failed: {_load_error}"
+        raise HTTPException(status_code=503, detail=detail)
     
     try:
+        # Lazy import heavy backend for generation.
+        from core.llm_backends.run_adapter_backend import generate_text
         # Call generation function
         text = generate_text(
             tokenizer=tokenizer,
@@ -216,8 +258,11 @@ async def list_models():
 @app.post("/v1/chat/completions", response_model=ChatCompletionResponse)
 async def chat_completions(request: ChatCompletionRequest):
     """Chat completions endpoint (OpenAI-compatible)"""
-    if model is None or tokenizer is None:
-        raise HTTPException(status_code=503, detail="Model not loaded")
+    if model is None or tokenizer is None or _load_state != "ready":
+        detail = "Model not ready"
+        if _load_state == "error" and _load_error:
+            detail = f"Model load failed: {_load_error}"
+        raise HTTPException(status_code=503, detail=detail)
     
     if request.stream:
         raise HTTPException(status_code=400, detail="Streaming not yet supported")
@@ -245,6 +290,8 @@ async def chat_completions(request: ChatCompletionRequest):
         
         full_prompt = "\n\n".join(prompt_parts)
         
+        # Lazy import heavy backend for generation.
+        from core.llm_backends.run_adapter_backend import generate_text
         # Generate response
         generated_text = generate_text(
             tokenizer=tokenizer,

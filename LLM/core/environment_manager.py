@@ -173,16 +173,10 @@ class EnvironmentManager:
             
             # Install base packages (essential for ML)
             print(f"Installing base packages in environment...")
-            base_packages = [
-                "pip",
-                "setuptools",
-                "wheel",
-                "torch",
-                "transformers",
-                "accelerate",
-                "safetensors",
-                "huggingface-hub"
-            ]
+            # Keep base environment creation lightweight and deterministic.
+            # The active hardware profile (LLM/profiles/*.json) is the single source of truth
+            # for torch (+cuXXX) and other heavy packages; EnvRegistry will install them.
+            base_packages = ["pip", "setuptools", "wheel"]
             
             try:
                 # Upgrade pip first

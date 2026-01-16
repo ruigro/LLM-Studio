@@ -9,6 +9,7 @@ import requests
 import time
 import socket
 import logging
+import os
 from pathlib import Path
 from typing import Dict, Optional
 
@@ -30,11 +31,8 @@ class LLMServerManager:
         if not config_path.exists():
             raise FileNotFoundError(f"Config file not found: {config_path}")
         
-        with open(config_path, 'r', encoding='utf-8') as f:
-            self.config = yaml.safe_load(f)
-        
-        if "models" not in self.config:
-            raise ValueError(f"Invalid config: 'models' key not found in {config_path}")
+        self._config_mtime: Optional[float] = None
+        self._load_config()
         
         # Import environment registry
         from core.envs.env_registry import EnvRegistry
@@ -43,15 +41,78 @@ class LLMServerManager:
         # Track running server processes
         self.running_servers: Dict[str, subprocess.Popen] = {}
         
-        # Warmup timeout (seconds to wait for server startup)
-        self.warmup_timeout = 180
+        # Warmup timeout (seconds to wait for server to become READY).
+        # Large models can take a long time on first load (esp. after install / cold cache).
+        self.warmup_timeout = 1800
+        try:
+            self.warmup_timeout = int(os.getenv("LLM_SERVER_WARMUP_TIMEOUT", str(self.warmup_timeout)))
+        except Exception:
+            self.warmup_timeout = 1800
+
+    def _load_config(self) -> None:
+        """(Re)load llm_backends.yaml into self.config if present/valid."""
+        if not self.config_path.exists():
+            raise FileNotFoundError(f"Config file not found: {self.config_path}")
+
+        with open(self.config_path, "r", encoding="utf-8") as f:
+            cfg = yaml.safe_load(f) or {}
+
+        if "models" not in cfg or not isinstance(cfg["models"], dict):
+            raise ValueError(f"Invalid config: 'models' key not found in {self.config_path}")
+
+        self.config = cfg
+        try:
+            self._config_mtime = self.config_path.stat().st_mtime
+        except Exception:
+            self._config_mtime = None
+
+    def _reload_config_if_changed(self) -> None:
+        """
+        Reload config if file changed on disk.
+        This prevents stale config when users edit llm_backends.yaml while the app is running.
+        """
+        try:
+            mtime = self.config_path.stat().st_mtime
+        except Exception:
+            return
+
+        if self._config_mtime is None or mtime != self._config_mtime:
+            try:
+                self._load_config()
+                logger.info(f"Reloaded LLM config from disk: {self.config_path}")
+            except Exception as e:
+                # Keep previous config if reload fails to avoid breaking running servers.
+                logger.warning(f"Failed to reload LLM config: {e}")
+
+    def _save_config(self) -> None:
+        """Persist current config to disk (best-effort)."""
+        try:
+            with open(self.config_path, "w", encoding="utf-8") as f:
+                yaml.safe_dump(self.config, f, sort_keys=False, default_flow_style=False)
+            try:
+                self._config_mtime = self.config_path.stat().st_mtime
+            except Exception:
+                self._config_mtime = None
+        except Exception as e:
+            logger.warning(f"Failed to save LLM config: {e}")
+
+    def _find_free_port(self, start_port: int, used_ports: Optional[set] = None, max_tries: int = 200) -> Optional[int]:
+        """Find a free localhost port not in used_ports."""
+        used_ports = used_ports or set()
+        p = max(1, int(start_port))
+        for _ in range(max_tries):
+            if p not in used_ports and self._check_port_available(p):
+                return p
+            p += 1
+        return None
     
-    def ensure_server_running(self, model_id: str) -> str:
+    def ensure_server_running(self, model_id: str, log_callback=None) -> str:
         """
         Ensure server is running for given model_id, start if needed.
         
         Args:
             model_id: Model identifier from config
+            log_callback: Optional function to call with log messages
             
         Returns:
             Base URL of the running server
@@ -61,6 +122,18 @@ class LLMServerManager:
             RuntimeError: If port is in use or server fails to start
             TimeoutError: If server doesn't become healthy in time
         """
+        def log(msg):
+            if log_callback:
+                log_callback(msg)
+            logger.info(msg)
+
+        # Always reload before resolving model_id. The file is small and this avoids
+        # Windows timestamp resolution / cached config edge cases.
+        try:
+            self._load_config()
+        except Exception as e:
+            logger.warning(f"Failed to reload LLM config before start: {e}")
+
         if model_id not in self.config["models"]:
             raise ValueError(
                 f"Model '{model_id}' not found in config. "
@@ -72,18 +145,18 @@ class LLMServerManager:
             process = self.running_servers[model_id]
             if process.poll() is None:  # Process is alive
                 if self._check_health(model_id):
-                    logger.info(f"Server '{model_id}' already running and healthy")
+                    log(f"Server '{model_id}' already running and healthy")
                     return self._get_server_url(model_id)
                 else:
-                    logger.warning(f"Server '{model_id}' process alive but not healthy, restarting")
+                    log(f"Server '{model_id}' process alive but not healthy, restarting")
                     process.kill()
                     del self.running_servers[model_id]
             else:
-                logger.warning(f"Server '{model_id}' process died, restarting")
+                log(f"Server '{model_id}' process died, restarting")
                 del self.running_servers[model_id]
         
         # Start new server
-        self._start_server(model_id)
+        self._start_server(model_id, log_callback=log_callback)
         return self._get_server_url(model_id)
     
     def _check_port_available(self, port: int) -> bool:
@@ -106,51 +179,72 @@ class LLMServerManager:
             sock.close()
             return False
     
-    def _start_server(self, model_id: str):
+    def _start_server(self, model_id: str, log_callback=None):
         """
         Start server in correct environment with warmup polling.
         
         Args:
             model_id: Model identifier from config
+            log_callback: Optional function to call with log messages
             
         Raises:
             RuntimeError: If port is in use or server process dies
             TimeoutError: If server doesn't become healthy in time
         """
+        def log(msg):
+            if log_callback:
+                log_callback(msg)
+            logger.info(msg)
+
         model_cfg = self.config["models"][model_id]
         base_model = model_cfg["base_model"]
         port = model_cfg["port"]
         
-        logger.info(f"Starting server for model '{model_id}' on port {port}")
+        log(f"Starting server for model '{model_id}' on port {port}")
         
         # Check port availability (with retry for TIME_WAIT state)
         max_retries = 3
         for attempt in range(max_retries):
             if self._check_port_available(port):
-                logger.info(f"Port {port} is available")
+                log(f"Port {port} is available")
                 break
             
-            # Try to check if it's our server already running
-            if self._check_health(model_id):
-                logger.info(f"Port {port} already has a healthy server, using it")
-                return
+            # Try to check if it's our server already running (ready or still loading)
+            status, reported_model = self._check_health(model_id, return_status=True)
+            if isinstance(status, str) and status in {"ok", "loading"}:
+                # If /health speaks our API, prefer reusing the server. Older servers may report
+                # model="local-llm" (generic) so don't treat that as a conflict.
+                if reported_model and reported_model not in {model_id, "local-llm"}:
+                    log(f"Port {port} has a different server (model={reported_model}, status={status}); will reassign port")
+                else:
+                    log(f"Port {port} already has a server (status={status}), using it")
+                    return
             
             if attempt < max_retries - 1:
-                logger.warning(f"Port {port} appears in use, retrying in 2 seconds... (attempt {attempt + 1}/{max_retries})")
+                log(f"Port {port} appears in use, retrying in 2 seconds... (attempt {attempt + 1}/{max_retries})")
                 time.sleep(2)
             else:
-                # Last attempt failed
-                raise RuntimeError(
-                    f"Port {port} is in use but not responding to health checks.\n"
-                    f"Change config port or stop the process using port {port}\n"
-                    f"Use 'netstat -ano | findstr :{port}' to find the process"
-                )
+                # Last attempt failed: auto-reassign to a free port and persist it.
+                used_ports = {cfg.get("port") for cfg in self.config.get("models", {}).values() if isinstance(cfg, dict)}
+                new_port = self._find_free_port(port + 1, used_ports=used_ports)
+                if new_port is None:
+                    raise RuntimeError(
+                        f"Port {port} is in use but not responding to health checks, and no free port was found.\n"
+                        f"Stop the process using port {port} or choose a different port.\n"
+                        f"Use 'netstat -ano | findstr :{port}' to find the process"
+                    )
+                log(f"Port {port} is in use and not our server; switching '{model_id}' to port {new_port}")
+                self.config["models"][model_id]["port"] = int(new_port)
+                self._save_config()
+                port = int(new_port)
+                log(f"Updated config: {model_id}.port = {port}")
+                break
         
         # Get environment for this model
-        logger.info(f"Getting environment for model: {base_model}")
-        env_spec = self.env_registry.get_env_for_model(base_model)
-        logger.info(f"Using environment: {env_spec.key}")
-        logger.info(f"Python executable: {env_spec.python_executable}")
+        log(f"Getting environment for model: {base_model}")
+        env_spec = self.env_registry.get_env_for_model(base_model, log_callback=log_callback)
+        log(f"Using environment: {env_spec.key}")
+        log(f"Python executable: {env_spec.python_executable}")
         
         # Get app root for cwd
         from core.inference import get_app_root
@@ -163,10 +257,8 @@ class LLMServerManager:
             raise FileNotFoundError(f"Launcher script not found: {launcher_script}")
         
         # Launch server using environment's python
-        logger.info(f"Launching server: {env_spec.python_executable} {launcher_script} {model_id}")
-        logger.info(f"Working directory: {app_root}")
-        logger.info(f"Python executable exists: {Path(env_spec.python_executable).exists()}")
-        logger.info(f"Launcher script exists: {launcher_script.exists()}")
+        log(f"Launching server: {env_spec.python_executable} {launcher_script} {model_id}")
+        log(f"Working directory: {app_root}")
         
         try:
             process = subprocess.Popen(
@@ -182,7 +274,7 @@ class LLMServerManager:
                 bufsize=1  # Line buffered
             )
             self.running_servers[model_id] = process
-            logger.info(f"Server process started with PID: {process.pid}")
+            log(f"Server process started with PID: {process.pid}")
         except Exception as e:
             import traceback
             error_msg = f"Failed to launch server process: {e}\n{traceback.format_exc()}"
@@ -194,7 +286,8 @@ class LLMServerManager:
         start_time = time.time()
         last_error = None
         
-        logger.info(f"Waiting for server to become healthy (timeout: {self.warmup_timeout}s)...")
+        log(f"Waiting for server to become healthy (timeout: {self.warmup_timeout}s)...")
+        log(f"This involves loading the model into GPU memory. Please wait...")
         
         while time.time() - start_time < self.warmup_timeout:
             # Check if process died
@@ -221,13 +314,22 @@ class LLMServerManager:
                 logger.error(error_msg)
                 raise RuntimeError(error_msg)
             
-            # Try health check
+            # Try health check (server may be up while model is still loading)
             try:
                 response = requests.get(f"{server_url}/health", timeout=2)
                 if response.status_code == 200:
-                    elapsed = time.time() - start_time
-                    logger.info(f"Server '{model_id}' is healthy at {server_url} (took {elapsed:.1f}s)")
-                    return
+                    try:
+                        data = response.json()
+                        status = str(data.get("status", "")).lower()
+                        if status == "ok":
+                            elapsed = time.time() - start_time
+                            logger.info(f"Server '{model_id}' is ready at {server_url} (took {elapsed:.1f}s)")
+                            return
+                        # Still loading; keep waiting
+                        last_error = f"Server up, model status={status}"
+                    except Exception:
+                        # If JSON parsing fails, assume not ready yet.
+                        last_error = "Server up, invalid /health JSON"
             except requests.exceptions.RequestException as e:
                 last_error = str(e)
             except Exception as e:
@@ -272,22 +374,35 @@ class LLMServerManager:
         logger.error(error_msg)
         raise TimeoutError(error_msg)
     
-    def _check_health(self, model_id: str) -> bool:
+    def _check_health(self, model_id: str, return_status: bool = False):
         """
         Check if server is healthy.
         
         Args:
             model_id: Model identifier
+            return_status: If True, return (status, model_name) or (False, None) on failure.
             
         Returns:
-            True if healthy, False otherwise
+            True if ready/ok, False otherwise (default behavior).
         """
         try:
             url = self._get_server_url(model_id)
             response = requests.get(f"{url}/health", timeout=2)
-            return response.status_code == 200
+            if response.status_code != 200:
+                return False if not return_status else (False, None)
+            try:
+                data = response.json()
+            except Exception:
+                # A 200 without JSON is not our API; treat as not healthy.
+                return False if not return_status else ("unknown", None)
+
+            status = str(data.get("status", "")).lower().strip()
+            model_name = str(data.get("model", "")).strip() if isinstance(data, dict) else ""
+            if return_status:
+                return (status or "unknown", model_name or None)
+            return status == "ok"
         except Exception:
-            return False
+            return False if not return_status else (False, None)
     
     def _get_server_url(self, model_id: str) -> str:
         """

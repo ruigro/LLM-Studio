@@ -822,6 +822,31 @@ class WheelhouseManager:
                     else:
                         self.log(f"  WARNING: Failed to download optional package {pkg_name}: {error}")
             
+            # Phase 2.5: Download dependency closure for packages that need deps
+            # This ensures transitive dependencies (like networkx for torch/peft) are in wheelhouse
+            self.log("Phase 2.5: Downloading dependency closure for packages that install with deps")
+            packages_needing_deps = ["requests", "urllib3", "certifi", "charset-normalizer", "idna", "jinja2", "markupsafe", "peft", "tqdm", "colorama"]
+            
+            for pkg_name in ordered_packages:
+                if pkg_name in packages_needing_deps:
+                    pkg_version = package_versions[pkg_name]
+                    spec = _pkg_spec(pkg_name, pkg_version)
+                    self.log(f"  Downloading dependency closure for {spec}")
+                    
+                    # Download WITH dependencies to get closure (networkx, etc.)
+                    success, error = self._download_wheel(
+                        package=spec,
+                        index_url=None,  # Use PyPI
+                        no_deps=False,  # Download dependencies too
+                        python_version=python_version
+                    )
+                    
+                    if not success:
+                        self.log(f"  WARNING: Failed to download dependency closure for {pkg_name}: {error}")
+                        # Non-fatal: continue, but install may fail later if deps are missing
+                    else:
+                        self.log(f"  ✓ Dependency closure downloaded for {pkg_name}")
+            
             # Phase 3: Download dependencies from dependencies.json that aren't in profile
             # This ensures packages like urllib3, certifi, etc. are available even if not in profile
             self.log("Phase 3: Downloading additional dependencies from dependencies.json")
@@ -1142,6 +1167,63 @@ class WheelhouseManager:
             return False, f"Download timeout for {package}"
         except Exception as e:
             return False, str(e)
+    
+    def download_missing_package(self, package_name: str, python_version: Tuple[int, int] = None) -> Tuple[bool, str]:
+        """
+        Download a missing package into wheelhouse (for auto-heal during install).
+        
+        Args:
+            package_name: Package name (e.g., "networkx")
+            python_version: Optional Python version tuple (e.g., (3, 12))
+        
+        Returns:
+            Tuple of (success: bool, error_message: str)
+        """
+        if python_version is None:
+            python_version = (sys.version_info.major, sys.version_info.minor)
+        
+        # Check if already in wheelhouse
+        wheel_files = list(self.wheelhouse.glob(f"{package_name.replace('-', '_')}-*.whl"))
+        if not wheel_files:
+            wheel_files = list(self.wheelhouse.glob(f"{package_name}-*.whl"))
+        
+        if wheel_files:
+            self.log(f"  {package_name} already in wheelhouse")
+            return True, ""
+        
+        # Check blacklist
+        blacklist = set(pkg.lower().replace("_", "-") for pkg in self.manifest.get("global_blacklist", []))
+        if package_name.lower().replace("_", "-") in blacklist:
+            return False, f"Package {package_name} is blacklisted"
+        
+        # Never allow online fallback for torch/GPU packages
+        forbidden_patterns = ["torch", "triton", "bitsandbytes", "nvidia-", "cuda"]
+        if any(pattern in package_name.lower() for pattern in forbidden_patterns):
+            return False, f"Package {package_name} requires special index (not available via online fallback)"
+        
+        self.log(f"  Downloading missing package: {package_name} (with dependencies)")
+        success, error = self._download_wheel(
+            package=package_name,  # Let pip resolve latest compatible version
+            index_url=None,  # Use PyPI
+            no_deps=False,  # Download dependencies too (closure)
+            python_version=python_version
+        )
+        
+        if success:
+            self.log(f"  ✓ Successfully downloaded {package_name} and its dependencies into wheelhouse")
+        
+        if success:
+            # Verify no blacklisted packages were pulled in
+            verify_success, verify_error = self._verify_no_blacklist()
+            if not verify_success:
+                # Remove the package we just downloaded if it pulled in blacklisted deps
+                for wheel in self.wheelhouse.glob(f"{package_name.replace('-', '_')}-*.whl"):
+                    wheel.unlink()
+                for wheel in self.wheelhouse.glob(f"{package_name}-*.whl"):
+                    wheel.unlink()
+                return False, f"Downloaded {package_name} but it pulled in blacklisted dependencies: {verify_error}"
+        
+        return success, error
     
     def _verify_no_blacklist(self) -> Tuple[bool, str]:
         """

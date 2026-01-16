@@ -90,6 +90,43 @@ class InstallerThread(QThread):
                 self.finished_signal.emit(success)
                 return
             
+            # For rebuild, use InstallerV2 for destructive rebuild
+            if self.install_type == "rebuild":
+                self.log_output.emit("Starting rebuild process...")
+                self.log_output.emit("WARNING: This will delete the existing environment and wheelhouse")
+                self.log_output.emit("All packages will be re-downloaded and reinstalled")
+                
+                # Import and run InstallerV2 rebuild
+                from installer_v2 import InstallerV2
+                from pathlib import Path
+                
+                # Explicitly target LLM/.venv (not bootstrap/.venv)
+                llm_root = Path(__file__).parent.parent
+                target_venv = llm_root / ".venv"
+                
+                self.log_output.emit(f"Target environment: {target_venv}")
+                
+                installer_v2 = InstallerV2(root_dir=llm_root)
+                
+                # Redirect logs
+                original_log = installer_v2.log
+                def gui_log(message):
+                    # Ensure message is safe for the log output
+                    try:
+                        self.log_output.emit(message)
+                    except Exception:
+                        pass
+                    
+                    # Original log already has safety for print() now
+                    original_log(message)
+                
+                installer_v2.log = gui_log
+                
+                success = installer_v2.rebuild()
+                self.log_output.emit(f"Rebuild completed with result: {success}")
+                self.finished_signal.emit(success)
+                return
+            
             # For all other operations, use SmartInstaller
             installer = SmartInstaller()
             
@@ -139,6 +176,21 @@ class PipPackageThread(QThread):
         self.action = action  # "install" | "uninstall"
         self.package_spec = package_spec
         self.python_exe = python_exe or sys.executable
+        self.pip_index_args: list[str] = []
+
+        # Detect torch CUDA wheels and add correct index automatically
+        try:
+            import re
+            # Look for +cuXXX in the spec (e.g., torch==2.5.1+cu121)
+            m = re.search(r"\+cu(\d+)", package_spec or "")
+            if m:
+                cu_tag = m.group(1)
+                torch_index = f"https://download.pytorch.org/whl/cu{cu_tag}"
+                # Prefer explicit index to find CUDA wheels; keep PyPI as extra for deps
+                self.pip_index_args = ["--index-url", torch_index, "--extra-index-url", "https://pypi.org/simple"]
+        except Exception:
+            # Fallback silently; will just use default index
+            self.pip_index_args = []
 
     def run(self):
         import subprocess
@@ -147,7 +199,7 @@ class PipPackageThread(QThread):
                 cmd = [self.python_exe, "-m", "pip", "uninstall", "-y", self.package_spec]
             else:
                 # Install/update a single package only; do NOT resolve deps (to avoid cascading reinstalls).
-                cmd = [self.python_exe, "-m", "pip", "install", "--no-deps", "--no-cache-dir", self.package_spec]
+                cmd = [self.python_exe, "-m", "pip", "install", "--no-deps", "--no-cache-dir"] + self.pip_index_args + [self.package_spec]
 
             self.log_output.emit(f"Running: {' '.join(cmd)}")
 
@@ -192,15 +244,41 @@ class ToolInferenceWorker(QThread):
         """Run tool-enabled inference in background"""
         try:
             from core.inference import ToolEnabledInferenceConfig, run_inference_with_tools
+            from desktop_app.config.config_manager import ConfigManager
+            import urllib.request
             
             self.progress_update.emit("[INFO] Initializing tool-enabled inference...")
+
+            # Load tool server config (single source of truth)
+            cfg_mgr = ConfigManager()
+            tool_cfg = cfg_mgr.load()
+            port = int(tool_cfg.get("port", 8763))
+            host = str(tool_cfg.get("host", "127.0.0.1")).strip() or "127.0.0.1"
+            token = str(tool_cfg.get("token", "")).strip()
+
+            # Always connect locally (even if server binds 0.0.0.0)
+            if host in ("0.0.0.0", "::", "[::]"):
+                host = "127.0.0.1"
+            tool_server_url = f"http://{host}:{port}"
+
+            # Quick reachability check (gives a clear error instead of “nothing happens”)
+            try:
+                with urllib.request.urlopen(f"{tool_server_url}/health", timeout=1) as resp:
+                    _ = resp.read()
+            except Exception as e:
+                raise RuntimeError(
+                    f"Tool Server is not reachable at {tool_server_url}.\n"
+                    f"Open the Servers tab and start 'Tool Server (MCP)'.\n"
+                    f"Details: {e}"
+                )
             
             # Create config
             cfg = ToolEnabledInferenceConfig(
                 prompt=self.prompt,
                 model_id=self.model_id,
                 enable_tools=True,
-                tool_server_url="http://127.0.0.1:8763",
+                tool_server_url=tool_server_url,
+                tool_server_token=token,
                 auto_execute_safe_tools=True,
                 max_tool_iterations=5,
                 system_prompt=self.system_prompt,
@@ -222,7 +300,8 @@ class ToolInferenceWorker(QThread):
             final_output, tool_log = run_inference_with_tools(
                 cfg=cfg,
                 tool_callback=tool_callback,
-                approval_callback=None  # Auto-approve in test mode
+                approval_callback=None,  # Auto-approve in test mode
+                log_callback=lambda m: self.progress_update.emit(str(m))
             )
             
             # Emit success
@@ -1903,13 +1982,12 @@ class MainWindow(QMainWindow):
         self.logs_btn = QPushButton("📊 Logs")
         self.server_btn = QPushButton("🖧 Server")
         self.mcp_btn = QPushButton("🧩 MCP")
-        self.tool_chat_btn = QPushButton("🔧 Tool Chat")
         self.envs_btn = QPushButton("⚙️ Environment")
         self.info_btn = QPushButton("ℹ️ Info")
         
         # Navigation buttons will be styled by theme system
         
-        for btn in [self.home_btn, self.train_btn, self.download_btn, self.test_btn, self.logs_btn, self.server_btn, self.mcp_btn, self.tool_chat_btn, self.envs_btn, self.info_btn]:
+        for btn in [self.home_btn, self.train_btn, self.download_btn, self.test_btn, self.logs_btn, self.server_btn, self.mcp_btn, self.envs_btn, self.info_btn]:
             btn.setCheckable(True)
             # Navigation buttons will be styled by theme system
         
@@ -1920,7 +1998,6 @@ class MainWindow(QMainWindow):
         navbar_layout.addWidget(self.test_btn)
         navbar_layout.addWidget(self.server_btn)
         navbar_layout.addWidget(self.mcp_btn)
-        navbar_layout.addWidget(self.tool_chat_btn)
         navbar_layout.addWidget(self.envs_btn)
         
         # Add stretch to consume remaining space
@@ -1947,11 +2024,8 @@ class MainWindow(QMainWindow):
         tabs.addTab(self.server_page, "Server")
         tabs.addTab(MCPPage(self), "MCP")
         
-        # Add Tool Chat tab
-        from desktop_app.pages.tool_chat_page import ToolChatPage
-        tabs.addTab(ToolChatPage(self), "🔧 Tool Chat")
-        
-        tabs.addTab(self._build_environment_management_page(), "Environment Manager")
+        self.env_page = self._build_environment_management_page()
+        self.env_tab_index = tabs.addTab(self.env_page, "Environment Manager")
         tabs.addTab(self._build_info_tab(), "Info")
         
         # Connect buttons to tab switching
@@ -1962,9 +2036,8 @@ class MainWindow(QMainWindow):
         self.logs_btn.clicked.connect(lambda: self._switch_tab(tabs, 4))
         self.server_btn.clicked.connect(lambda: self._switch_tab(tabs, 5))
         self.mcp_btn.clicked.connect(lambda: self._switch_tab(tabs, 6))
-        self.tool_chat_btn.clicked.connect(lambda: self._switch_tab(tabs, 7))
-        self.envs_btn.clicked.connect(lambda: self._switch_tab(tabs, 8))
-        self.info_btn.clicked.connect(lambda: self._switch_tab(tabs, 9))
+        self.envs_btn.clicked.connect(lambda: self._switch_tab(tabs, self.env_tab_index))
+        self.info_btn.clicked.connect(lambda: self._switch_tab(tabs, 8))
         
         # Also connect to tab widget's currentChanged signal to handle programmatic changes
         tabs.currentChanged.connect(self._update_frame_corner_br)
@@ -2034,7 +2107,13 @@ class MainWindow(QMainWindow):
         self.downloaded_model_cards = []
         self.metric_cards = []
         
-        self._refresh_locals()
+        # Refresh locals safely (may fail if tabs not loaded yet)
+        try:
+            self._refresh_locals()
+        except Exception as e:
+            # Don't crash on startup if widgets don't exist yet
+            print(f"[WARNING] _refresh_locals() failed (this is normal on first startup): {e}")
+        
         self._apply_theme()
 
     def _get_text_color(self) -> str:
@@ -2109,6 +2188,7 @@ class MainWindow(QMainWindow):
     def _ensure_model_environment(self, model_id: str = None, model_path: str = None) -> Tuple[bool, Optional[str]]:
         """
         Ensure a model has its own isolated environment. Creates it if needed.
+        Uses EnvRegistry to ensure all dependencies are installed.
         
         Args:
             model_id: HuggingFace model ID
@@ -2117,57 +2197,48 @@ class MainWindow(QMainWindow):
         Returns:
             Tuple of (success: bool, python_executable_path: str or None)
         """
-        # Check if environment already exists
-        python_exe = self.env_manager.get_python_executable(model_id=model_id, model_path=model_path)
-        if python_exe and python_exe.exists():
-            return True, str(python_exe)
-        
-        # Need to create environment - get Python runtime
-        python_runtime = self.python_runtime_manager.get_python_runtime("3.12")
-        if not python_runtime:
-            return False, None
-        
-        # Get hardware profile for this model
         try:
-            from system_detector import SystemDetector
-            from core.profile_selector import ProfileSelector
+            from core.envs.env_registry import EnvRegistry
+            registry = EnvRegistry()
             
-            detector = SystemDetector()
-            detector.detect_all()
-            hw_profile = detector.get_hardware_profile()
-            selector = ProfileSelector(self.root / "metadata" / "compatibility_matrix.json")
-            profile_name, _, _, _ = selector.select_profile(hw_profile)
-        except Exception:
-            profile_name = None
-        
-        # Create environment
-        success, error = self.env_manager.create_environment(
-            model_id=model_id,
-            model_path=model_path,
-            python_runtime=python_runtime,
-            profile_name=profile_name
-        )
-        
-        if success:
-            python_exe = self.env_manager.get_python_executable(model_id=model_id, model_path=model_path)
-            return True, str(python_exe) if python_exe else None
-        else:
+            # Use model_path if provided, otherwise resolve model_id to path if possible
+            target_path = model_path
+            if not target_path and model_id:
+                # If only model_id is provided, we need to find its path
+                # For now, we assume models are in LLM/models/
+                target_path = str(self.root / "models" / model_id.replace("/", "__"))
+            
+            if not target_path:
+                return False, None
+                
+            # EnvRegistry handles creation and dependency installation
+            env_spec = registry.get_env_for_model(target_path)
+            
+            if env_spec and env_spec.python_executable.exists():
+                return True, str(env_spec.python_executable)
+            else:
+                return False, None
+                
+        except Exception as e:
+            print(f"[GUI] Error ensuring model environment: {e}")
+            import traceback
+            traceback.print_exc()
             return False, None
     
     def _extract_model_id_from_path(self, model_path: str) -> Optional[str]:
         """
         Try to extract HuggingFace model ID from a local model path.
         Looks for patterns like models/nvidia__Nemotron-3-30B or similar.
-        
+
         Args:
             model_path: Local model path
-            
+
         Returns:
             Model ID if extractable, None otherwise
         """
         from pathlib import Path
         path_obj = Path(model_path)
-        
+
         # Check if path contains a model directory that looks like a HF model ID
         # Pattern: .../models/nvidia__Nemotron-3-30B/... -> nvidia/Nemotron-3-30B
         for part in path_obj.parts:
@@ -2177,14 +2248,156 @@ class MainWindow(QMainWindow):
                 # Validate it looks like a model ID (has / or is a known pattern)
                 if "/" in model_id or part.startswith(("nvidia", "unsloth", "microsoft", "meta", "google")):
                     return model_id
-        
+
         # Check parent directory name
         if path_obj.parent.name and "__" in path_obj.parent.name:
             model_id = path_obj.parent.name.replace("__", "/")
             if "/" in model_id:
                 return model_id
-        
+
         return None
+    
+    def _resolve_model_id_from_path(self, model_path: str) -> str:
+        """
+        Resolve model_id from model_path by checking llm_backends.yaml config.
+        If model_path matches a base_model in config, returns that model_id.
+        Otherwise, creates a new config entry with unique model_id and port.
+        
+        Args:
+            model_path: Local model path
+            
+        Returns:
+            model_id string that can be used with LLM server manager
+        """
+        import yaml
+        from pathlib import Path
+        
+        # Normalize model_path
+        try:
+            model_path_obj = Path(model_path).resolve()
+            if not model_path_obj.exists():
+                raise ValueError(f"Model path does not exist: {model_path}")
+            model_path_str = str(model_path_obj)
+        except Exception as e:
+            raise ValueError(f"Invalid model path: {model_path} - {e}")
+        
+        # Load config
+        config_path = self.root / "configs" / "llm_backends.yaml"
+        if not config_path.exists():
+            # Config doesn't exist, create it with default entry
+            config_path.parent.mkdir(parents=True, exist_ok=True)
+            import socket
+
+            def _port_free(p: int) -> bool:
+                s = None
+                try:
+                    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                    s.bind(("127.0.0.1", int(p)))
+                    return True
+                except Exception:
+                    return False
+                finally:
+                    try:
+                        if s is not None:
+                            s.close()
+                    except Exception:
+                        pass
+
+            port = 10500
+            while not _port_free(port):
+                port += 1
+            default_config = {
+                "models": {
+                    "default": {
+                        "base_model": model_path_str,
+                        "adapter_dir": None,
+                        "model_type": "instruct",
+                        "port": port,
+                        "use_4bit": True,
+                        "system_prompt": ""
+                    }
+                }
+            }
+            with open(config_path, 'w', encoding='utf-8') as f:
+                yaml.safe_dump(default_config, f, sort_keys=False, default_flow_style=False)
+            return "default"
+        
+        # Load existing config
+        try:
+            with open(config_path, 'r', encoding='utf-8') as f:
+                config = yaml.safe_load(f) or {}
+        except Exception as e:
+            raise ValueError(f"Failed to load config file: {e}")
+        
+        if "models" not in config:
+            config["models"] = {}
+        
+        # Check if model_path matches any existing base_model
+        for model_id, model_cfg in config["models"].items():
+            existing_base = model_cfg.get("base_model", "")
+            if not existing_base:
+                continue
+            try:
+                existing_path = Path(existing_base).resolve()
+                if str(existing_path) == model_path_str:
+                    return model_id
+            except Exception:
+                # Skip invalid paths in config
+                continue
+        
+        # Not found - create new entry with unique model_id and port
+        # Generate model_id from path (sanitize for YAML key)
+        model_id = model_path_obj.name.replace("__", "_").replace("/", "_").replace("\\", "_")
+        if not model_id or model_id in config["models"]:
+            # Fallback: use timestamp-based ID
+            import time
+            model_id = f"model_{int(time.time())}"
+        
+        # Find next available port (start from 10500), avoiding ports already in-use on the OS
+        import socket
+
+        def _port_free(p: int) -> bool:
+            s = None
+            try:
+                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                s.bind(("127.0.0.1", int(p)))
+                return True
+            except Exception:
+                return False
+            finally:
+                try:
+                    if s is not None:
+                        s.close()
+                except Exception:
+                    pass
+
+        used_ports = {int(cfg.get("port", 10500)) for cfg in config["models"].values() if isinstance(cfg, dict) and cfg.get("port") is not None}
+        port = 10500
+        while port in used_ports or not _port_free(port):
+            port += 1
+        
+        # Detect model type from path
+        model_path_lower = model_path_str.lower()
+        is_instruct = "instruct" in model_path_lower or "chat" in model_path_lower or "-it" in model_path_lower
+        model_type = "instruct" if is_instruct else "base"
+        
+        # Add new entry
+        config["models"][model_id] = {
+            "base_model": model_path_str,
+            "adapter_dir": None,
+            "model_type": model_type,
+            "port": port,
+            "use_4bit": True,
+            "system_prompt": ""
+        }
+        
+        # Save config
+        with open(config_path, 'w', encoding='utf-8') as f:
+            yaml.safe_dump(config, f, sort_keys=False, default_flow_style=False)
+        
+        return model_id
     
     def _create_status_widget(self, label: str, is_ok: bool, detail: str) -> QWidget:
         """Create a status indicator widget"""
@@ -2636,6 +2849,13 @@ class MainWindow(QMainWindow):
             # No server page, close immediately
             print("[DEBUG] No server page found - closing immediately")
             _do_close()
+
+        # Best-effort: also stop any persistent LLM servers we started
+        try:
+            from core.llm_server_manager import get_global_server_manager
+            get_global_server_manager().shutdown_all()
+        except Exception as e:
+            print(f"[DEBUG] Error shutting down LLM servers: {e}")
     
     def eventFilter(self, obj, event) -> bool:
         """Event filter to catch mouse events for window resizing from child widgets"""
@@ -2938,8 +3158,8 @@ class MainWindow(QMainWindow):
             # Home tab is now visible and needs update
             QTimer.singleShot(100, self._rebuild_home_tab)
             
-        # index 7 is Requirements tab
-        elif index == 7:
+        # Environment Manager tab: refresh requirements when entered
+        elif hasattr(self, "env_tab_index") and index == self.env_tab_index:
             self._refresh_requirements_grid()
 
     def _switch_tab(self, tab_widget: QTabWidget, index: int):
@@ -2947,12 +3167,37 @@ class MainWindow(QMainWindow):
         tab_widget.setCurrentIndex(index)
         
         # Update button checked states
-        buttons = [self.home_btn, self.download_btn, self.train_btn, self.test_btn, self.logs_btn, self.server_btn, self.mcp_btn, self.envs_btn, self.info_btn]
+        buttons = [
+            self.home_btn,
+            self.download_btn,
+            self.train_btn,
+            self.test_btn,
+            self.logs_btn,
+            self.server_btn,
+            self.mcp_btn,
+            self.envs_btn,
+            self.info_btn
+        ]
         for i, btn in enumerate(buttons):
             btn.setChecked(i == index)
         
         # Update corner_br image based on current tab
         self._update_frame_corner_br(index)
+
+    def _open_requirements_tab(self):
+        """Navigate to the Environment -> Requirements sub-tab reliably."""
+        try:
+            if hasattr(self, "env_page"):
+                env_idx = self.tabs.indexOf(self.env_page)
+                if env_idx != -1:
+                    self._switch_tab(self.tabs, env_idx)
+            if hasattr(self, "env_sub_tabs") and hasattr(self, "requirements_subtab"):
+                req_idx = self.env_sub_tabs.indexOf(self.requirements_subtab)
+                if req_idx != -1:
+                    self.env_sub_tabs.setCurrentIndex(req_idx)
+            self._refresh_requirements_grid()
+        except Exception:
+            pass
 
     def _rebuild_home_tab(self):
         """Safely rebuild Home tab with latest detection results."""
@@ -3447,7 +3692,7 @@ class MainWindow(QMainWindow):
         self.home_status_summary.setWordWrap(True)
         self.home_status_summary.setCursor(Qt.PointingHandCursor)
         # Clicking the warning takes you to the Requirements tab
-        self.home_status_summary.mousePressEvent = lambda e: self._switch_tab(self.tabs, 8)
+        self.home_status_summary.mousePressEvent = lambda e: self._open_requirements_tab()
         self.home_status_summary.hide()
         title_layout.addWidget(self.home_status_summary)
         
@@ -5742,6 +5987,100 @@ class MainWindow(QMainWindow):
 
     # ---------------- Test tab ----------------
     def _build_test_tab(self) -> QWidget:
+        """
+        Build test page with sub-tabs for:
+        - 🧪 Test (regular side-by-side inference)
+        - 🔧 Tool Chat (tool-enabled side-by-side inference)
+        
+        NOTE: These sub-pages are created eagerly (not lazy-loaded) to ensure
+        any startup refresh routines (e.g. `_refresh_locals`) can safely access
+        widgets like `test_model_a` without crashing the launcher.
+        """
+        from PySide6.QtWidgets import QTabWidget
+        
+        w = QWidget()
+        layout = QVBoxLayout(w)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        
+        # Sub-tabs
+        sub_tabs = QTabWidget()
+        sub_tabs.setStyleSheet("""
+            QTabWidget::pane {
+                border: none;
+                background: transparent;
+            }
+            QTabBar::tab {
+                background: rgba(30, 30, 40, 0.8);
+                color: white;
+                padding: 8px 16px;
+                border: none;
+                border-top-left-radius: 6px;
+                border-top-right-radius: 6px;
+            }
+            QTabBar::tab:selected {
+                background: rgba(102, 126, 234, 0.8);
+            }
+            QTabBar::tab:hover {
+                background: rgba(102, 126, 234, 0.6);
+            }
+        """)
+        
+        # Store reference so other code can navigate sub-tabs
+        self.test_sub_tabs = sub_tabs
+        self._test_sub_pages_created = {}  # kept for backward-compat, not used for eager pages
+        
+        # Eagerly create both pages to avoid startup crashes
+        test_page = self._build_test_sub_tab()
+        tool_chat_page = self._build_tool_chat_sub_tab()
+        sub_tabs.addTab(test_page, "🧪 Test")
+        sub_tabs.addTab(tool_chat_page, "🔧 Tool Chat")
+        
+        layout.addWidget(sub_tabs)
+        
+        return w
+    
+    def _lazy_load_test_sub_page(self, index: int):
+        """Lazy-load test sub-page when tab is first accessed"""
+        # Safety check: ensure _test_sub_pages_created exists
+        if not hasattr(self, '_test_sub_pages_created'):
+            self._test_sub_pages_created = {}
+        
+        if index in self._test_sub_pages_created:
+            return  # Already created
+
+        try:
+            if index == 0:  # Test sub-tab
+                page = self._build_test_sub_tab()
+                tab_text = "🧪 Test"
+            elif index == 1:  # Tool Chat sub-tab
+                page = self._build_tool_chat_sub_tab()
+                tab_text = "🔧 Tool Chat"
+            else:
+                return
+
+            # Replace placeholder with actual page
+            if hasattr(self, 'test_sub_tabs') and self.test_sub_tabs:
+                self.test_sub_tabs.removeTab(index)
+                self.test_sub_tabs.insertTab(index, page, tab_text)
+                self.test_sub_tabs.setCurrentIndex(index)
+                self._test_sub_pages_created[index] = page
+        except Exception as e:
+            import traceback
+            error_msg = f"Error loading test sub-page {index}: {e}"
+            print(error_msg)
+            traceback.print_exc()
+            # Write to log file for debugging
+            try:
+                from core.inference import get_app_root
+                log_path = get_app_root() / "logs" / "app.log"
+                with open(log_path, "a", encoding="utf-8") as f:
+                    f.write(f"\n{error_msg}\n{traceback.format_exc()}\n")
+            except:
+                pass
+    
+    def _build_test_sub_tab(self) -> QWidget:
+        """Build the regular test sub-tab (non-tool inference)"""
         w = QWidget()
         main_layout = QHBoxLayout(w)
         main_layout.setContentsMargins(15, 15, 15, 15)
@@ -5820,20 +6159,14 @@ class MainWindow(QMainWindow):
         
         settings_row.addWidget(gpu_frame, 2)  # 2/3 of space
         
-        # Tool calling toggle
+        # Tool calling is enabled in Test chat (always on).
+        # Use the "🔧 Tool Chat" sub-tab for a dedicated tool-log view.
         tool_frame = QGroupBox("🔧 Tool Calling")
         tool_layout = QVBoxLayout(tool_frame)
-        
-        self.test_enable_tools = QCheckBox("Enable Tool Use")
-        self.test_enable_tools.setChecked(False)
-        self.test_enable_tools.setStyleSheet("color: white; font-weight: bold;")
-        tool_layout.addWidget(self.test_enable_tools)
-        
-        tool_info = QLabel("Models can call tools autonomously. You'll approve dangerous operations.")
+        tool_info = QLabel("Tool calling is enabled in this chat. For a dedicated tool log, open the '🔧 Tool Chat' sub-tab above.")
         tool_info.setStyleSheet("color: #888; padding: 5px; font-size: 9pt;")
         tool_info.setWordWrap(True)
         tool_layout.addWidget(tool_info)
-        
         settings_row.addWidget(tool_frame, 1)  # 1/3 of space
         
         left_layout.addLayout(settings_row)
@@ -6191,6 +6524,414 @@ class MainWindow(QMainWindow):
 
         return w
     
+    def _build_tool_chat_sub_tab(self) -> QWidget:
+        """Build the tool chat sub-tab (tool-enabled inference)"""
+        from desktop_app.synchronized_chat_display import SynchronizedChatDisplay
+        from desktop_app.config.config_manager import ConfigManager
+        from core.models import list_local_downloads, get_app_root
+        import json
+        
+        w = QWidget()
+        layout = QVBoxLayout(w)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(12)
+        
+        # Top controls row
+        controls_row = QHBoxLayout()
+        controls_row.setSpacing(12)
+        
+        # Model selectors
+        controls_row.addWidget(QLabel("Model A:"))
+        self.tool_chat_model_a = QComboBox()
+        self.tool_chat_model_a.setMinimumWidth(250)
+        controls_row.addWidget(self.tool_chat_model_a, 1)
+        
+        controls_row.addWidget(QLabel("Model B:"))
+        self.tool_chat_model_b = QComboBox()
+        self.tool_chat_model_b.setMinimumWidth(250)
+        controls_row.addWidget(self.tool_chat_model_b, 1)
+        
+        controls_row.addWidget(QLabel("Model C:"))
+        self.tool_chat_model_c = QComboBox()
+        self.tool_chat_model_c.setMinimumWidth(250)
+        controls_row.addWidget(self.tool_chat_model_c, 1)
+        
+        # Enable tools checkbox (always enabled)
+        enable_tools_check = QCheckBox("Enable Tools")
+        enable_tools_check.setChecked(True)
+        enable_tools_check.setEnabled(False)
+        enable_tools_check.setStyleSheet("color: white; font-weight: bold;")
+        controls_row.addWidget(enable_tools_check)
+        
+        # Clear chat button
+        clear_btn = QPushButton("🗑️ Clear")
+        clear_btn.clicked.connect(lambda: self._clear_tool_chat())
+        controls_row.addWidget(clear_btn)
+        
+        layout.addLayout(controls_row)
+        
+        # Main layout: Chat display on left, tool log on right
+        main_splitter = QSplitter(Qt.Horizontal)
+        
+        # Left: Chat display (multi-model synchronized)
+        left_widget = QWidget()
+        left_layout = QVBoxLayout(left_widget)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.setSpacing(8)
+        
+        # Chat display for multiple models
+        self.tool_chat_display = SynchronizedChatDisplay(num_models=3)
+        self.tool_chat_display.set_theme(self.dark_mode)
+        left_layout.addWidget(self.tool_chat_display, 1)
+        
+        # Input area
+        input_frame = QFrame()
+        input_frame.setStyleSheet("""
+            QFrame {
+                background: rgba(30, 30, 40, 0.9);
+                border: 1px solid rgba(102, 126, 234, 0.3);
+                border-radius: 8px;
+                padding: 8px;
+            }
+        """)
+        input_layout = QVBoxLayout(input_frame)
+        input_layout.setSpacing(8)
+        
+        input_label = QLabel("<b>💬 Type your message:</b>")
+        input_layout.addWidget(input_label)
+        
+        self.tool_chat_input = QTextEdit()
+        self.tool_chat_input.setPlaceholderText("Type your message here...")
+        self.tool_chat_input.setMinimumHeight(90)
+        self.tool_chat_input.setMaximumHeight(90)
+        self.tool_chat_input.setStyleSheet("""
+            QTextEdit {
+                background: rgba(40, 40, 50, 0.9);
+                border: 1px solid rgba(102, 126, 234, 0.2);
+                border-radius: 4px;
+                color: white;
+                padding: 8px;
+                font-size: 11pt;
+            }
+        """)
+        input_layout.addWidget(self.tool_chat_input)
+        
+        send_layout = QHBoxLayout()
+        send_layout.addStretch()
+        
+        self.tool_chat_send_btn = QPushButton("📤 Send")
+        self.tool_chat_send_btn.setMinimumWidth(120)
+        self.tool_chat_send_btn.clicked.connect(self._send_tool_chat_message)
+        send_layout.addWidget(self.tool_chat_send_btn)
+        
+        input_layout.addLayout(send_layout)
+        left_layout.addWidget(input_frame)
+        
+        main_splitter.addWidget(left_widget)
+        
+        # Right: Tool execution log
+        right_widget = QWidget()
+        right_layout = QVBoxLayout(right_widget)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        right_layout.setSpacing(8)
+        
+        log_title = QLabel("Tool Execution Log")
+        log_title.setStyleSheet("color: white; font-weight: bold; font-size: 12pt;")
+        right_layout.addWidget(log_title)
+        
+        self.tool_chat_log_display = QTextEdit()
+        self.tool_chat_log_display.setReadOnly(True)
+        self.tool_chat_log_display.setStyleSheet("""
+            QTextEdit {
+                background: rgba(20, 20, 30, 0.8);
+                border: 1px solid rgba(102, 126, 234, 0.3);
+                border-radius: 8px;
+                color: #cccccc;
+                padding: 12px;
+                font-family: 'Consolas', 'Courier New', monospace;
+                font-size: 10pt;
+            }
+        """)
+        right_layout.addWidget(self.tool_chat_log_display, 1)
+        
+        main_splitter.addWidget(right_widget)
+        
+        # Set initial splitter sizes (75% chat, 25% log)
+        main_splitter.setSizes([750, 250])
+        
+        layout.addWidget(main_splitter, 1)
+        
+        # Initialize tool workers
+        self.tool_chat_worker_a = None
+        self.tool_chat_worker_b = None
+        self.tool_chat_worker_c = None
+        
+        # Load models
+        QTimer.singleShot(100, self._load_tool_chat_models)
+        
+        return w
+
+    def _map_tool_column(self, col: str) -> str:
+        """
+        Map worker/UI column identifiers to SynchronizedChatDisplay columns.
+        ToolInferenceWorker emits model_column like 'model_a'/'model_b'/'model_c'.
+        SynchronizedChatDisplay expects 'a'/'b'/'c'.
+        """
+        c = (col or "").strip().lower()
+        if c in ("a", "model_a", "modela"):
+            return "a"
+        if c in ("b", "model_b", "modelb"):
+            return "b"
+        if c in ("c", "model_c", "modelc"):
+            return "c"
+        return c[:1] if c else "a"
+    
+    def _load_tool_chat_models(self):
+        """Load available models into tool chat selectors"""
+        try:
+            models = list_local_downloads()
+            download_root = get_app_root() / "models"
+            
+            for selector in [self.tool_chat_model_a, self.tool_chat_model_b, self.tool_chat_model_c]:
+                selector.clear()
+                if not models:
+                    selector.addItem("(No models downloaded)", None)
+                else:
+                    for model_name in models:
+                        model_path = download_root / model_name
+                        selector.addItem(model_name, str(model_path))
+        except Exception as e:
+            for selector in [self.tool_chat_model_a, self.tool_chat_model_b, self.tool_chat_model_c]:
+                selector.addItem(f"(Error: {e})", None)
+    
+    def _clear_tool_chat(self):
+        """Clear tool chat history"""
+        if hasattr(self, 'tool_chat_display'):
+            self.tool_chat_display.clear()
+            self.tool_chat_log_display.clear()
+            self.tool_chat_display.add_user_message("=== Chat cleared ===")
+    
+    def _send_tool_chat_message(self):
+        """Send message and run tool-enabled inference for all selected models"""
+        message = self.tool_chat_input.toPlainText().strip()
+        if not message:
+            return
+        
+        # Get selected models
+        model_a_path = self.tool_chat_model_a.currentData()
+        model_b_path = self.tool_chat_model_b.currentData()
+        model_c_path = self.tool_chat_model_c.currentData()
+        
+        # Check if at least one model is selected
+        has_model = (
+            (model_a_path and model_a_path != "(No models downloaded)") or
+            (model_b_path and model_b_path != "(No models downloaded)") or
+            (model_c_path and model_c_path != "(No models downloaded)")
+        )
+        
+        if not has_model:
+            QMessageBox.warning(self, "No Model", "Please select at least one model.")
+            return
+        
+        # Clear input
+        self.tool_chat_input.clear()
+        self.tool_chat_input.setEnabled(False)
+        self.tool_chat_send_btn.setEnabled(False)
+        
+        # Display user message
+        self.tool_chat_display.add_user_message(message)
+        
+        # Start responses for each model
+        if model_a_path and model_a_path != "(No models downloaded)":
+            self.tool_chat_display.start_model_a_response()
+            self._run_tool_chat_inference_a(model_a_path, message)
+        
+        if model_b_path and model_b_path != "(No models downloaded)":
+            self.tool_chat_display.start_model_b_response()
+            self._run_tool_chat_inference_b(model_b_path, message)
+        
+        if model_c_path and model_c_path != "(No models downloaded)":
+            self.tool_chat_display.start_model_c_response()
+            self._run_tool_chat_inference_c(model_c_path, message)
+    
+    def _run_tool_chat_inference_a(self, model_path: str, prompt: str, system_prompt: str = ""):
+        """Run tool-enabled inference for Model A in tool chat"""
+        try:
+            model_id = self._resolve_model_id_from_path(model_path)
+        except Exception as e:
+            error_msg = f"[ERROR] Failed to resolve model_id: {e}"
+            self.tool_chat_display.update_model_a_response(error_msg)
+            self.tool_chat_input.setEnabled(True)
+            self.tool_chat_send_btn.setEnabled(True)
+            return
+        
+        if self.tool_chat_worker_a and self.tool_chat_worker_a.isRunning():
+            self.tool_chat_worker_a.quit()
+            self.tool_chat_worker_a.wait()
+        
+        self.tool_chat_worker_a = ToolInferenceWorker(prompt, model_id, "model_a", system_prompt)
+        self._tool_chat_progress_a = ""
+        self.tool_chat_worker_a.progress_update.connect(
+            lambda msg: self._on_tool_chat_progress_update("a", msg)
+        )
+        self.tool_chat_worker_a.tool_call_detected.connect(
+            lambda name, args, col: self._on_tool_chat_tool_call(name, args, col)
+        )
+        self.tool_chat_worker_a.tool_result_received.connect(
+            lambda name, result, success, col: self._on_tool_chat_tool_result(name, result, success, col)
+        )
+        self.tool_chat_worker_a.inference_finished.connect(self._on_tool_chat_finished_a)
+        self.tool_chat_worker_a.inference_failed.connect(
+            lambda error, col: self.tool_chat_display.update_model_a_response(error)
+        )
+        self.tool_chat_worker_a.start()
+    
+    def _run_tool_chat_inference_b(self, model_path: str, prompt: str, system_prompt: str = ""):
+        """Run tool-enabled inference for Model B in tool chat"""
+        try:
+            model_id = self._resolve_model_id_from_path(model_path)
+        except Exception as e:
+            error_msg = f"[ERROR] Failed to resolve model_id: {e}"
+            self.tool_chat_display.update_model_b_response(error_msg)
+            self.tool_chat_input.setEnabled(True)
+            self.tool_chat_send_btn.setEnabled(True)
+            return
+        
+        if self.tool_chat_worker_b and self.tool_chat_worker_b.isRunning():
+            self.tool_chat_worker_b.quit()
+            self.tool_chat_worker_b.wait()
+        
+        self.tool_chat_worker_b = ToolInferenceWorker(prompt, model_id, "model_b", system_prompt)
+        self._tool_chat_progress_b = ""
+        self.tool_chat_worker_b.progress_update.connect(
+            lambda msg: self._on_tool_chat_progress_update("b", msg)
+        )
+        self.tool_chat_worker_b.tool_call_detected.connect(
+            lambda name, args, col: self._on_tool_chat_tool_call(name, args, col)
+        )
+        self.tool_chat_worker_b.tool_result_received.connect(
+            lambda name, result, success, col: self._on_tool_chat_tool_result(name, result, success, col)
+        )
+        self.tool_chat_worker_b.inference_finished.connect(self._on_tool_chat_finished_b)
+        self.tool_chat_worker_b.inference_failed.connect(
+            lambda error, col: self.tool_chat_display.update_model_b_response(error)
+        )
+        self.tool_chat_worker_b.start()
+    
+    def _run_tool_chat_inference_c(self, model_path: str, prompt: str, system_prompt: str = ""):
+        """Run tool-enabled inference for Model C in tool chat"""
+        try:
+            model_id = self._resolve_model_id_from_path(model_path)
+        except Exception as e:
+            error_msg = f"[ERROR] Failed to resolve model_id: {e}"
+            self.tool_chat_display.update_model_c_response(error_msg)
+            self.tool_chat_input.setEnabled(True)
+            self.tool_chat_send_btn.setEnabled(True)
+            return
+        
+        if self.tool_chat_worker_c and self.tool_chat_worker_c.isRunning():
+            self.tool_chat_worker_c.quit()
+            self.tool_chat_worker_c.wait()
+        
+        self.tool_chat_worker_c = ToolInferenceWorker(prompt, model_id, "model_c", system_prompt)
+        self._tool_chat_progress_c = ""
+        self.tool_chat_worker_c.progress_update.connect(
+            lambda msg: self._on_tool_chat_progress_update("c", msg)
+        )
+        self.tool_chat_worker_c.tool_call_detected.connect(
+            lambda name, args, col: self._on_tool_chat_tool_call(name, args, col)
+        )
+        self.tool_chat_worker_c.tool_result_received.connect(
+            lambda name, result, success, col: self._on_tool_chat_tool_result(name, result, success, col)
+        )
+        self.tool_chat_worker_c.inference_finished.connect(self._on_tool_chat_finished_c)
+        self.tool_chat_worker_c.inference_failed.connect(
+            lambda error, col: self.tool_chat_display.update_model_c_response(error)
+        )
+        self.tool_chat_worker_c.start()
+    
+    def _on_tool_chat_tool_call(self, tool_name: str, args: dict, model_column: str):
+        """Handle tool call in tool chat"""
+        col = self._map_tool_column(model_column)
+        self.tool_chat_display.add_tool_call(tool_name, args, col)
+        self.tool_chat_log_display.append(f"[{col.upper()}] Tool call: {tool_name}({json.dumps(args)})")
+    
+    def _on_tool_chat_tool_result(self, tool_name: str, result: object, success: bool, model_column: str):
+        """Handle tool result in tool chat"""
+        col = self._map_tool_column(model_column)
+        self.tool_chat_display.add_tool_result({"tool": tool_name, "result": result}, col, success)
+        status = "✓" if success else "✗"
+        self.tool_chat_log_display.append(f"[{col.upper()}] {status} {tool_name}: {json.dumps(result)[:200]}")
+    
+    def _on_tool_chat_finished_a(self, final_output: str, tool_log: list, model_column: str):
+        """Handle completion for Model A in tool chat"""
+        text = final_output
+        if tool_log:
+            text += f"\n\n[Tools Used: {len(tool_log)}]"
+        self._tool_chat_progress_a = text
+        self.tool_chat_display.update_model_a_response(text)
+        self._check_tool_chat_all_finished()
+    
+    def _on_tool_chat_finished_b(self, final_output: str, tool_log: list, model_column: str):
+        """Handle completion for Model B in tool chat"""
+        text = final_output
+        if tool_log:
+            text += f"\n\n[Tools Used: {len(tool_log)}]"
+        self._tool_chat_progress_b = text
+        self.tool_chat_display.update_model_b_response(text)
+        self._check_tool_chat_all_finished()
+    
+    def _on_tool_chat_finished_c(self, final_output: str, tool_log: list, model_column: str):
+        """Handle completion for Model C in tool chat"""
+        text = final_output
+        if tool_log:
+            text += f"\n\n[Tools Used: {len(tool_log)}]"
+        self._tool_chat_progress_c = text
+        self.tool_chat_display.update_model_c_response(text)
+        self._check_tool_chat_all_finished()
+
+    def _on_tool_chat_progress_update(self, which: str, msg: str):
+        """Append progress text to the correct model bubble (tool chat)."""
+        if which == "a":
+            current = getattr(self, "_tool_chat_progress_a", "") or ""
+            current = (current + "\n" + msg).strip() if current else msg
+            self._tool_chat_progress_a = current
+            self.tool_chat_display.update_model_a_response(current)
+        elif which == "b":
+            current = getattr(self, "_tool_chat_progress_b", "") or ""
+            current = (current + "\n" + msg).strip() if current else msg
+            self._tool_chat_progress_b = current
+            self.tool_chat_display.update_model_b_response(current)
+        elif which == "c":
+            current = getattr(self, "_tool_chat_progress_c", "") or ""
+            current = (current + "\n" + msg).strip() if current else msg
+            self._tool_chat_progress_c = current
+            self.tool_chat_display.update_model_c_response(current)
+    
+    def _check_tool_chat_all_finished(self):
+        """Check if all tool chat workers have finished"""
+        all_finished = True
+        
+        model_a_path = self.tool_chat_model_a.currentData()
+        model_b_path = self.tool_chat_model_b.currentData()
+        model_c_path = self.tool_chat_model_c.currentData()
+        
+        if model_a_path and model_a_path != "(No models downloaded)":
+            if self.tool_chat_worker_a and self.tool_chat_worker_a.isRunning():
+                all_finished = False
+        
+        if model_b_path and model_b_path != "(No models downloaded)":
+            if self.tool_chat_worker_b and self.tool_chat_worker_b.isRunning():
+                all_finished = False
+        
+        if model_c_path and model_c_path != "(No models downloaded)":
+            if self.tool_chat_worker_c and self.tool_chat_worker_c.isRunning():
+                all_finished = False
+        
+        if all_finished:
+            self.tool_chat_input.setEnabled(True)
+            self.tool_chat_send_btn.setEnabled(True)
+    
     def _run_side_by_side_test(self) -> None:
         """Run inference on both models simultaneously"""
         user_prompt = self.test_prompt.toPlainText().strip()
@@ -6411,10 +7152,9 @@ class MainWindow(QMainWindow):
     
     def _run_inference_a(self, model_path: str, prompt: str, system_prompt: str = ""):
         """Run inference for Model A using QProcess"""
-        # Check if tools are enabled
-        if hasattr(self, 'test_enable_tools') and self.test_enable_tools.isChecked():
-            self._run_inference_a_with_tools(model_path, prompt, system_prompt)
-            return
+        # Tool calling is ALWAYS ON in Test chat.
+        self._run_inference_a_with_tools(model_path, prompt, system_prompt)
+        return
         
         # Reset buffer
         self.inference_buffer_a = ""
@@ -6589,7 +7329,7 @@ class MainWindow(QMainWindow):
                 QTimer.singleShot(0, lambda: self._show_env_issue_popup(
                     "Model load failed",
                     "A model failed to load due to a compilation/runtime dependency issue.\n\n"
-                    "Click 'Run Repair Environment' to apply the automatic fixes, or open Requirements to install the missing components.",
+                    "Click '🔧 Repair Environment' (safe, non-destructive) or '🗑️ Rebuild Environment' (deletes everything) to fix issues.",
                     details=tail or None
                 ))
 
@@ -6629,7 +7369,17 @@ class MainWindow(QMainWindow):
     def _run_inference_a_with_tools(self, model_path: str, prompt: str, system_prompt: str = ""):
         """Run inference for Model A with tool calling support (non-blocking)"""
         # Show starting message
-        self.chat_display.update_model_a_response("[INFO] Starting tool-enabled inference...\n(This may take several minutes on first run)")
+        start_msg = "[INFO] Starting tool-enabled inference...\n(This may take several minutes on first run)"
+        self._tool_progress_a = start_msg
+        self.chat_display.update_model_a_response(self._tool_progress_a)
+        
+        # Resolve model_id from model_path
+        try:
+            model_id = self._resolve_model_id_from_path(model_path)
+        except Exception as e:
+            error_msg = f"[ERROR] Failed to resolve model_id from path: {e}"
+            self.chat_display.update_model_a_response(error_msg)
+            return
         
         # Stop any existing worker
         if hasattr(self, 'tool_worker_a') and self.tool_worker_a is not None:
@@ -6640,22 +7390,22 @@ class MainWindow(QMainWindow):
         # Create worker thread
         self.tool_worker_a = ToolInferenceWorker(
             prompt=prompt,
-            model_id="default",
+            model_id=model_id,
             model_column="model_a",
             system_prompt=system_prompt
         )
         
         # Connect signals
         self.tool_worker_a.progress_update.connect(
-            lambda msg: self.chat_display.update_model_a_response(
-                self.chat_display.model_a_bubble.toPlainText() + "\n" + msg
-            )
+            lambda msg: self._on_tool_progress_update("a", msg)
         )
         self.tool_worker_a.tool_call_detected.connect(
-            lambda name, args, col: self.chat_display.add_tool_call(name, args, col)
+            lambda name, args, col: self.chat_display.add_tool_call(name, args, self._map_tool_column(col))
         )
         self.tool_worker_a.tool_result_received.connect(
-            lambda name, result, success, col: self.chat_display.add_tool_result(name, result, success, col)
+            lambda name, result, success, col: self.chat_display.add_tool_result(
+                {"tool": name, "result": result}, self._map_tool_column(col), success
+            )
         )
         self.tool_worker_a.inference_finished.connect(self._on_tool_inference_finished_a)
         self.tool_worker_a.inference_failed.connect(
@@ -6667,19 +7417,35 @@ class MainWindow(QMainWindow):
     
     def _on_tool_inference_finished_a(self, final_output: str, tool_log: list, model_column: str):
         """Handle completion of tool inference for Model A"""
-        self.chat_display.update_model_a_response(final_output)
+        text = final_output
         if tool_log:
-            summary = f"\n\n[Tools Used: {len(tool_log)}]"
-            self.chat_display.update_model_a_response(
-                self.chat_display.model_a_bubble.toPlainText() + summary
-            )
+            text += f"\n\n[Tools Used: {len(tool_log)}]"
+        self._tool_progress_a = text
+        self.chat_display.update_model_a_response(text)
+
+    def _on_tool_progress_update(self, which: str, msg: str):
+        """Append progress text to the correct model bubble (test chat)."""
+        if which == "a":
+            current = getattr(self, "_tool_progress_a", "") or ""
+            current = (current + "\n" + msg).strip() if current else msg
+            self._tool_progress_a = current
+            self.chat_display.update_model_a_response(current)
+        elif which == "b":
+            current = getattr(self, "_tool_progress_b", "") or ""
+            current = (current + "\n" + msg).strip() if current else msg
+            self._tool_progress_b = current
+            self.chat_display.update_model_b_response(current)
+        elif which == "c":
+            current = getattr(self, "_tool_progress_c", "") or ""
+            current = (current + "\n" + msg).strip() if current else msg
+            self._tool_progress_c = current
+            self.chat_display.update_model_c_response(current)
     
     def _run_inference_b(self, model_path: str, prompt: str, system_prompt: str = ""):
         """Run inference for Model B using QProcess"""
-        # Check if tools are enabled
-        if hasattr(self, 'test_enable_tools') and self.test_enable_tools.isChecked():
-            self._run_inference_b_with_tools(model_path, prompt, system_prompt)
-            return
+        # Tool calling is ALWAYS ON in Test chat.
+        self._run_inference_b_with_tools(model_path, prompt, system_prompt)
+        return
         
         # Reset buffer
         self.inference_buffer_b = ""
@@ -6850,7 +7616,7 @@ class MainWindow(QMainWindow):
                 QTimer.singleShot(0, lambda: self._show_env_issue_popup(
                     "Model load failed",
                     "A model failed to load due to a compilation/runtime dependency issue.\n\n"
-                    "Click 'Run Repair Environment' to apply the automatic fixes, or open Requirements to install the missing components.",
+                    "Click '🔧 Repair Environment' (safe, non-destructive) or '🗑️ Rebuild Environment' (deletes everything) to fix issues.",
                     details=tail or None
                 ))
 
@@ -6888,30 +7654,40 @@ class MainWindow(QMainWindow):
     
     def _run_inference_b_with_tools(self, model_path: str, prompt: str, system_prompt: str = ""):
         """Run inference for Model B with tool calling support (non-blocking)"""
-        self.chat_display.update_model_b_response("[INFO] Starting tool-enabled inference...\n(This may take several minutes on first run)")
-        
+        start_msg = "[INFO] Starting tool-enabled inference...\n(This may take several minutes on first run)"
+        self._tool_progress_b = start_msg
+        self.chat_display.update_model_b_response(self._tool_progress_b)
+
+        # Resolve model_id from model_path
+        try:
+            model_id = self._resolve_model_id_from_path(model_path)
+        except Exception as e:
+            error_msg = f"[ERROR] Failed to resolve model_id from path: {e}"
+            self.chat_display.update_model_b_response(error_msg)
+            return
+
         if hasattr(self, 'tool_worker_b') and self.tool_worker_b is not None:
             if self.tool_worker_b.isRunning():
                 self.tool_worker_b.quit()
                 self.tool_worker_b.wait()
-        
+
         self.tool_worker_b = ToolInferenceWorker(
             prompt=prompt,
-            model_id="default",
+            model_id=model_id,
             model_column="model_b",
             system_prompt=system_prompt
         )
         
         self.tool_worker_b.progress_update.connect(
-            lambda msg: self.chat_display.update_model_b_response(
-                self.chat_display.model_b_bubble.toPlainText() + "\n" + msg
-            )
+            lambda msg: self._on_tool_progress_update("b", msg)
         )
         self.tool_worker_b.tool_call_detected.connect(
-            lambda name, args, col: self.chat_display.add_tool_call(name, args, col)
+            lambda name, args, col: self.chat_display.add_tool_call(name, args, self._map_tool_column(col))
         )
         self.tool_worker_b.tool_result_received.connect(
-            lambda name, result, success, col: self.chat_display.add_tool_result(name, result, success, col)
+            lambda name, result, success, col: self.chat_display.add_tool_result(
+                {"tool": name, "result": result}, self._map_tool_column(col), success
+            )
         )
         self.tool_worker_b.inference_finished.connect(self._on_tool_inference_finished_b)
         self.tool_worker_b.inference_failed.connect(
@@ -6922,19 +7698,17 @@ class MainWindow(QMainWindow):
     
     def _on_tool_inference_finished_b(self, final_output: str, tool_log: list, model_column: str):
         """Handle completion of tool inference for Model B"""
-        self.chat_display.update_model_b_response(final_output)
+        text = final_output
         if tool_log:
-            summary = f"\n\n[Tools Used: {len(tool_log)}]"
-            self.chat_display.update_model_b_response(
-                self.chat_display.model_b_bubble.toPlainText() + summary
-            )
+            text += f"\n\n[Tools Used: {len(tool_log)}]"
+        self._tool_progress_b = text
+        self.chat_display.update_model_b_response(text)
     
     def _run_inference_c(self, model_path: str, prompt: str, system_prompt: str = ""):
         """Run inference for Model C using QProcess"""
-        # Check if tools are enabled
-        if hasattr(self, 'test_enable_tools') and self.test_enable_tools.isChecked():
-            self._run_inference_c_with_tools(model_path, prompt, system_prompt)
-            return
+        # Tool calling is ALWAYS ON in Test chat.
+        self._run_inference_c_with_tools(model_path, prompt, system_prompt)
+        return
         
         # Reset buffer
         if not hasattr(self, 'inference_buffer_c'):
@@ -7111,7 +7885,7 @@ class MainWindow(QMainWindow):
                 QTimer.singleShot(0, lambda: self._show_env_issue_popup(
                     "Model load failed",
                     "A model failed to load due to a compilation/runtime dependency issue.\n\n"
-                    "Click 'Run Repair Environment' to apply the automatic fixes, or open Requirements to install the missing components.",
+                    "Click '🔧 Repair Environment' (safe, non-destructive) or '🗑️ Rebuild Environment' (deletes everything) to fix issues.",
                     details=tail or None
                 ))
 
@@ -7132,29 +7906,40 @@ class MainWindow(QMainWindow):
     def _run_inference_c_with_tools(self, model_path: str, prompt: str, system_prompt: str = ""):
         """Run inference for Model C with tool calling support (non-blocking)"""
         self.chat_display.update_model_c_response("[INFO] Starting tool-enabled inference...\n(This may take several minutes on first run)")
-        
+        start_msg = "[INFO] Starting tool-enabled inference...\n(This may take several minutes on first run)"
+        self._tool_progress_c = start_msg
+        self.chat_display.update_model_c_response(self._tool_progress_c)
+
+        # Resolve model_id from model_path
+        try:
+            model_id = self._resolve_model_id_from_path(model_path)
+        except Exception as e:
+            error_msg = f"[ERROR] Failed to resolve model_id from path: {e}"
+            self.chat_display.update_model_c_response(error_msg)
+            return
+
         if hasattr(self, 'tool_worker_c') and self.tool_worker_c is not None:
             if self.tool_worker_c.isRunning():
                 self.tool_worker_c.quit()
                 self.tool_worker_c.wait()
-        
+
         self.tool_worker_c = ToolInferenceWorker(
             prompt=prompt,
-            model_id="default",
+            model_id=model_id,
             model_column="model_c",
             system_prompt=system_prompt
         )
         
         self.tool_worker_c.progress_update.connect(
-            lambda msg: self.chat_display.update_model_c_response(
-                self.chat_display.model_c_bubble.toPlainText() + "\n" + msg
-            )
+            lambda msg: self._on_tool_progress_update("c", msg)
         )
         self.tool_worker_c.tool_call_detected.connect(
-            lambda name, args, col: self.chat_display.add_tool_call(name, args, col)
+            lambda name, args, col: self.chat_display.add_tool_call(name, args, self._map_tool_column(col))
         )
         self.tool_worker_c.tool_result_received.connect(
-            lambda name, result, success, col: self.chat_display.add_tool_result(name, result, success, col)
+            lambda name, result, success, col: self.chat_display.add_tool_result(
+                {"tool": name, "result": result}, self._map_tool_column(col), success
+            )
         )
         self.tool_worker_c.inference_finished.connect(self._on_tool_inference_finished_c)
         self.tool_worker_c.inference_failed.connect(
@@ -7165,12 +7950,11 @@ class MainWindow(QMainWindow):
     
     def _on_tool_inference_finished_c(self, final_output: str, tool_log: list, model_column: str):
         """Handle completion of tool inference for Model C"""
-        self.chat_display.update_model_c_response(final_output)
+        text = final_output
         if tool_log:
-            summary = f"\n\n[Tools Used: {len(tool_log)}]"
-            self.chat_display.update_model_c_response(
-                self.chat_display.model_c_bubble.toPlainText() + summary
-            )
+            text += f"\n\n[Tools Used: {len(tool_log)}]"
+        self._tool_progress_c = text
+        self.chat_display.update_model_c_response(text)
     
     def _on_inference_finished_c(self, exit_code: int = 0, exit_status=None):
         """Called when Model C inference finishes"""
@@ -8018,6 +8802,66 @@ except Exception as e:
         self.refresh_btn.clicked.connect(self._refresh_requirements_grid)
         col3_layout.addWidget(self.refresh_btn)
         
+        # Environment-wide action buttons
+        env_actions_widget = QWidget()
+        env_actions_layout = QHBoxLayout(env_actions_widget)
+        env_actions_layout.setContentsMargins(0, 0, 0, 0)
+        env_actions_layout.setSpacing(10)
+        
+        # Repair Environment button (non-destructive)
+        self.repair_env_btn = QPushButton("🔧 Repair Environment")
+        self.repair_env_btn.setStyleSheet("""
+            QPushButton {
+                background: rgba(255, 152, 0, 0.6);
+                color: #ffffff;
+                border: 1px solid rgba(255, 152, 0, 0.8);
+                padding: 10px 16px;
+                border-radius: 6px;
+                font-weight: 600;
+                font-size: 10pt;
+            }
+            QPushButton:hover {
+                background: rgba(255, 152, 0, 0.8);
+                border: 1px solid rgba(255, 152, 0, 1.0);
+            }
+            QPushButton:disabled {
+                background: rgba(255, 152, 0, 0.3);
+                color: rgba(255, 255, 255, 0.4);
+                border: 1px solid rgba(255, 152, 0, 0.45);
+            }
+        """)
+        self.repair_env_btn.setToolTip("Fix broken/missing packages without deleting the environment")
+        self.repair_env_btn.clicked.connect(self._on_repair_environment)
+        env_actions_layout.addWidget(self.repair_env_btn)
+        
+        # Rebuild Environment button (destructive)
+        self.rebuild_env_btn = QPushButton("🗑️ Rebuild Environment")
+        self.rebuild_env_btn.setStyleSheet("""
+            QPushButton {
+                background: rgba(244, 67, 54, 0.6);
+                color: #ffffff;
+                border: 1px solid rgba(244, 67, 54, 0.8);
+                padding: 10px 16px;
+                border-radius: 6px;
+                font-weight: 600;
+                font-size: 10pt;
+            }
+            QPushButton:hover {
+                background: rgba(244, 67, 54, 0.8);
+                border: 1px solid rgba(244, 67, 54, 1.0);
+            }
+            QPushButton:disabled {
+                background: rgba(244, 67, 54, 0.3);
+                color: rgba(255, 255, 255, 0.4);
+                border: 1px solid rgba(244, 67, 54, 0.45);
+            }
+        """)
+        self.rebuild_env_btn.setToolTip("Delete environment and wheelhouse, then reinstall everything from scratch")
+        self.rebuild_env_btn.clicked.connect(self._on_rebuild_environment)
+        env_actions_layout.addWidget(self.rebuild_env_btn)
+        
+        col3_layout.addWidget(env_actions_widget)
+        
         # Title section with divider
         title_section = QWidget()
         title_layout = QVBoxLayout(title_section)
@@ -8334,12 +9178,6 @@ except Exception as e:
             if pkg_name not in required_packages:
                 required_packages[pkg_name] = "Binary (wheel)"
         
-        # Add any remaining defaults
-        defaults = {"unsloth": "Latest"}
-        for pkg, ver in defaults.items():
-            if pkg not in required_packages:
-                required_packages[pkg] = ver
-        
         # Sort packages by importance
         priority_order = [
             "torch", "transformers", "peft", "datasets", "accelerate", "bitsandbytes",
@@ -8350,7 +9188,7 @@ except Exception as e:
             "pandas", "tqdm", "packaging", "requests", "pyyaml",
             "einops", "timm", "open-clip-torch",
             "evaluate", "sentencepiece", "sympy", "jinja2", "fsspec", "filelock",
-            "mpmath", "regex", "psutil", "streamlit", "unsloth"
+            "mpmath", "regex", "psutil", "streamlit", "uvicorn", "fastapi", "pydantic", "unsloth"
         ]
         
         all_packages = list(required_packages.keys())
@@ -8400,7 +9238,10 @@ except Exception as e:
             "mpmath": "Arbitrary precision floating-point arithmetic.",
             "regex": "Alternative regular expression module.",
             "psutil": "Cross-platform system and process utilities.",
-            "streamlit": "Web framework for machine learning apps."
+            "streamlit": "Web framework for machine learning apps.",
+            "uvicorn": "ASGI server for high-performance Python web services (Inference Server).",
+            "fastapi": "Modern web framework for building APIs (Inference Server).",
+            "pydantic": "Data validation and settings management using Python type annotations."
         }
         
         # Split into two columns (alternating)
@@ -8592,21 +9433,20 @@ except Exception as e:
                 box.setDetailedText(details)
 
             open_req_btn = box.addButton("Open Requirements", QMessageBox.AcceptRole)
-            run_repair_btn = box.addButton("Run Repair Environment", QMessageBox.DestructiveRole)
+            run_repair_btn = box.addButton("🔧 Repair Environment", QMessageBox.AcceptRole)
             box.addButton("Close", QMessageBox.RejectRole)
-
+            
             box.exec()
             clicked = box.clickedButton()
             if clicked == open_req_btn:
                 try:
-                    self._switch_tab(self.tabs, 7)
-                    self._refresh_requirements_grid()
+                    self._open_requirements_tab()
                 except Exception:
                     pass
             elif clicked == run_repair_btn:
                 try:
-                    self._switch_tab(self.tabs, 7)
-                    # Trigger the full installer repair flow (autonomous fixes)
+                    self._open_requirements_tab()
+                    # Trigger the non-destructive repair flow
                     self._on_repair_environment()
                 except Exception:
                     pass
@@ -8686,7 +9526,7 @@ except Exception as e:
                 QTimer.singleShot(0, lambda: self._show_env_issue_popup(
                     "Environment needs attention",
                     "Some required components are missing/broken.\n\n"
-                    "Click 'Run Repair Environment' to apply the automatic fixes, or open Requirements to install the missing components.",
+                    "Click '🔧 Repair Environment' (safe, non-destructive) or '🗑️ Rebuild Environment' (deletes everything) to fix issues.",
                     details=summary
                 ))
         except Exception:
@@ -9012,7 +9852,8 @@ except Exception as e:
                 elif version_spec.startswith(("==", ">=", "<")):
                     package_spec = f"{pkg_name}{version_spec}"
                 else:
-                    package_spec = pkg_name
+                    # Default: exact pin
+                    package_spec = f"{pkg_name}=={version_spec}"
             else:
                 package_spec = pkg_name
             self.requirements_log.append(f"<b>Installing {pkg_name}...</b><br>")
@@ -9038,7 +9879,22 @@ except Exception as e:
         self._run_installer_task("dependencies", "Installing requirements...")
 
     def _on_repair_environment(self):
+        """Non-destructive repair: fix broken/missing packages without deleting .venv"""
         self._run_installer_task("repair", "Repairing environment...")
+    
+    def _on_rebuild_environment(self):
+        """Destructive rebuild: delete .venv and wheelhouse, then reinstall everything"""
+        confirm = QMessageBox.warning(
+            self,
+            "Confirm Rebuild",
+            "This will DELETE the existing environment and wheelhouse, then reinstall everything.\n\n"
+            "This is a destructive operation that cannot be undone.\n\n"
+            "Do you want to continue?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+        if confirm == QMessageBox.Yes:
+            self._run_installer_task("rebuild", "Rebuilding environment from scratch...")
 
     def _on_uninstall_requirements(self):
         confirm = QMessageBox.question(self, "Confirm Uninstall", "Are you sure you want to uninstall all managed packages?", QMessageBox.Yes | QMessageBox.No)
@@ -9085,7 +9941,7 @@ except Exception as e:
                 QTimer.singleShot(0, lambda: self._show_env_issue_popup(
                     "Repair failed",
                     "The automatic repair started but failed.\n\n"
-                    "Click 'Run Repair Environment' to retry after fixes, or open Requirements to inspect and install missing items.",
+                    "Click '🔧 Repair Environment' to retry (safe), or '🗑️ Rebuild Environment' for a clean reinstall (destructive).",
                     details=tail or None
                 ))
             except Exception:
@@ -9110,6 +9966,7 @@ except Exception as e:
         
         # Create sub-tab widget
         sub_tabs = QTabWidget()
+        self.env_sub_tabs = sub_tabs
         sub_tabs.setStyleSheet("""
             QTabWidget::pane {
                 border: none;
@@ -9136,8 +9993,12 @@ except Exception as e:
         """)
         
         # Add sub-tabs
-        sub_tabs.addTab(self._build_environments_subtab(), "🔧 Environments")
-        sub_tabs.addTab(self._build_requirements_subtab(), "⚙️ System Requirements")
+        envs_tab = self._build_environments_subtab()
+        reqs_tab = self._build_requirements_subtab()
+        self.environments_subtab = envs_tab
+        self.requirements_subtab = reqs_tab
+        sub_tabs.addTab(envs_tab, "🔧 Environments")
+        sub_tabs.addTab(reqs_tab, "⚙️ System Requirements")
         
         main_layout.addWidget(sub_tabs)
         
@@ -11542,21 +12403,27 @@ respective package directories or official repositories.
                         downloaded_models.append(model_dir.name)
         
         # Update Train tab: Select Base Model dropdown with downloaded models
-        current_train = self.train_base_model.currentText()
-        self.train_base_model.clear()
-        
-        if downloaded_models:
-            for model_name in downloaded_models:
-                self.train_base_model.addItem(model_name)
-        else:
-            self.train_base_model.addItem("(No models downloaded yet)")
-        
-        if current_train:
-            idx = self.train_base_model.findText(current_train)
-            if idx >= 0:
-                self.train_base_model.setCurrentIndex(idx)
+        # Check if train tab widgets exist (lazy-loaded)
+        if hasattr(self, 'train_base_model'):
+            current_train = self.train_base_model.currentText()
+            self.train_base_model.clear()
+            
+            if downloaded_models:
+                for model_name in downloaded_models:
+                    self.train_base_model.addItem(model_name)
+            else:
+                self.train_base_model.addItem("(No models downloaded yet)")
+            
+            if current_train:
+                idx = self.train_base_model.findText(current_train)
+                if idx >= 0:
+                    self.train_base_model.setCurrentIndex(idx)
         
         # Update Test tab Model A dropdown with downloaded models + trained adapters
+        # Check if test sub-tab has been created (lazy-loaded)
+        if not hasattr(self, 'test_model_a') or not hasattr(self, 'test_model_b'):
+            return  # Test sub-tab not loaded yet, skip refresh
+        
         current_a = self.test_model_a.currentText()
         self.test_model_a.clear()
         
@@ -11688,19 +12555,21 @@ respective package directories or official repositories.
                     self.test_model_c.setCurrentIndex(idx)
 
         # log list from repo root and logs directory
-        self.logs_list.clear()
-        # Add logs from root directory
-        for p in sorted(self.root.glob("*training*.txt")) + sorted(self.root.glob("*log*.txt")):
-            it = QListWidgetItem(str(p.name))
-            it.setData(Qt.UserRole, str(p))
-            self.logs_list.addItem(it)
-        # Add logs from logs directory (app.log, auto_repair.log, etc.)
-        logs_dir = self.root / "logs"
-        if logs_dir.exists():
-            for p in sorted(logs_dir.glob("*.log")) + sorted(logs_dir.glob("*.txt")):
-                it = QListWidgetItem(f"logs/{p.name}")
+        # Check if logs tab widgets exist (lazy-loaded)
+        if hasattr(self, 'logs_list'):
+            self.logs_list.clear()
+            # Add logs from root directory
+            for p in sorted(self.root.glob("*training*.txt")) + sorted(self.root.glob("*log*.txt")):
+                it = QListWidgetItem(str(p.name))
                 it.setData(Qt.UserRole, str(p))
                 self.logs_list.addItem(it)
+            # Add logs from logs directory (app.log, auto_repair.log, etc.)
+            logs_dir = self.root / "logs"
+            if logs_dir.exists():
+                for p in sorted(logs_dir.glob("*.log")) + sorted(logs_dir.glob("*.txt")):
+                    it = QListWidgetItem(f"logs/{p.name}")
+                    it.setData(Qt.UserRole, str(p))
+                    self.logs_list.addItem(it)
 
     # these are set in models tab construction
     downloaded_container: QWidget

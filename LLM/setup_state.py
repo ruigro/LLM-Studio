@@ -123,6 +123,58 @@ class SetupStateManager:
         except Exception as e:
             print(f"Error resetting setup: {e}")
             return False
+    
+    def get_selected_profile(self) -> Optional[str]:
+        """
+        Get the user-selected profile ID (if any).
+        
+        Returns:
+            Profile ID string (e.g., 'ampere_cu121') or None if not set
+        """
+        state = self.get_state()
+        if not state:
+            return None
+        return state.get("selected_profile_id")
+    
+    def set_selected_profile(self, profile_id: str) -> bool:
+        """
+        Persist the user-selected profile ID.
+        
+        Args:
+            profile_id: Profile ID to persist (e.g., 'ampere_cu121')
+        
+        Returns:
+            True if saved successfully
+        """
+        state = self.get_state() or {}
+        state["selected_profile_id"] = profile_id
+        return self.save_state(state)
+    
+    def get_selected_gpu_index(self) -> Optional[int]:
+        """
+        Get the user-selected GPU index (for multi-GPU systems).
+        
+        Returns:
+            GPU index (0-based) or None if not set
+        """
+        state = self.get_state()
+        if not state:
+            return None
+        return state.get("selected_gpu_index")
+    
+    def set_selected_gpu_index(self, gpu_index: int) -> bool:
+        """
+        Persist the user-selected GPU index.
+        
+        Args:
+            gpu_index: GPU index (0-based)
+        
+        Returns:
+            True if saved successfully
+        """
+        state = self.get_state() or {}
+        state["selected_gpu_index"] = gpu_index
+        return self.save_state(state)
 
 
 # Convenience functions

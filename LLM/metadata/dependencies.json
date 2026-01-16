@@ -2,15 +2,14 @@
   "format_version": "1.0",
   "python_min": "3.10",
   "python_max": "3.12",
-  
   "cuda_configs": {
     "cu124": {
       "cuda_driver_min": "12.4",
       "torch_index": "https://download.pytorch.org/whl/cu124",
       "packages": {
-        "torch": "2.6.0+cu124",
-        "torchvision": "0.21.0+cu124",
-        "torchaudio": "2.6.0+cu124"
+        "torch": "2.5.1+cu124",
+        "torchvision": "0.20.1+cu124",
+        "torchaudio": "2.5.1+cu124"
       }
     },
     "cu121": {
@@ -32,317 +31,245 @@
       }
     }
   },
-  
   "core_dependencies": [
     {
       "name": "typing-extensions",
-      "version": ">=4.8.0",
+      "version": "4.12.2",
       "order": 0,
-      "critical": true,
-      "comment": "Required by torch before torch installs"
+      "critical": false
     },
     {
       "name": "numpy",
-      "version": ">=1.26.0,<2.0",
+      "version": "1.26.4",
       "order": 1,
-      "critical": true,
-      "comment": "Must be <2.0 for torch compatibility on Windows"
-    },
-    {
-      "name": "sympy",
-      "version": ">=1.12",
-      "order": 2,
-      "critical": false
-    },
-    {
-      "name": "networkx",
-      "version": ">=3.0",
-      "order": 3,
-      "critical": false
-    },
-    {
-      "name": "markupsafe",
-      "version": ">=2.0.0",
-      "order": 3,
-      "critical": false,
-      "comment": "Dependency of jinja2 (required before jinja2 installation)"
-    },
-    {
-      "name": "jinja2",
-      "version": ">=3.1.2",
-      "order": 4,
-      "critical": false
-    },
-    {
-      "name": "fsspec",
-      "version": ">=2023.1.0",
-      "order": 5,
-      "critical": false
-    },
-    {
-      "name": "filelock",
-      "version": ">=3.13.0",
-      "order": 6,
-      "critical": false
-    },
-    {
-      "name": "mpmath",
-      "version": ">=1.3.0",
-      "order": 7,
       "critical": false
     },
     {
       "name": "torch",
       "version": "FROM_CUDA_CONFIG",
-      "order": 10,
-      "critical": true,
-      "install_args": ["--no-deps"],
-      "comment": "Installed from CUDA-specific index with no deps"
+      "order": 2,
+      "critical": true
     },
     {
       "name": "torchvision",
       "version": "FROM_CUDA_CONFIG",
-      "order": 11,
-      "critical": true,
-      "install_args": ["--no-deps"]
+      "order": 3,
+      "critical": true
     },
     {
       "name": "torchaudio",
       "version": "FROM_CUDA_CONFIG",
-      "order": 12,
-      "critical": true,
-      "install_args": ["--no-deps"]
+      "order": 4,
+      "critical": true
     },
     {
-      "name": "triton-windows",
-      "version": ">=3.0.0",
-      "order": 13,
-      "critical": false,
-      "platform": "win32"
-    },
-    {
-      "name": "nvidia-cuda-runtime-cu12",
-      "version": "==12.6.*",
-      "order": 14,
-      "critical": true,
-      "platform": "win32",
-      "comment": "CUDA 12.x runtime headers/libs for Triton JIT on Windows (provides cuda.h and linker libs)"
-    },
-    {
-      "name": "nvidia-cuda-nvcc-cu12",
-      "version": "==12.6.*",
-      "order": 15,
-      "critical": true,
-      "platform": "win32",
-      "comment": "CUDA 12.x NVCC/toolchain bits for Triton JIT on Windows (may provide cuda.lib)"
-    },
-    {
-      "name": "regex",
-      "version": ">=2022.1.18",
-      "order": 20,
-      "critical": false
-    },
-    {
-      "name": "pyyaml",
-      "version": ">=5.1",
-      "order": 21,
-      "critical": false
-    },
-    {
-      "name": "urllib3",
-      "version": ">=1.26.0,<3.0.0",
-      "order": 21,
-      "critical": false,
-      "comment": "Dependency of requests"
-    },
-    {
-      "name": "certifi",
-      "version": ">=2022.0.0",
-      "order": 21,
-      "critical": false,
-      "comment": "Dependency of requests"
-    },
-    {
-      "name": "charset-normalizer",
-      "version": ">=2.0.0,<4.0.0",
-      "order": 21,
-      "critical": false,
-      "comment": "Dependency of requests"
-    },
-    {
-      "name": "idna",
-      "version": ">=2.5,<4",
-      "order": 21,
-      "critical": false,
-      "comment": "Dependency of requests"
-    },
-    {
-      "name": "requests",
-      "version": ">=2.28.0",
-      "order": 22,
-      "critical": false
-    },
-    {
-      "name": "packaging",
-      "version": ">=20.9",
-      "order": 23,
-      "critical": false
-    },
-    {
-      "name": "colorama",
-      "version": ">=0.4.0",
-      "order": 23,
-      "critical": false,
-      "comment": "Dependency of tqdm on Windows"
-    },
-    {
-      "name": "tqdm",
-      "version": ">=4.27",
-      "order": 24,
-      "critical": false
-    },
-    {
-      "name": "safetensors",
-      "version": ">=0.4.0",
-      "order": 25,
+      "name": "transformers",
+      "version": ">=4.51.0,<4.60.0",
+      "order": 5,
       "critical": true
     },
     {
       "name": "tokenizers",
-      "version": ">=0.21,<0.22",
-      "order": 26,
-      "critical": true,
-      "comment": "Must be compatible with transformers 4.51.3 which requires tokenizers>=0.21,<0.22"
+      "version": ">=0.21.0,<0.24.0",
+      "order": 6,
+      "critical": true
+    },
+    {
+      "name": "safetensors",
+      "version": ">=0.7.0,<0.8.0",
+      "order": 7,
+      "critical": false
     },
     {
       "name": "huggingface-hub",
-      "version": ">=0.34.0,<1.0",
-      "order": 27,
-      "critical": true,
-      "comment": "Must be <1.0 to match transformers requirements (transformers requires >=0.34.0,<1.0)"
-    },
-    {
-      "name": "transformers",
-      "version": ">=4.51.3,!=4.52.*,!=4.53.*,!=4.54.*,!=4.55.*,!=4.57.0,<4.58",
-      "order": 30,
-      "critical": true,
-      "install_args": ["--no-deps"],
-      "comment": "Installed with no-deps after all dependencies are in place. Allows 4.51.3 or 4.57.3 (excludes 4.52-4.55 and 4.57.0 per unsloth requirements)"
-    },
-    {
-      "name": "accelerate",
-      "version": ">=1.0.0",
-      "order": 31,
-      "critical": true,
-      "comment": "Must be installed before peft (peft depends on accelerate)"
+      "version": ">=0.27.0,<0.28.0",
+      "order": 8,
+      "critical": false
     },
     {
       "name": "peft",
-      "version": ">=0.13.0",
-      "order": 32,
-      "critical": true,
-      "comment": "Depends on accelerate (order 31)"
+      "version": ">=0.13.0,<0.16.0",
+      "order": 9,
+      "critical": true
     },
     {
-      "name": "datasets",
-      "version": ">=3.0.0,<4.4.0",
-      "order": 33,
-      "critical": true,
-      "comment": "Upper bound to avoid conflicts with unsloth"
+      "name": "accelerate",
+      "version": ">=1.2.0,<1.3.0",
+      "order": 10,
+      "critical": true
     },
     {
       "name": "bitsandbytes",
-      "version": ">=0.45.5",
-      "order": 34,
-      "critical": true,
-      "comment": "Required for 4-bit/8-bit training. Version 0.45.5+ fixes triton.ops compatibility on Windows"
-    },
-    {
-      "name": "sentencepiece",
-      "version": ">=0.1.98",
-      "order": 35,
+      "version": ">=0.45.0,<0.50.0",
+      "order": 11,
       "critical": false
     },
     {
-      "name": "evaluate",
-      "version": ">=0.4.0",
-      "order": 36,
+      "name": "datasets",
+      "version": ">=3.2.0,<4.0.0",
+      "order": 12,
       "critical": false
-    },
-    {
-      "name": "einops",
-      "version": ">=0.6.0",
-      "order": 37,
-      "critical": false
-    },
-    {
-      "name": "timm",
-      "version": ">=0.9.0",
-      "order": 38,
-      "critical": false,
-      "comment": "Required for vision models"
-    },
-    {
-      "name": "open-clip-torch",
-      "version": ">=2.20.0",
-      "order": 39,
-      "critical": false,
-      "comment": "Required for CLIP vision models"
-    },
-    {
-      "name": "shiboken6",
-      "version": "6.8.1",
-      "order": 49,
-      "critical": true,
-      "comment": "Required by PySide6 - must match PySide6 version exactly (6.8.1)"
     },
     {
       "name": "PySide6",
       "version": "6.8.1",
-      "order": 50,
-      "critical": true,
-      "comment": "Qt desktop GUI framework - must be exactly 6.8.1 to match shiboken6"
+      "order": 13,
+      "critical": true
     },
     {
       "name": "PySide6-Essentials",
       "version": "6.8.1",
-      "order": 51,
-      "critical": true,
-      "comment": "Must be exactly 6.8.1 to match PySide6"
+      "order": 14,
+      "critical": true
     },
     {
       "name": "PySide6-Addons",
       "version": "6.8.1",
-      "order": 52,
-      "critical": true,
-      "comment": "Must be exactly 6.8.1 to match PySide6"
+      "order": 15,
+      "critical": true
+    },
+    {
+      "name": "shiboken6",
+      "version": "6.8.1",
+      "order": 16,
+      "critical": true
+    },
+    {
+      "name": "sympy",
+      "version": "1.13.1",
+      "order": 17,
+      "critical": false
+    },
+    {
+      "name": "jinja2",
+      "version": "3.1.6",
+      "order": 18,
+      "critical": false
+    },
+    {
+      "name": "fsspec",
+      "version": "2025.9.0",
+      "order": 19,
+      "critical": false
+    },
+    {
+      "name": "filelock",
+      "version": "3.20.1",
+      "order": 20,
+      "critical": false
+    },
+    {
+      "name": "mpmath",
+      "version": "1.3.0",
+      "order": 21,
+      "critical": false
+    },
+    {
+      "name": "regex",
+      "version": "2024.11.6",
+      "order": 22,
+      "critical": false
+    },
+    {
+      "name": "pyyaml",
+      "version": "6.0.2",
+      "order": 23,
+      "critical": false
+    },
+    {
+      "name": "requests",
+      "version": "2.32.3",
+      "order": 24,
+      "critical": false
+    },
+    {
+      "name": "packaging",
+      "version": "24.2",
+      "order": 25,
+      "critical": false
+    },
+    {
+      "name": "tqdm",
+      "version": "4.67.1",
+      "order": 26,
+      "critical": false
+    },
+    {
+      "name": "sentencepiece",
+      "version": "0.2.0",
+      "order": 27,
+      "critical": false
+    },
+    {
+      "name": "evaluate",
+      "version": "0.4.3",
+      "order": 28,
+      "critical": false
+    },
+    {
+      "name": "einops",
+      "version": "0.8.1",
+      "order": 29,
+      "critical": false
+    },
+    {
+      "name": "timm",
+      "version": "1.0.12",
+      "order": 30,
+      "critical": false
+    },
+    {
+      "name": "open-clip-torch",
+      "version": "2.29.0",
+      "order": 31,
+      "critical": false
     },
     {
       "name": "pandas",
-      "version": ">=2.0.0",
-      "order": 53,
+      "version": "2.2.3",
+      "order": 32,
       "critical": false
     },
     {
       "name": "psutil",
-      "version": ">=5.9.0",
-      "order": 54,
+      "version": "7.2.0",
+      "order": 33,
       "critical": false
     },
     {
       "name": "streamlit",
-      "version": ">=1.28.0",
-      "order": 55,
-      "critical": false,
-      "comment": "Optional web UI"
+      "version": "1.41.1",
+      "order": 34,
+      "critical": false
+    },
+    {
+      "name": "uvicorn",
+      "version": ">=0.30.0,<1.0.0",
+      "order": 35,
+      "critical": true
+    },
+    {
+      "name": "fastapi",
+      "version": ">=0.115.0,<1.0.0",
+      "order": 36,
+      "critical": true
+    },
+    {
+      "name": "pydantic",
+      "version": ">=2.0.0,<3.0.0",
+      "order": 37,
+      "critical": true
     }
   ],
-  
   "optional_packages": [
     {
       "name": "unsloth",
       "version": ">=2024.11",
-      "blacklist_deps": ["torchao", "pytorch-ao", "torchao-nightly"],
+      "blacklist_deps": [
+        "torchao",
+        "pytorch-ao",
+        "torchao-nightly"
+      ],
       "skip_reason": "unsloth requires torchao which conflicts with our environment",
       "comment": "DO NOT INSTALL - causes transformers import failures"
     },
@@ -352,14 +279,12 @@
       "comment": "Memory-efficient attention - optional optimization"
     }
   ],
-  
   "global_blacklist": [
     "torchao",
     "pytorch-ao",
     "torchao-nightly",
     "torch-ao"
   ],
-  
   "verification_tests": [
     {
       "name": "torch_cuda",
@@ -392,7 +317,6 @@
       "critical": true
     }
   ],
-  
   "post_install_cleanup": [
     {
       "action": "clear_pycache",
@@ -402,9 +326,12 @@
     },
     {
       "action": "verify_no_blacklist",
-      "packages": ["torchao", "pytorch-ao", "torchao-nightly"],
+      "packages": [
+        "torchao",
+        "pytorch-ao",
+        "torchao-nightly"
+      ],
       "fail_on_found": true
     }
   ]
 }
-

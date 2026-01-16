@@ -4,6 +4,7 @@ HTTP client for calling persistent LLM inference servers.
 """
 import requests
 import logging
+import os
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -21,6 +22,12 @@ class InferenceClient:
         """
         self.base_url = base_url.rstrip('/')
         self.session = requests.Session()
+        # Default generation timeout can be too low for big models on cold start.
+        # Override with INFERENCE_HTTP_TIMEOUT_SECONDS if needed.
+        try:
+            self.timeout_seconds = int(os.getenv("INFERENCE_HTTP_TIMEOUT_SECONDS", "900"))
+        except Exception:
+            self.timeout_seconds = 900
     
     def generate(
         self, 
@@ -59,12 +66,12 @@ class InferenceClient:
             response = self.session.post(
                 url,
                 json=payload,
-                timeout=300  # 5 minute timeout for generation
+                timeout=self.timeout_seconds
             )
             response.raise_for_status()
         except requests.exceptions.Timeout:
             raise TimeoutError(
-                f"Generation request timed out after 300s. "
+                f"Generation request timed out after {self.timeout_seconds}s. "
                 f"Model may be too slow or unresponsive."
             )
         except requests.exceptions.RequestException as e:

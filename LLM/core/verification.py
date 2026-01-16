@@ -193,6 +193,38 @@ print("AutoConfig: OK")
         else:
             return False, f"Transformers import verification failed: {error}"
     
+    def verify_pyside6(self) -> Tuple[bool, str]:
+        """
+        Verify PySide6 and shiboken6 are properly installed (matches launcher health check).
+        
+        Returns:
+            Tuple of (success: bool, error_message: str)
+        """
+        code = """
+import sys
+try:
+    import PySide6.QtCore
+    print("PySide6.QtCore: OK")
+    sys.exit(0)
+except ImportError as e:
+    error_msg = str(e)
+    if "shiboken" in error_msg.lower() or "does not exist" in error_msg:
+        print(f"ERROR: PySide6/shiboken6 import failed: {error_msg}", file=sys.stderr)
+    else:
+        print(f"ERROR: PySide6 import error: {error_msg}", file=sys.stderr)
+    sys.exit(1)
+except Exception as e:
+    print(f"ERROR: PySide6 check failed: {str(e)}", file=sys.stderr)
+    sys.exit(1)
+"""
+        
+        success, output, error = self._run_test(code)
+        
+        if success:
+            return True, output
+        else:
+            return False, f"PySide6 verification failed: {error}"
+    
     def verify_no_blacklisted_packages(self) -> Tuple[bool, str]:
         """
         Verify no blacklisted packages are installed.
@@ -324,7 +356,12 @@ except importlib.metadata.PackageNotFoundError:
         if not success:
             return False, result
         
-        # Check 3: no blacklisted packages
+        # Check 3: PySide6/shiboken6 (critical for launcher health check)
+        success, result = self.verify_pyside6()
+        if not success:
+            return False, result
+        
+        # Check 4: no blacklisted packages
         success, result = self.verify_no_blacklisted_packages()
         if not success:
             return False, result

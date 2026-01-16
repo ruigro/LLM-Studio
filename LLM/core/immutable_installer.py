@@ -93,7 +93,7 @@ class ImmutableInstaller:
             except Exception:
                 pass
     
-    def install(self, cuda_config: str, package_versions: dict = None, binary_packages: dict = None) -> Tuple[bool, str]:
+    def install(self, cuda_config: str, package_versions: dict = None, binary_packages: dict = None, allow_destroy: bool = False) -> Tuple[bool, str]:
         """
         Perform immutable installation.
         
@@ -102,6 +102,8 @@ class ImmutableInstaller:
             package_versions: Optional dict of {package_name: exact_version} from profile.
                             If provided, uses these for version checking instead of manifest.
             binary_packages: Optional dict of binary packages to install from wheels.
+            allow_destroy: If True, allows deletion of existing .venv. If False (default),
+                          will fail with error if venv appears corrupted instead of deleting it.
         
         Returns:
             Tuple of (success: bool, error_message: str)
@@ -169,174 +171,195 @@ class ImmutableInstaller:
                 else:
                     venv_python_path = self.venv_path / "bin" / "python"
                 
-                    if venv_python_path.exists():
-                        venv_python = venv_python_path
-                        self.log("PHASE 2: Checking existing venv for resume capability")
-                        self.log("  Starting package verification checks...")
+                if venv_python_path.exists():
+                    venv_python = venv_python_path
+                    self.log("PHASE 2: Checking existing venv for resume capability")
+                    self.log("  Starting package verification checks...")
                         
-                        # Verify Python version matches
-                        try:
-                            result = subprocess.run(
-                                [str(venv_python), "--version"],
-                                capture_output=True,
-                                text=True,
-                                timeout=30,  # Increased from 10s to 30s to handle slow systems
-                                **self.subprocess_flags
-                            )
-                            if result.returncode == 0:
-                                self.log(f"  ✓ Venv Python found: {result.stdout.strip()}")
-
-                                # Critical: remove known-bad packages (e.g. torchao) before any import checks.
-                                self._uninstall_blacklisted_packages(venv_python)
+                    # Verify Python version matches
+                    try:
+                        result = subprocess.run(
+                            [str(venv_python), "--version"],
+                            capture_output=True,
+                            text=True,
+                            timeout=30,  # Increased from 10s to 30s to handle slow systems
+                            **self.subprocess_flags
+                        )
+                        if result.returncode == 0:
+                            self.log(f"  ✓ Venv Python found: {result.stdout.strip()}")
+                            # Critical: remove known-bad packages (e.g. torchao) before any import checks.
+                            self._uninstall_blacklisted_packages(venv_python)
+                            
+                            # Check which packages need installation
+                            deps = sorted(self.manifest["core_dependencies"], key=lambda x: x["order"])
+                            cuda_packages = self.manifest["cuda_configs"][cuda_config]["packages"]
+                            
+                            # Use profile versions if available, otherwise fall back to manifest
+                            if self.profile_versions:
+                                # Profile mode: use exact versions from profile
+                                cuda_packages_to_check = {k: self.profile_versions.get(k, v) for k, v in cuda_packages.items()}
+                                self.log(f"  Using profile versions for CUDA packages: {list(cuda_packages_to_check.keys())}")
+                            else:
+                                cuda_packages_to_check = cuda_packages
+                            
+                            missing_packages = []
+                            wrong_version_packages = []
+                            
+                            self.log(f"  Checking {len(cuda_packages_to_check)} CUDA package(s)...")
+                            # Check CUDA packages (with functionality check for broken packages)
+                            for pkg_name, pkg_version in cuda_packages_to_check.items():
+                                version_spec = f"=={pkg_version}" if not pkg_version.startswith(("==", ">=", "<")) else pkg_version
+                                self.log(f"  Checking {pkg_name} (required: {version_spec})...")
+                                is_installed, version_matches, is_broken = self._check_package_installed(
+                                    venv_python, pkg_name, version_spec, check_functionality=True
+                                )
+                                if not is_installed:
+                                    self.log(f"    ⚠ {pkg_name} is MISSING")
+                                    missing_packages.append((pkg_name, version_spec))
+                                elif is_broken:
+                                    # Only add if actually broken (DLL corruption, missing attributes, etc.)
+                                    self.log(f"    ⚠ {pkg_name} is BROKEN (will reinstall)")
+                                    wrong_version_packages.append((pkg_name, version_spec))
+                                elif not version_matches:
+                                    # Only add if version is wrong
+                                    self.log(f"    ⚠ {pkg_name} version mismatch (will update)")
+                                    wrong_version_packages.append((pkg_name, version_spec))
+                                else:
+                                    self.log(f"    ✓ {pkg_name} is OK")
+                                # Otherwise: installed, correct version, not broken -> skip (don't add to any list)
+                            
+                            # Check core dependencies (with functionality check for broken packages)
+                            for dep in deps:
+                                pkg_name = dep["name"]
                                 
-                                # Check which packages need installation
-                                deps = sorted(self.manifest["core_dependencies"], key=lambda x: x["order"])
-                                cuda_packages = self.manifest["cuda_configs"][cuda_config]["packages"]
+                                # Skip platform-specific packages
+                                if "platform" in dep and dep["platform"] != sys.platform:
+                                    continue
                                 
-                                # Use profile versions if available, otherwise fall back to manifest
+                                # Skip CUDA packages (already checked)
+                                if dep["version"] == "FROM_CUDA_CONFIG":
+                                    continue
+                                
+                                # Use profile version if available, otherwise use manifest version
+                                # Profile versions may be ranges (e.g., ">=0.13.0,<0.16.0") or exact (e.g., "0.14.0")
+                                # Normalize package name for lookup
+                                pkg_normalized_check = pkg_name.lower().replace("_", "-")
+                                profile_ver_check = None
                                 if self.profile_versions:
-                                    # Profile mode: use exact versions from profile
-                                    cuda_packages_to_check = {k: self.profile_versions.get(k, v) for k, v in cuda_packages.items()}
-                                    self.log(f"  Using profile versions for CUDA packages: {list(cuda_packages_to_check.keys())}")
+                                    if pkg_normalized_check in self.profile_versions:
+                                        profile_ver_check = self.profile_versions[pkg_normalized_check]
+                                    elif pkg_name in self.profile_versions:
+                                        profile_ver_check = self.profile_versions[pkg_name]
+                                    elif pkg_name.replace("-", "_") in self.profile_versions:
+                                        profile_ver_check = self.profile_versions[pkg_name.replace("-", "_")]
+                                
+                                if profile_ver_check:
+                                    # Check if it's already a range or exact version
+                                    if any(op in profile_ver_check for op in [">=", "<=", ">", "<", "!=", ","]):
+                                        version_spec = profile_ver_check  # Use range as-is
+                                    else:
+                                        version_spec = f"=={profile_ver_check}"  # Exact version
                                 else:
-                                    cuda_packages_to_check = cuda_packages
+                                    version_spec = dep["version"]
                                 
-                                missing_packages = []
-                                wrong_version_packages = []
+                                is_installed, version_matches, is_broken = self._check_package_installed(
+                                    venv_python, pkg_name, version_spec, check_functionality=True
+                                )
                                 
-                                self.log(f"  Checking {len(cuda_packages_to_check)} CUDA package(s)...")
-                                # Check CUDA packages (with functionality check for broken packages)
-                                for pkg_name, pkg_version in cuda_packages_to_check.items():
-                                    version_spec = f"=={pkg_version}" if not pkg_version.startswith(("==", ">=", "<")) else pkg_version
-                                    self.log(f"  Checking {pkg_name} (required: {version_spec})...")
-                                    is_installed, version_matches, is_broken = self._check_package_installed(
+                                if not is_installed:
+                                    missing_packages.append((pkg_name, version_spec))
+                                elif is_broken:
+                                    # Only add if actually broken (import fails, missing attributes, etc.)
+                                    wrong_version_packages.append((pkg_name, version_spec))
+                                elif not version_matches:
+                                    # Only add if version is wrong
+                                    wrong_version_packages.append((pkg_name, version_spec))
+                                # Otherwise: installed, correct version, not broken -> skip (don't add to any list)
+                            
+                            packages_to_install = missing_packages + wrong_version_packages
+                            
+                            if packages_to_install:
+                                broken_packages = []
+                                # Check which packages are broken (not just wrong version)
+                                for pkg_name, version_spec in packages_to_install:
+                                    is_installed, _, is_broken = self._check_package_installed(
                                         venv_python, pkg_name, version_spec, check_functionality=True
                                     )
-                                    if not is_installed:
-                                        self.log(f"    ⚠ {pkg_name} is MISSING")
-                                        missing_packages.append((pkg_name, version_spec))
-                                    elif is_broken:
-                                        # Only add if actually broken (DLL corruption, missing attributes, etc.)
-                                        self.log(f"    ⚠ {pkg_name} is BROKEN (will reinstall)")
-                                        wrong_version_packages.append((pkg_name, version_spec))
-                                    elif not version_matches:
-                                        # Only add if version is wrong
-                                        self.log(f"    ⚠ {pkg_name} version mismatch (will update)")
-                                        wrong_version_packages.append((pkg_name, version_spec))
-                                    else:
-                                        self.log(f"    ✓ {pkg_name} is OK")
-                                    # Otherwise: installed, correct version, not broken -> skip (don't add to any list)
+                                    if is_broken:
+                                        broken_packages.append(pkg_name)
                                 
-                                # Check core dependencies (with functionality check for broken packages)
-                                for dep in deps:
-                                    pkg_name = dep["name"]
-                                    
-                                    # Skip platform-specific packages
-                                    if "platform" in dep and dep["platform"] != sys.platform:
-                                        continue
-                                    
-                                    # Skip CUDA packages (already checked)
-                                    if dep["version"] == "FROM_CUDA_CONFIG":
-                                        continue
-                                    
-                                    # Use profile version if available, otherwise use manifest version
-                                    # Profile versions may be ranges (e.g., ">=0.13.0,<0.16.0") or exact (e.g., "0.14.0")
-                                    # Normalize package name for lookup
-                                    pkg_normalized_check = pkg_name.lower().replace("_", "-")
-                                    profile_ver_check = None
-                                    if self.profile_versions:
-                                        if pkg_normalized_check in self.profile_versions:
-                                            profile_ver_check = self.profile_versions[pkg_normalized_check]
-                                        elif pkg_name in self.profile_versions:
-                                            profile_ver_check = self.profile_versions[pkg_name]
-                                        elif pkg_name.replace("-", "_") in self.profile_versions:
-                                            profile_ver_check = self.profile_versions[pkg_name.replace("-", "_")]
-                                    
-                                    if profile_ver_check:
-                                        # Check if it's already a range or exact version
-                                        if any(op in profile_ver_check for op in [">=", "<=", ">", "<", "!=", ","]):
-                                            version_spec = profile_ver_check  # Use range as-is
-                                        else:
-                                            version_spec = f"=={profile_ver_check}"  # Exact version
-                                    else:
-                                        version_spec = dep["version"]
-                                    
-                                    is_installed, version_matches, is_broken = self._check_package_installed(
-                                        venv_python, pkg_name, version_spec, check_functionality=True
-                                    )
-                                    
-                                    if not is_installed:
-                                        missing_packages.append((pkg_name, version_spec))
-                                    elif is_broken:
-                                        # Only add if actually broken (import fails, missing attributes, etc.)
-                                        wrong_version_packages.append((pkg_name, version_spec))
-                                    elif not version_matches:
-                                        # Only add if version is wrong
-                                        wrong_version_packages.append((pkg_name, version_spec))
-                                    # Otherwise: installed, correct version, not broken -> skip (don't add to any list)
+                                if broken_packages:
+                                    self.log(f"  ⚠ Found {len(broken_packages)} broken packages: {', '.join(broken_packages)}")
                                 
-                                packages_to_install = missing_packages + wrong_version_packages
+                                self.log(f"  ⚠ Found {len(packages_to_install)} packages that need installation:")
+                                for pkg_name, version_spec in packages_to_install[:5]:  # Show first 5
+                                    status = " (broken)" if pkg_name in broken_packages else ""
+                                    self.log(f"    - {pkg_name}{version_spec}{status}")
+                                if len(packages_to_install) > 5:
+                                    self.log(f"    ... and {len(packages_to_install) - 5} more")
                                 
-                                if packages_to_install:
-                                    broken_packages = []
-                                    missing_pkg_names = [pkg for pkg, _ in missing_packages]
-                                    wrong_pkg_names = [pkg for pkg, _ in wrong_version_packages]
-                                    
-                                    # Check which packages are broken (not just wrong version)
-                                    for pkg_name, version_spec in packages_to_install:
-                                        is_installed, _, is_broken = self._check_package_installed(
-                                            venv_python, pkg_name, version_spec, check_functionality=True
-                                        )
-                                        if is_broken:
-                                            broken_packages.append(pkg_name)
-                                    
-                                    if broken_packages:
-                                        self.log(f"  ⚠ Found {len(broken_packages)} broken packages: {', '.join(broken_packages)}")
-                                    
-                                    self.log(f"  ⚠ Found {len(packages_to_install)} packages that need installation:")
-                                    for pkg_name, version_spec in packages_to_install[:5]:  # Show first 5
-                                        status = " (broken)" if pkg_name in broken_packages else ""
-                                        self.log(f"    - {pkg_name}{version_spec}{status}")
-                                    if len(packages_to_install) > 5:
-                                        self.log(f"    ... and {len(packages_to_install) - 5} more")
-                                    
-                                    # Check if critical packages are missing or wrong
-                                    critical_pkg_names = {dep["name"] for dep in deps if dep.get("critical", False)}
-                                    critical_pkg_names.update(cuda_packages.keys())  # CUDA packages are always critical
-                                    critical_missing = any(
-                                        pkg_name in critical_pkg_names for pkg_name, _ in packages_to_install
-                                    )
-                                    
-                                    if critical_missing:
-                                        self.log("  ⚠ Critical packages need installation - will resume from where we left off")
-                                        should_resume = True
-                                    else:
-                                        self.log("  ✓ Only non-critical packages need installation - will resume")
-                                        should_resume = True
+                                # Check if critical packages are missing or wrong
+                                critical_pkg_names = {dep["name"] for dep in deps if dep.get("critical", False)}
+                                critical_pkg_names.update(cuda_packages.keys())  # CUDA packages are always critical
+                                critical_missing = any(
+                                    pkg_name in critical_pkg_names for pkg_name, _ in packages_to_install
+                                )
+                                
+                                if critical_missing:
+                                    self.log("  ⚠ Critical packages need installation - will resume from where we left off")
+                                    should_resume = True
                                 else:
-                                    self.log("  ✓ All regular packages already installed correctly")
-                                    # Still need to check binary packages
+                                    self.log("  ✓ Only non-critical packages need installation - will resume")
                                     should_resume = True
                             else:
-                                self.log(f"  ⚠ Python version check failed: {result.stderr or result.stdout}")
-                                should_resume = False
-                                
-                        except Exception as e:
-                            import traceback
-                            self.log(f"  ⚠ Could not verify venv: {e}")
-                            self.log(f"  Full error: {traceback.format_exc()}")
-                            self.log("  Will destroy and recreate venv")
+                                self.log("  ✓ All regular packages already installed correctly")
+                                # Still need to check binary packages
+                                should_resume = True
+                        else:
+                            self.log(f"  ⚠ Python version check failed: {result.stderr or result.stdout}")
                             should_resume = False
-                            venv_python = None
+                    
+                    except Exception as e:
+                        import traceback
+                        self.log(f"  ⚠ Could not verify venv: {e}")
+                        self.log(f"  Full error: {traceback.format_exc()}")
+                        self.log("  Venv check failed; will create/rebuild as needed")
+                        should_resume = False
+                        venv_python = None
+                else:
+                    # Venv folder exists but its Python executable is missing -> cannot repair without rebuild.
+                    self.log("PHASE 2: Existing venv is missing its Python executable")
+                    self.log(f"  Expected: {venv_python_path}")
+                    should_resume = False
             
             if not should_resume:
-                # PHASE 2: Destroy existing venv
-                self.log("PHASE 2: Destroying existing venv")
-                self._destroy_venv()
-                
-                # PHASE 3: Create fresh venv
-                self.log("PHASE 3: Creating fresh venv")
-                venv_python = self._create_venv()
+                # PHASE 2: Handle missing/corrupted venv
+                #
+                # Non-destructive rule:
+                # - If the venv does NOT exist, we can safely create it (this is not "destroying").
+                # - If the venv exists but is corrupted/incompatible, we only destroy it when
+                #   allow_destroy=True (explicit Rebuild).
+                if not self.venv_path.exists():
+                    self.log("PHASE 2: No existing venv found - creating fresh venv")
+                    self.log("PHASE 3: Creating fresh venv")
+                    venv_python = self._create_venv()
+                elif allow_destroy:
+                    # Explicit rebuild requested - destroy and recreate
+                    self.log("PHASE 2: Destroying existing venv (rebuild mode)")
+                    self._destroy_venv()
+                    
+                    # PHASE 3: Create fresh venv
+                    self.log("PHASE 3: Creating fresh venv")
+                    venv_python = self._create_venv()
+                else:
+                    # Repair mode - do not destroy, fail with clear message
+                    self.log("PHASE 2: Environment appears corrupted or incompatible")
+                    self.log("  Environment cannot be safely repaired without destroying it.")
+                    self.log("  Use 'Rebuild Environment' to recreate from scratch.")
+                    return False, (
+                        "Environment appears corrupted. Cannot resume installation.\n"
+                        "Use 'Rebuild Environment' to delete and recreate the environment."
+                    )
             else:
                 if packages_to_install:
                     self.log("PHASE 2: Resuming installation (venv already exists)")
@@ -368,14 +391,21 @@ class ImmutableInstaller:
             self.log("[STEP] PHASE 5: Clearing Python bytecode cache")
             self._clear_pycache()
             
-            # PHASE 6: Verification (SKIP in resume mode if only some packages were installed)
+            # PHASE 6: Verification (two-phase: always run at end, not per-package)
             self.log("[STEP] PHASE 6: Verifying installation")
-            if should_resume and packages_to_install:
-                self.log("  (SKIPPED - Partial repair completed)")
-                self.log("  Full verification would fail due to partial state.")
-                self.log("  Run a full 'Install All' if you need complete environment verification.")
-            else:
+            # Always run verification - it will report which tests failed if any
+            # This ensures we catch issues even after partial installs
+            try:
                 self._verify_installation(venv_python)
+            except InstallationFailed as e:
+                if should_resume and packages_to_install:
+                    # In repair mode, log the failure but don't fail the entire operation
+                    # User can run repair again or use Rebuild if needed
+                    self.log(f"  ⚠ Verification found issues: {e}")
+                    self.log("  Some packages may need additional repair. Run repair again or use Rebuild for a clean install.")
+                else:
+                    # In full install mode, verification failure is critical
+                    raise
             
             self.log("=" * 60)
             self.log("✓ Installation complete")
@@ -427,15 +457,19 @@ class ImmutableInstaller:
                                 self.log(f"  ✗ Retry after fix failed: {retry_error}")
                                 # Fall through to cleanup
             
-            # IMPORTANT: In resume/repair mode, do not destroy the venv automatically.
-            # Destructive cleanup belongs to explicit "full install" flow.
-            if self.venv_path.exists() and not should_resume:
+            # IMPORTANT: Only clean up corrupted venv if allow_destroy is True.
+            # In repair mode (allow_destroy=False), we preserve the venv and fail with a clear message.
+            if self.venv_path.exists() and not should_resume and allow_destroy:
                 self.log("Cleaning up corrupted venv...")
                 try:
                     shutil.rmtree(self.venv_path, ignore_errors=True)
                     self.log("✓ Corrupted venv removed")
                 except Exception as cleanup_error:
                     self.log(f"WARNING: Could not remove venv: {cleanup_error}")
+            elif self.venv_path.exists() and not should_resume and not allow_destroy:
+                # Venv exists but we can't resume and we're not allowed to destroy
+                # This should have been caught earlier, but log it for safety
+                self.log("WARNING: Installation failed but venv preserved (repair mode)")
             
             return False, error_msg
     
@@ -998,28 +1032,8 @@ class ImmutableInstaller:
                 lock_version = version_spec.replace("==", "").replace(">=", "").replace("<=", "").split(",")[0].split("<")[0].strip()
                 self._create_torch_lock(lock_version)
             
-            # Verify critical packages immediately after install
-            if dep.get("critical", False) and pkg_name in ["torch", "transformers", "peft"]:
-                success, error = self._verify_package_import(venv_python, pkg_name)
-                if not success:
-                    # Check if this is a version conflict error that we can fix
-                    if self._is_version_conflict_error(error):
-                        self.log(f"  ⚠ Detected version conflict for {pkg_name}: {error[:200]}")
-                        self.log(f"  🔄 Attempting to fix by reinstalling dependencies...")
-                        
-                        # Try to fix version conflicts by reinstalling problematic dependencies
-                        fix_success = self._fix_version_conflicts(venv_python, error)
-                        if fix_success:
-                            # Retry verification
-                            success, error = self._verify_package_import(venv_python, pkg_name)
-                            if success:
-                                self.log(f"  ✓ Version conflict resolved for {pkg_name}")
-                                continue
-                            else:
-                                self.log(f"  ⚠ Fix attempt failed, will continue with original error")
-                    
-                    if not success:
-                        raise InstallationFailed(f"Package {pkg_name} installed but import failed: {error}")
+            # NOTE: Per-package verification removed - verification happens once at the end
+            # This prevents failures when dependencies are installed later in the sequence
         
         if skipped_count > 0:
             self.log(f"  ✓ Installation complete: {installed_count} installed, {skipped_count} skipped (already installed)")
@@ -1153,7 +1167,59 @@ class ImmutableInstaller:
             
             if result.returncode != 0:
                 error = result.stderr or result.stdout
-                return False, error[:500]  # Truncate long errors
+                error_str = error[:500]  # Truncate long errors
+                
+                # Check if this is a "missing wheel" error (from versions: none)
+                # This means the package isn't in wheelhouse and pip can't query online
+                if "from versions: none" in error or "No matching distribution found" in error:
+                    # Try to extract package name from error
+                    missing_pkg = self._extract_missing_package_from_error(error, package_name)
+                    if missing_pkg:
+                        self.log(f"  ⚠ Missing wheel detected: {missing_pkg}")
+                        self.log(f"  🔧 Attempting to download {missing_pkg} into wheelhouse...")
+                        
+                        # Try to repair wheelhouse by downloading missing package
+                        from core.wheelhouse import WheelhouseManager
+                        wheelhouse_mgr = WheelhouseManager(self.manifest_path, self.wheelhouse)
+                        python_version = (sys.version_info.major, sys.version_info.minor)
+                        
+                        download_success, download_error = wheelhouse_mgr.download_missing_package(
+                            missing_pkg, python_version
+                        )
+                        
+                        if download_success:
+                            self.log(f"  ✓ Downloaded {missing_pkg} into wheelhouse")
+                            self.log(f"  🔄 Retrying installation of {package_name}...")
+                            # Retry the install now that wheelhouse has the missing package
+                            return self._install_single_package(venv_python, package_name, version_spec, install_args)
+                        else:
+                            self.log(f"  ⚠ Wheelhouse repair failed for {missing_pkg}: {download_error}")
+                            # If wheelhouse repair failed, try safe online fallback for pure-python deps
+                            if self._is_safe_for_online_fallback(missing_pkg):
+                                self.log(f"  🌐 Attempting safe online fallback for {missing_pkg} (pure-python package)...")
+                                # Temporarily allow online index for this pure-python package
+                                fallback_cmd = [
+                                    str(venv_python), "-m", "pip", "install",
+                                    "--no-cache-dir",
+                                    missing_pkg  # Let pip resolve version
+                                ]
+                                fallback_result = subprocess.run(
+                                    fallback_cmd,
+                                    capture_output=True,
+                                    text=True,
+                                    timeout=300,
+                                    **self.subprocess_flags
+                                )
+                                if fallback_result.returncode == 0:
+                                    self.log(f"  ✓ Online fallback succeeded for {missing_pkg}")
+                                    self.log(f"  🔄 Retrying installation of {package_name}...")
+                                    # Retry original package install
+                                    return self._install_single_package(venv_python, package_name, version_spec, install_args)
+                                else:
+                                    fallback_error = fallback_result.stderr or fallback_result.stdout
+                                    self.log(f"  ✗ Online fallback failed for {missing_pkg}: {fallback_error[:200]}")
+                    
+                return False, error_str
             
             return True, ""
             
@@ -1161,6 +1227,57 @@ class ImmutableInstaller:
             return False, f"Installation timeout for {package_name}"
         except Exception as e:
             return False, str(e)
+    
+    def _extract_missing_package_from_error(self, error_text: str, current_package: str) -> Optional[str]:
+        """
+        Extract missing package name from pip error message.
+        
+        Examples:
+        - "ERROR: Could not find a version that satisfies the requirement networkx (from torch) (from versions: none)"
+        - "ERROR: No matching distribution found for networkx"
+        """
+        import re
+        # Pattern 1: "Could not find a version that satisfies the requirement X (from Y)"
+        match = re.search(r"requirement (\w+(?:[-_]\w+)*)", error_text, re.IGNORECASE)
+        if match:
+            pkg = match.group(1).lower().replace("_", "-")
+            # Don't return the current package we're trying to install
+            if pkg != current_package.lower().replace("_", "-"):
+                return pkg
+        
+        # Pattern 2: "No matching distribution found for X"
+        match = re.search(r"distribution found for (\w+(?:[-_]\w+)*)", error_text, re.IGNORECASE)
+        if match:
+            pkg = match.group(1).lower().replace("_", "-")
+            if pkg != current_package.lower().replace("_", "-"):
+                return pkg
+        
+        return None
+    
+    def _is_safe_for_online_fallback(self, package_name: str) -> bool:
+        """
+        Check if a package is safe for online fallback (pure-python, not GPU/binary).
+        
+        Args:
+            package_name: Package name to check
+        
+        Returns:
+            True if safe for online fallback, False otherwise
+        """
+        pkg_lower = package_name.lower()
+        
+        # Never allow online fallback for torch/GPU packages
+        forbidden_patterns = ["torch", "triton", "bitsandbytes", "nvidia-", "cuda", "causal_conv1d", "mamba_ssm"]
+        if any(pattern in pkg_lower for pattern in forbidden_patterns):
+            return False
+        
+        # Check blacklist
+        blacklist = set(pkg.lower().replace("_", "-") for pkg in self.manifest.get("global_blacklist", []))
+        if pkg_lower.replace("_", "-") in blacklist:
+            return False
+        
+        # Safe: pure-python packages like networkx, urllib3, certifi, etc.
+        return True
     
     def _uninstall_package(self, venv_python: Path, package_name: str) -> Tuple[bool, str]:
         """

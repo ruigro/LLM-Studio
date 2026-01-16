@@ -32,17 +32,29 @@ class ProfileSelector:
         self.cuda_map = self.matrix.get("cuda_version_map", {})
         self.common_packages = self.matrix.get("common_packages", {})
     
-    def select_profile(self, hardware_profile: Dict) -> Tuple[str, Dict, list, Dict]:
+    def select_profile(self, hardware_profile: Dict, override_profile_id: Optional[str] = None) -> Tuple[str, Dict, list, Dict]:
         """
         Select best profile for the given hardware.
         
         Args:
             hardware_profile: Hardware info from SystemDetector.get_hardware_profile()
+            override_profile_id: Optional profile ID to use instead of auto-selection (from user selection)
         
         Returns:
             Tuple of (profile_name, package_versions, warnings, binary_packages)
         """
         warnings = []
+        
+        # If user has explicitly selected a profile, use it (but validate it exists)
+        if override_profile_id:
+            if override_profile_id in self.profiles:
+                print(f"[PROFILE] Using user-selected profile: '{override_profile_id}'")
+                package_versions = self._get_package_versions(override_profile_id)
+                binary_packages = self._get_binary_packages(override_profile_id)
+                return override_profile_id, package_versions, warnings, binary_packages
+            else:
+                warnings.append(f"User-selected profile '{override_profile_id}' not found in matrix, falling back to auto-selection")
+                print(f"[PROFILE] WARNING: Selected profile '{override_profile_id}' not found, using auto-selection")
         
         # Extract key hardware attributes
         cuda_version = hardware_profile.get("cuda_version")

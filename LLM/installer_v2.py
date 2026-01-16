@@ -7,6 +7,8 @@ Immutable installer for LLM Fine-tuning Studio
 import sys
 import os
 import json
+import subprocess
+import shutil
 from pathlib import Path
 from typing import Tuple
 
@@ -68,12 +70,13 @@ class InstallerV2:
             except Exception:
                 pass # Give up if even safe message fails
     
-    def install(self, skip_wheelhouse: bool = False) -> bool:
+    def install(self, skip_wheelhouse: bool = False, allow_destroy: bool = False) -> bool:
         """
         Run full installation.
         
         Args:
             skip_wheelhouse: If True, skip wheelhouse preparation (use existing)
+            allow_destroy: If True, allows deletion of existing .venv if corrupted
         
         Returns:
             True if successful, False otherwise
@@ -133,14 +136,20 @@ class InstallerV2:
                 self.log("\n🎯 Using hardware-adaptive installation")
                 
                 from core.profile_selector import ProfileSelector
+                from setup_state import SetupStateManager
                 
-                # Get hardware profile
-                hw_profile = detector.get_hardware_profile()
+                # Get hardware profile (with user-selected GPU if any)
+                setup_state = SetupStateManager()
+                selected_gpu_index = setup_state.get_selected_gpu_index()
+                hw_profile = detector.get_hardware_profile(selected_gpu_index=selected_gpu_index)
                 
-                # Select optimal profile
+                # Select optimal profile (with user override if any)
                 selector = ProfileSelector(self.compat_matrix_path)
+                override_profile = setup_state.get_selected_profile()
                 try:
-                    profile_name, package_versions, warnings, binary_packages = selector.select_profile(hw_profile)
+                    profile_name, package_versions, warnings, binary_packages = selector.select_profile(
+                        hw_profile, override_profile_id=override_profile
+                    )
                     
                     self.log(f"\n✓ Selected profile: {profile_name}")
                     self.log(f"  {selector.get_profile_description(profile_name)}")
@@ -211,7 +220,7 @@ class InstallerV2:
                 python_exe = None
             
             installer = ImmutableInstaller(self.venv, self.wheelhouse, self.manifest_path, python_executable=python_exe)
-            success, error = installer.install(cuda_config, package_versions=package_versions, binary_packages=binary_packages if self.use_adaptive else None)
+            success, error = installer.install(cuda_config, package_versions=package_versions, binary_packages=binary_packages if self.use_adaptive else None, allow_destroy=allow_destroy)
             
             if not success:
                 self.log(f"\n✗ Installation failed:")
@@ -635,10 +644,20 @@ class InstallerV2:
             if self.use_adaptive:
                 self.log("\n🎯 Using hardware-adaptive repair")
                 from core.profile_selector import ProfileSelector
-                hw_profile = detector.get_hardware_profile()
+                from setup_state import SetupStateManager
+                
+                # Get hardware profile (with user-selected GPU if any)
+                setup_state = SetupStateManager()
+                selected_gpu_index = setup_state.get_selected_gpu_index()
+                hw_profile = detector.get_hardware_profile(selected_gpu_index=selected_gpu_index)
+                
+                # Select optimal profile (with user override if any)
                 selector = ProfileSelector(self.compat_matrix_path)
+                override_profile = setup_state.get_selected_profile()
                 try:
-                    profile_name, package_versions, warnings, binary_packages = selector.select_profile(hw_profile)
+                    profile_name, package_versions, warnings, binary_packages = selector.select_profile(
+                        hw_profile, override_profile_id=override_profile
+                    )
                     self.log(f"\n✓ Selected profile: {profile_name}")
                     if binary_packages:
                         self.log(f"  Binary packages in profile: {list(binary_packages.keys())}")
@@ -716,6 +735,77 @@ class InstallerV2:
             return False
         except Exception as e:
             self.log(f"\n✗ Repair failed with exception:")
+            self.log(f"  {type(e).__name__}: {str(e)}")
+            
+            import traceback
+            self.log("\nFull traceback:")
+            self.log(traceback.format_exc())
+            
+            return False
+    
+    def rebuild(self) -> bool:
+        """
+        Rebuild mode: Delete .venv and wheelhouse, then perform fresh installation.
+        This is a destructive operation that wipes everything and starts from scratch.
+        
+        Returns:
+            True if rebuild successful, False otherwise
+        """
+        try:
+            self.log("=" * 60)
+            self.log("LLM Fine-tuning Studio - Rebuild Mode")
+            self.log("=" * 60)
+            self.log("WARNING: This will delete the existing environment and wheelhouse.")
+            self.log("All packages will be re-downloaded and reinstalled.")
+            self.log("=" * 60)
+            
+            # Delete .venv if it exists
+            if self.venv.exists():
+                self.log(f"\nDeleting existing virtual environment: {self.venv}")
+                try:
+                    if sys.platform == 'win32':
+                        # Use Windows command for force delete
+                        result = subprocess.run(
+                            ['cmd', '/c', 'rmdir', '/S', '/Q', str(self.venv)],
+                            capture_output=True,
+                            text=True,
+                            timeout=60
+                        )
+                        if result.returncode != 0 and self.venv.exists():
+                            raise RuntimeError(f"Failed to delete venv: {result.stderr}")
+                    else:
+                        shutil.rmtree(self.venv, ignore_errors=False)
+                    self.log("  ✓ Virtual environment deleted")
+                except Exception as e:
+                    self.log(f"  ✗ Failed to delete venv: {e}")
+                    return False
+            else:
+                self.log("\nNo existing virtual environment to delete")
+            
+            # Delete wheelhouse if it exists
+            if self.wheelhouse.exists():
+                self.log(f"\nDeleting existing wheelhouse: {self.wheelhouse}")
+                try:
+                    shutil.rmtree(self.wheelhouse, ignore_errors=False)
+                    self.log("  ✓ Wheelhouse deleted")
+                except Exception as e:
+                    self.log(f"  ✗ Failed to delete wheelhouse: {e}")
+                    return False
+            else:
+                self.log("\nNo existing wheelhouse to delete")
+            
+            # Now run fresh installation with allow_destroy=True
+            self.log("\n" + "=" * 60)
+            self.log("Starting fresh installation...")
+            self.log("=" * 60)
+            
+            return self.install(skip_wheelhouse=False, allow_destroy=True)
+            
+        except KeyboardInterrupt:
+            self.log("\n\nRebuild interrupted by user")
+            return False
+        except Exception as e:
+            self.log(f"\n✗ Rebuild failed with exception:")
             self.log(f"  {type(e).__name__}: {str(e)}")
             
             import traceback

@@ -45,6 +45,8 @@ def main():
 
     # Set environment variables for server_app.py to read
     os.environ["BASE_MODEL"] = model_cfg["base_model"]
+    # Make /health identify the configured model_id (helps detect port conflicts)
+    os.environ["MODEL_NAME"] = model_id
     
     if model_cfg.get("adapter_dir"):
         os.environ["ADAPTER_DIR"] = model_cfg["adapter_dir"]

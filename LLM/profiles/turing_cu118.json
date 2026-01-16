@@ -32,6 +32,7 @@
     "PySide6": "6.7.3",
     "PySide6-Essentials": "6.7.3",
     "PySide6-Addons": "6.7.3",
+    "shiboken6": "6.7.3",
     "sympy": "1.13.1",
     "jinja2": "3.1.6",
     "fsspec": "2025.9.0",
@@ -49,7 +50,10 @@
     "open-clip-torch": "2.29.0",
     "pandas": "2.2.3",
     "psutil": "7.2.0",
-    "streamlit": "1.41.1"
+    "streamlit": "1.41.1",
+    "uvicorn": ">=0.30.0,<1.0.0",
+    "fastapi": ">=0.115.0,<1.0.0",
+    "pydantic": ">=2.0.0,<3.0.0"
   },
   "tested": "in_progress",
   "tested_on": ["T1000"],

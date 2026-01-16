@@ -9,10 +9,23 @@
     "max": "3.12",
     "recommended": "3.11"
   },
+  "torch_index": "https://download.pytorch.org/whl/cu118",
   "hardware": {
-    "compute_capability": ["7.5"],
-    "cuda_versions": ["11.8"],
-    "gpu_examples": ["RTX 2080 Ti", "RTX 2080", "RTX 2070", "RTX 2060", "T1000", "T600", "T400"]
+    "compute_capability": [
+      "7.5"
+    ],
+    "cuda_versions": [
+      "11.8"
+    ],
+    "gpu_examples": [
+      "RTX 2080 Ti",
+      "RTX 2080",
+      "RTX 2070",
+      "RTX 2060",
+      "T1000",
+      "T600",
+      "T400"
+    ]
   },
   "packages": {
     "typing-extensions": "4.8.0",
@@ -48,11 +61,15 @@
     "open-clip-torch": "2.29.0",
     "pandas": "2.2.3",
     "psutil": "7.2.0",
-    "streamlit": "1.41.1"
+    "streamlit": "1.41.1",
+    "uvicorn": ">=0.30.0,<1.0.0",
+    "fastapi": ">=0.115.0,<1.0.0",
+    "pydantic": ">=2.0.0,<3.0.0"
   },
   "tested": "in_progress",
-  "tested_on": ["T1000"],
+  "tested_on": [
+    "T1000"
+  ],
   "last_verified": "2025-01-30",
   "notes": "Configuration for T1000 workstation and RTX 2000 series. Uses older package versions for compatibility with CUDA 11.8."
 }
-

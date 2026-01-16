@@ -1,29 +1,36 @@
-# LLM Backend Server Configuration
-# Defines model configurations for persistent inference servers
-
 models:
-  # Default model - Phi-4 (4-bit quantized)
   default:
-    base_model: "C:/1_GitHome/Local-LLM-Server/LLM/models/unsloth__Phi-4-bnb-4bit"
     adapter_dir: null
-    model_type: "instruct"
+    base_model: C:/1_GitHome/Local-LLM-Server/LLM/models/unsloth__Phi-4-bnb-4bit
+    model_type: instruct
+    port: 10505
+    system_prompt: ''
+    use_4bit: true
+  nvidia_Llama-3.1-Nemotron-Nano-8B-v1:
+    adapter_dir: null
+    base_model: C:\1_GitHome\Local-LLM-Server\LLM\models\nvidia_Llama-3.1-Nemotron-Nano-8B-v1
+    model_type: base
+    port: 10502
+    system_prompt: ''
+    use_4bit: true
+  nvidia_NVIDIA-Nemotron-3-Nano-30B-A3B-BF16:
+    adapter_dir: null
+    base_model: C:\1_GitHome\Local-LLM-Server\LLM\models\nvidia__NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
+    model_type: base
+    port: 10503
+    system_prompt: ''
+    use_4bit: true
+  phi4_assistant:
+    adapter_dir: null
+    base_model: C:/1_GitHome/Local-LLM-Server/LLM/models/unsloth__Phi-4-bnb-4bit
+    model_type: instruct
+    port: 10501
+    system_prompt: You are a helpful AI assistant.
+    use_4bit: true
+  unsloth_gemma-2-2b-it-bnb-4bit:
+    base_model: C:\1_GitHome\Local-LLM-Server\LLM\models\unsloth__gemma-2-2b-it-bnb-4bit
+    adapter_dir: null
+    model_type: instruct
     port: 10500
     use_4bit: true
-    system_prompt: ""
-  
-  # Example: Phi-4 with custom system prompt
-  phi4_assistant:
-    base_model: "C:/1_GitHome/Local-LLM-Server/LLM/models/unsloth__Phi-4-bnb-4bit"
-    adapter_dir: null
-    model_type: "instruct"
-    port: 10501
-    use_4bit: true
-    system_prompt: "You are a helpful AI assistant."
-
-# Configuration Notes:
-# - Each model entry must have a unique port
-# - base_model: Path to model directory or HuggingFace model ID
-# - adapter_dir: Path to LoRA adapter (null for base-only)
-# - model_type: "base" or "instruct" (affects prompt formatting)
-# - use_4bit: Enable 4-bit quantization (requires bitsandbytes)
-# - system_prompt: Optional system prompt for instruct models
+    system_prompt: ''

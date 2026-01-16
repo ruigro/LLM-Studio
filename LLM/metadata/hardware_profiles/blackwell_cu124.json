@@ -9,10 +9,22 @@
     "max": "3.12",
     "recommended": "3.12"
   },
+  "torch_index": "https://download.pytorch.org/whl/cu124",
   "hardware": {
-    "compute_capability": ["10.0"],
-    "cuda_versions": ["12.4", "12.5", "12.6"],
-    "gpu_examples": ["RTX 5090", "RTX 5080", "RTX 5070 Ti", "RTX 5070"]
+    "compute_capability": [
+      "10.0"
+    ],
+    "cuda_versions": [
+      "12.4",
+      "12.5",
+      "12.6"
+    ],
+    "gpu_examples": [
+      "RTX 5090",
+      "RTX 5080",
+      "RTX 5070 Ti",
+      "RTX 5070"
+    ]
   },
   "packages": {
     "typing-extensions": "4.12.2",
@@ -48,11 +60,13 @@
     "open-clip-torch": "2.29.0",
     "pandas": "2.2.3",
     "psutil": "7.2.0",
-    "streamlit": "1.41.1"
+    "streamlit": "1.41.1",
+    "uvicorn": ">=0.30.0,<1.0.0",
+    "fastapi": ">=0.115.0,<1.0.0",
+    "pydantic": ">=2.0.0,<3.0.0"
   },
   "tested": false,
   "tested_on": [],
   "last_verified": "2025-01-06",
   "notes": "Configuration for next-gen RTX 5000 series (Blackwell architecture). Requires CUDA 12.4+. Updated to transformers 4.51.3 for peft compatibility."
 }
-

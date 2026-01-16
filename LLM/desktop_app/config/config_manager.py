@@ -26,7 +26,8 @@ class ConfigManager:
         """Load configuration from file."""
         default_config = {
             "host": "127.0.0.1",
-            "port": 8765,
+            # Default tool server port used across the app
+            "port": 8763,
             "token": "",
             "workspace_root": str(Path.cwd()),
             "allow_shell": False,

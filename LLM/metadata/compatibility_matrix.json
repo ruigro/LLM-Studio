@@ -1,156 +1,205 @@
 {
   "format_version": "1.0",
   "description": "VERIFIED hardware profiles. Only tested/confirmed combinations.",
-  
   "profiles": {
-    "cuda124_ampere_ada_blackwell": {
-      "description": "CUDA 12.4+, RTX 5090/5080/4090/4080/3090/3080 (Blackwell/Ada/Ampere)",
+    "ada_cu124": {
+      "description": "NVIDIA Ada Lovelace Architecture - RTX 4000 series",
       "hardware": {
-        "cuda_versions": ["12.4", "12.5", "12.6"],
-        "compute_capability": ["8.6", "8.9", "9.0", "10.0"],
-        "gpu_examples": ["RTX 5090", "RTX 5080", "RTX 5070", "RTX 4090", "RTX 4080", "RTX 4070", "RTX 3090", "RTX 3080", "RTX 3070", "RTX 3060"]
+        "compute_capability": [
+          "8.9"
+        ],
+        "cuda_versions": [
+          "12.4",
+          "12.5",
+          "12.6"
+        ],
+        "gpu_examples": [
+          "RTX 4090",
+          "RTX 4080",
+          "RTX 4070 Ti",
+          "RTX 4070",
+          "RTX 4060 Ti",
+          "RTX 4060"
+        ]
       },
       "packages": {
         "typing-extensions": "4.12.2",
-        "numpy": "1.26.4",
-        "torch": "2.6.0+cu124",
-        "torchvision": "0.21.0+cu124",
-        "torchaudio": "2.6.0+cu124",
-        "transformers": ">=4.57.0,<4.60.0",
-        "tokenizers": ">=0.22.0,<0.24.0",
+        "torch": "2.5.1+cu124",
+        "torchvision": "0.20.1+cu124",
+        "torchaudio": "2.5.1+cu124",
+        "transformers": ">=4.51.0,<4.60.0",
         "safetensors": ">=0.7.0,<0.8.0",
-        "huggingface-hub": ">=0.30.0,<1.0",
-        "peft": ">=0.13.0,<0.16.0",
+        "huggingface-hub": ">=0.27.0,<0.28.0",
         "accelerate": ">=1.2.0,<1.3.0",
-        "bitsandbytes": ">=0.45.0,<0.50.0",
         "datasets": ">=3.2.0,<4.0.0",
-        "shiboken6": "6.8.1",
         "PySide6": "6.8.1",
         "PySide6-Essentials": "6.8.1",
-        "PySide6-Addons": "6.8.1",
-        "nvidia-cuda-runtime-cu12": "12.6.*",
-        "nvidia-cuda-nvcc-cu12": "12.6.*"
+        "PySide6-Addons": "6.8.1"
       },
-      "tested": true,
-      "notes": "Verified on RTX 4090 + RTX A2000. Note: Binary wheels require CUDA 12.6 runtime",
-      "binary_packages": {
-        "triton": {
-          "type": "wheel",
-          "python": "cp312",
-          "url": "https://github.com/woct0rdho/triton-windows/releases/download/v3.2.0-windows.post9/triton-3.2.0-cp312-cp312-win_amd64.whl"
-        },
-        "causal_conv1d": {
-          "type": "wheel",
-          "python": "cp312",
-          "url": "https://huggingface.co/impactframes/ComfyUI_desktop_wheels_win_cp12_cu126/resolve/main/causal_conv1d-1.5.0.post8-cp312-cp312-win_amd64.whl"
-        },
-        "mamba_ssm": {
-          "type": "wheel",
-          "python": "cp312",
-          "url": "https://huggingface.co/impactframes/ComfyUI_desktop_wheels_win_cp12_cu126/resolve/main/mamba_ssm-2.2.4-cp312-cp312-win_amd64.whl"
-        }
-      }
+      "tested": false,
+      "tested_on": [],
+      "notes": "Configuration for RTX 4000 series. Uses CUDA 12.4 for optimal performance. Updated to transformers 4.51.3 for peft compatibility.",
+      "binary_packages": {}
     },
-    
-    "cuda121_ampere": {
-      "description": "CUDA 12.1-12.3, RTX 3000 series + A-series workstation",
+    "ampere_cu121": {
+      "description": "NVIDIA Ampere Architecture - RTX 3000 series + A-series workstations",
       "hardware": {
-        "cuda_versions": ["12.1", "12.2", "12.3"],
-        "compute_capability": ["8.0", "8.6"],
-        "gpu_examples": ["RTX 3090", "RTX 3080", "RTX 3070", "RTX 3060", "A100", "A30", "A2000", "A6000"]
+        "compute_capability": [
+          "8.0",
+          "8.6"
+        ],
+        "cuda_versions": [
+          "12.1",
+          "12.2",
+          "12.3"
+        ],
+        "gpu_examples": [
+          "RTX 3090",
+          "RTX 3080",
+          "RTX 3070",
+          "RTX 3060",
+          "A100",
+          "A30",
+          "A2000",
+          "A6000"
+        ]
       },
       "packages": {
         "typing-extensions": "4.12.2",
-        "numpy": "1.26.4",
         "torch": "2.5.1+cu121",
         "torchvision": "0.20.1+cu121",
         "torchaudio": "2.5.1+cu121",
-        "transformers": ">=4.57.0,<4.60.0",
-        "tokenizers": ">=0.22.0,<0.24.0",
+        "transformers": ">=4.51.0,<4.60.0",
         "safetensors": ">=0.7.0,<0.8.0",
-        "huggingface-hub": ">=0.30.0,<1.0",
-        "peft": ">=0.13.0,<0.16.0",
+        "huggingface-hub": ">=0.27.0,<0.28.0",
         "accelerate": ">=1.2.0,<1.3.0",
-        "bitsandbytes": ">=0.45.0,<0.50.0",
         "datasets": ">=3.2.0,<4.0.0",
-        "shiboken6": "6.8.1",
         "PySide6": "6.8.1",
         "PySide6-Essentials": "6.8.1",
-        "PySide6-Addons": "6.8.1",
-        "nvidia-cuda-runtime-cu12": "12.6.*",
-        "nvidia-cuda-nvcc-cu12": "12.6.*"
+        "PySide6-Addons": "6.8.1"
       },
       "tested": true,
-      "notes": "Verified on RTX A2000. Note: Binary wheels require CUDA 12.6 runtime (backward compatible with CUDA 12.1-12.3 drivers)",
-      "binary_packages": {
-        "triton": {
-          "type": "wheel",
-          "python": "cp312",
-          "url": "https://github.com/woct0rdho/triton-windows/releases/download/v3.2.0-windows.post9/triton-3.2.0-cp312-cp312-win_amd64.whl"
-        },
-        "causal_conv1d": {
-          "type": "wheel",
-          "python": "cp312",
-          "url": "https://huggingface.co/impactframes/ComfyUI_desktop_wheels_win_cp12_cu126/resolve/main/causal_conv1d-1.5.0.post8-cp312-cp312-win_amd64.whl"
-        },
-        "mamba_ssm": {
-          "type": "wheel",
-          "python": "cp312",
-          "url": "https://huggingface.co/impactframes/ComfyUI_desktop_wheels_win_cp12_cu126/resolve/main/mamba_ssm-2.2.4-cp312-cp312-win_amd64.whl"
-        }
-      }
+      "tested_on": [
+        "RTX A2000",
+        "RTX 4090"
+      ],
+      "notes": "Verified on RTX A2000 workstation. Compatible with RTX 3000 series and Ampere A-series GPUs.",
+      "binary_packages": {}
     },
-    
-    "cuda118_turing": {
-      "description": "CUDA 11.8, RTX 2000 series + Quadro T-series",
+    "blackwell_cu124": {
+      "description": "NVIDIA Blackwell Architecture - RTX 5000 series",
       "hardware": {
-        "cuda_versions": ["11.8"],
-        "compute_capability": ["7.5"],
-        "gpu_examples": ["RTX 2080 Ti", "RTX 2080", "RTX 2070", "RTX 2060", "T1000", "T600", "T400"]
+        "compute_capability": [
+          "10.0"
+        ],
+        "cuda_versions": [
+          "12.4",
+          "12.5",
+          "12.6"
+        ],
+        "gpu_examples": [
+          "RTX 5090",
+          "RTX 5080",
+          "RTX 5070 Ti",
+          "RTX 5070"
+        ]
+      },
+      "packages": {
+        "typing-extensions": "4.12.2",
+        "torch": "2.5.1+cu124",
+        "torchvision": "0.20.1+cu124",
+        "torchaudio": "2.5.1+cu124",
+        "transformers": ">=4.51.0,<4.60.0",
+        "safetensors": ">=0.7.0,<0.8.0",
+        "huggingface-hub": ">=0.27.0,<0.28.0",
+        "accelerate": ">=1.2.0,<1.3.0",
+        "datasets": ">=3.2.0,<4.0.0",
+        "PySide6": "6.8.1",
+        "PySide6-Essentials": "6.8.1",
+        "PySide6-Addons": "6.8.1"
+      },
+      "tested": false,
+      "tested_on": [],
+      "notes": "Configuration for next-gen RTX 5000 series (Blackwell architecture). Requires CUDA 12.4+. Updated to transformers 4.51.3 for peft compatibility.",
+      "binary_packages": {}
+    },
+    "hopper_cu124": {
+      "description": "NVIDIA Hopper Architecture - H100 datacenter GPUs",
+      "hardware": {
+        "compute_capability": [
+          "9.0"
+        ],
+        "cuda_versions": [
+          "12.4",
+          "12.5",
+          "12.6"
+        ],
+        "gpu_examples": [
+          "H100",
+          "H100 PCIe",
+          "H100 SXM5"
+        ]
+      },
+      "packages": {
+        "typing-extensions": "4.12.2",
+        "torch": "2.5.1+cu124",
+        "torchvision": "0.20.1+cu124",
+        "torchaudio": "2.5.1+cu124",
+        "transformers": ">=4.51.0,<4.60.0",
+        "safetensors": ">=0.7.0,<0.8.0",
+        "huggingface-hub": ">=0.27.0,<0.28.0",
+        "accelerate": ">=1.2.0,<1.3.0",
+        "datasets": ">=3.2.0,<4.0.0",
+        "PySide6": "6.8.1",
+        "PySide6-Essentials": "6.8.1",
+        "PySide6-Addons": "6.8.1"
+      },
+      "tested": false,
+      "tested_on": [],
+      "notes": "Configuration for H100 datacenter GPUs. Optimized for large-scale training workloads. Updated to transformers 4.51.3 for peft compatibility.",
+      "binary_packages": {}
+    },
+    "turing_cu118": {
+      "description": "NVIDIA Turing Architecture - RTX 2000 series + Quadro T-series",
+      "hardware": {
+        "compute_capability": [
+          "7.5"
+        ],
+        "cuda_versions": [
+          "11.8"
+        ],
+        "gpu_examples": [
+          "RTX 2080 Ti",
+          "RTX 2080",
+          "RTX 2070",
+          "RTX 2060",
+          "T1000",
+          "T600",
+          "T400"
+        ]
       },
       "packages": {
         "typing-extensions": "4.8.0",
-        "numpy": "1.26.4",
         "torch": "2.5.1+cu118",
         "torchvision": "0.20.1+cu118",
         "torchaudio": "2.5.1+cu118",
-        "transformers": ">=4.57.0,<4.60.0",
-        "tokenizers": ">=0.22.0,<0.24.0",
+        "transformers": ">=4.45.0,<4.60.0",
         "safetensors": ">=0.4.0,<0.8.0",
-        "huggingface-hub": ">=0.30.0,<1.0",
-        "peft": ">=0.13.0,<0.16.0",
+        "huggingface-hub": ">=0.25.0,<0.28.0",
         "accelerate": ">=1.0.0,<1.3.0",
-        "bitsandbytes": ">=0.45.0,<0.50.0",
         "datasets": ">=3.0.0,<4.0.0",
-        "shiboken6": "6.7.3",
         "PySide6": "6.7.3",
         "PySide6-Essentials": "6.7.3",
-        "PySide6-Addons": "6.7.3",
-        "nvidia-cuda-runtime-cu12": "12.6.*",
-        "nvidia-cuda-nvcc-cu12": "12.6.*"
+        "PySide6-Addons": "6.7.3"
       },
       "tested": "in_progress",
-      "notes": "Testing on T1000. Note: Binary wheels require CUDA 12.6 runtime (backward compatible with CUDA 11.8+ drivers)",
-      "binary_packages": {
-        "triton": {
-          "type": "wheel",
-          "python": "cp312",
-          "url": "https://github.com/woct0rdho/triton-windows/releases/download/v3.2.0-windows.post9/triton-3.2.0-cp312-cp312-win_amd64.whl"
-        },
-        "causal_conv1d": {
-          "type": "wheel",
-          "python": "cp312",
-          "url": "https://huggingface.co/impactframes/ComfyUI_desktop_wheels_win_cp12_cu126/resolve/main/causal_conv1d-1.5.0.post8-cp312-cp312-win_amd64.whl"
-        },
-        "mamba_ssm": {
-          "type": "wheel",
-          "python": "cp312",
-          "url": "https://huggingface.co/impactframes/ComfyUI_desktop_wheels_win_cp12_cu126/resolve/main/mamba_ssm-2.2.4-cp312-cp312-win_amd64.whl"
-        }
-      }
+      "tested_on": [
+        "T1000"
+      ],
+      "notes": "Configuration for T1000 workstation and RTX 2000 series. Uses older package versions for compatibility with CUDA 11.8.",
+      "binary_packages": {}
     }
   },
-  
   "fallback_rules": {
     "unknown_newer_gpu": {
       "action": "use_profile",
@@ -186,17 +235,37 @@
       "message": "Multiple GPUs detected with different capabilities. Using configuration for the least capable GPU to ensure compatibility."
     }
   },
-  
   "compute_capability_map": {
-    "10.0": {"architecture": "Blackwell", "profile": "cuda124_ampere_ada_blackwell"},
-    "9.0": {"architecture": "Hopper", "profile": "cuda124_ampere_ada_blackwell"},
-    "8.9": {"architecture": "Ada Lovelace", "profile": "cuda124_ampere_ada_blackwell"},
-    "8.6": {"architecture": "Ampere (RTX 30xx)", "profile": "cuda124_ampere_ada_blackwell"},
-    "8.0": {"architecture": "Ampere (A-series)", "profile": "cuda121_ampere"},
-    "7.5": {"architecture": "Turing (RTX 20xx)", "profile": "cuda118_turing"}
+    "8.9": {
+      "architecture": "Ada",
+      "profile": "ada_cu124"
+    },
+    "10.0": {
+      "architecture": "Blackwell",
+      "profile": "blackwell_cu124"
+    },
+    "9.0": {
+      "architecture": "Hopper",
+      "profile": "hopper_cu124"
+    },
+    "8.0": {
+      "architecture": "Ampere",
+      "profile": "ampere_cu121"
+    },
+    "8.6": {
+      "architecture": "Ampere",
+      "profile": "ampere_cu121"
+    },
+    "7.5": {
+      "architecture": "Turing",
+      "profile": "turing_cu118"
+    }
   },
-  
   "common_packages": {
+    "numpy": "1.26.4",
+    "tokenizers": ">=0.21.0,<0.24.0",
+    "peft": ">=0.13.0,<0.16.0",
+    "bitsandbytes": ">=0.45.0,<0.50.0",
     "sympy": "1.13.1",
     "jinja2": "3.1.6",
     "fsspec": "2025.9.0",
@@ -214,14 +283,20 @@
     "open-clip-torch": "2.29.0",
     "pandas": "2.2.3",
     "psutil": "7.2.0",
-    "streamlit": "1.41.1"
+    "streamlit": "1.41.1",
+    "uvicorn": ">=0.30.0,<1.0.0",
+    "fastapi": ">=0.115.0,<1.0.0",
+    "pydantic": ">=2.0.0,<3.0.0"
   },
-  
   "blacklist": {
-    "packages": ["torchao", "pytorch-ao", "torchao-nightly", "torch-ao"],
+    "packages": [
+      "torchao",
+      "pytorch-ao",
+      "torchao-nightly",
+      "torch-ao"
+    ],
     "reason": "Cause transformers import failures"
   },
-  
   "unsupported": {
     "gtx_10xx_pascal": "GTX 1080/1070/1060 (compute 6.1) support being dropped in PyTorch 2.8+. May work with CUDA 11.8 profile but untested.",
     "gtx_9xx_maxwell": "GTX 980/970 (compute 5.x) not supported by PyTorch 2.5+",

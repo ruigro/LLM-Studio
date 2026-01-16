@@ -886,10 +886,13 @@ class SystemDetector:
         return recommendations
 
 
-    def get_hardware_profile(self) -> Dict:
+    def get_hardware_profile(self, selected_gpu_index: Optional[int] = None) -> Dict:
         """
         Get complete hardware profile for package selection.
         Returns all relevant hardware info in a structured format.
+        
+        Args:
+            selected_gpu_index: Optional GPU index to use (for multi-GPU systems with user selection)
         """
         results = self.detect_all()
         
@@ -898,17 +901,24 @@ class SystemDetector:
         python_info = results.get("python", {})
         
         # Determine best GPU (highest compute capability, then VRAM)
+        # OR use user-selected GPU index if provided
         best_gpu = None
         if cuda_info.get("gpus"):
-            gpus_with_compute = [g for g in cuda_info["gpus"] if g.get("compute_capability")]
-            if gpus_with_compute:
-                # Sort by compute capability (as float), then by VRAM
-                best_gpu = max(gpus_with_compute, key=lambda g: (
-                    float(g.get("compute_capability", "0")),
-                    self._parse_vram(g.get("memory", "0"))
-                ))
+            if selected_gpu_index is not None and 0 <= selected_gpu_index < len(cuda_info["gpus"]):
+                # User explicitly selected a GPU
+                best_gpu = cuda_info["gpus"][selected_gpu_index]
+                print(f"[HARDWARE] Using user-selected GPU index {selected_gpu_index}: {best_gpu.get('name', 'Unknown')}")
             else:
-                best_gpu = cuda_info["gpus"][0]  # Fallback to first GPU
+                # Auto-select: highest compute capability, then VRAM
+                gpus_with_compute = [g for g in cuda_info["gpus"] if g.get("compute_capability")]
+                if gpus_with_compute:
+                    # Sort by compute capability (as float), then by VRAM
+                    best_gpu = max(gpus_with_compute, key=lambda g: (
+                        float(g.get("compute_capability", "0")),
+                        self._parse_vram(g.get("memory", "0"))
+                    ))
+                else:
+                    best_gpu = cuda_info["gpus"][0]  # Fallback to first GPU
         
         profile = {
             "cuda_version": cuda_info.get("version"),

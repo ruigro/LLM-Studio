@@ -43,7 +43,7 @@ def build_run_adapter_cmd(cfg: InferenceConfig) -> List[str]:
     return cmd
 
 
-def run_inference(cfg: InferenceConfig, env: Optional[dict] = None) -> str:
+def run_inference(cfg: InferenceConfig, env: Optional[dict] = None, log_callback: Optional[Callable[[str], None]] = None) -> str:
     """
     Run inference using persistent server.
     
@@ -59,7 +59,7 @@ def run_inference(cfg: InferenceConfig, env: Optional[dict] = None) -> str:
     
     # Ensure server is running for this model
     manager = get_global_server_manager()
-    server_url = manager.ensure_server_running(cfg.model_id)
+    server_url = manager.ensure_server_running(cfg.model_id, log_callback=log_callback)
     
     # Call persistent server via HTTP
     client = InferenceClient(server_url)
@@ -74,7 +74,8 @@ def run_inference_with_tools(
     cfg: ToolEnabledInferenceConfig,
     tool_callback: Optional[Callable[[str, dict, any], None]] = None,
     approval_callback: Optional[Callable[[str, dict], bool]] = None,
-    env: Optional[dict] = None
+    env: Optional[dict] = None,
+    log_callback: Optional[Callable[[str], None]] = None
 ) -> Tuple[str, List[dict]]:
     """
     Run inference with tool calling support.
@@ -105,7 +106,7 @@ def run_inference_with_tools(
     
     if not cfg.enable_tools:
         # Tools disabled, run normal inference
-        output = run_inference(cfg, env)
+        output = run_inference(cfg, env, log_callback=log_callback)
         return output, []
     
     # Initialize tool infrastructure
@@ -137,7 +138,7 @@ def run_inference_with_tools(
         )
         
         # Call LLM
-        assistant_text = run_inference(inference_cfg, env)
+        assistant_text = run_inference(inference_cfg, env, log_callback=log_callback)
         final_output = assistant_text
         
         # Append assistant output ONCE (before tool loop)
