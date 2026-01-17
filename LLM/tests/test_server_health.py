@@ -1,0 +1,94 @@
+"""
+PHASE 3: pytest test suite for server health checks.
+"""
+import pytest
+import sys
+import time
+from pathlib import Path
+
+# Add LLM to path
+llm_dir = Path(__file__).parent.parent
+sys.path.insert(0, str(llm_dir))
+
+
+@pytest.fixture
+def config_path():
+    """Get config path"""
+    from core.inference import get_app_root
+    return get_app_root() / "configs" / "llm_backends.yaml"
+
+
+@pytest.fixture
+def server_manager(config_path):
+    """Get LLMServerManager instance"""
+    from core.llm_server_manager import get_llm_server_manager
+    return get_llm_server_manager(config_path)
+
+
+def test_state_store_servers(server_manager):
+    """Test StateStore server tracking"""
+    from core.state_store import get_state_store
+    
+    state_store = get_state_store()
+    servers = state_store.list_servers()
+    
+    # Should be able to query servers (even if empty)
+    assert isinstance(servers, list)
+
+
+def test_server_manager_config_load(server_manager):
+    """Test that server manager loads config"""
+    assert server_manager.config is not None
+    assert "models" in server_manager.config
+    assert isinstance(server_manager.config["models"], dict)
+
+
+@pytest.mark.skipif(True, reason="Requires model to be configured")
+def test_server_startup_lifecycle(server_manager):
+    """Test full server lifecycle (requires configured model)"""
+    # This test is skipped by default - enable manually for integration testing
+    
+    # Get first available model
+    models = list(server_manager.config["models"].keys())
+    if not models:
+        pytest.skip("No models configured")
+    
+    model_id = models[0]
+    
+    try:
+        # Start server
+        server_manager.start_server(model_id)
+        
+        # Check it's running
+        assert model_id in server_manager.running_servers
+        
+        # Health check
+        health_ok = server_manager._check_health(model_id)
+        assert health_ok, f"Server {model_id} failed health check"
+        
+        # Check StateStore
+        from core.state_store import get_state_store
+        state_store = get_state_store()
+        server_state = state_store.get_server(model_id)
+        
+        assert server_state is not None
+        assert server_state["status"] in ["RUNNING", "STARTING"]
+        assert server_state["port"] > 0
+        
+    finally:
+        # Cleanup
+        server_manager.shutdown_server(model_id)
+
+
+def test_port_allocation(server_manager):
+    """Test port allocation logic"""
+    # Test _find_free_port
+    used_ports = {10500, 10501, 10502}
+    free_port = server_manager._find_free_port(10500, used_ports=used_ports)
+    
+    assert free_port is not None
+    assert free_port not in used_ports
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])
