@@ -1,6 +1,8 @@
 """
 Environment Registry - Bridges EnvironmentManager and LLM Server System
 Provides environment specifications with validated Python paths for each model.
+
+PHASE 2 REFACTOR: Uses env_key for shared environments instead of per-model envs.
 """
 from dataclasses import dataclass
 from pathlib import Path
@@ -8,22 +10,40 @@ import sys
 import json
 from typing import Optional
 import subprocess
+import uuid
+import shutil
 
 
 @dataclass
 class EnvSpec:
     """Environment specification with validated python executable"""
-    key: str  # Environment identifier
+    key: str  # Environment key (e.g., "torch-cu121-transformers-bnb")
     python_executable: Path  # Path to python.exe in the environment (validated)
     metadata: dict  # Environment metadata from EnvironmentManager
 
 
 class EnvRegistry:
-    """Registry for managing per-model Python environments"""
+    """
+    Registry for managing shared Python environments by env_key.
+    PHASE 2: Replaces per-model envs with shared env_key-based envs.
+    """
     
     def __init__(self):
         from core.environment_manager import EnvironmentManager
+        from core.envs.env_key_resolver import EnvKeyResolver
+        from core.state_store import get_state_store
+        
         self.env_manager = EnvironmentManager()
+        self.env_key_resolver = EnvKeyResolver()
+        self.state_store = get_state_store()
+        
+        # PHASE 2: Shared environments directory (.envs/ instead of environments/)
+        self.envs_dir = self.env_manager.root_dir / ".envs"
+        self.envs_dir.mkdir(exist_ok=True)
+        
+        # Constraints directory for reproducible builds
+        self.constraints_dir = self.env_manager.root_dir / "constraints"
+        self.constraints_dir.mkdir(exist_ok=True)
         
         # Windows subprocess flags to prevent CMD window flashing
         self.subprocess_flags = {}
@@ -36,37 +56,278 @@ class EnvRegistry:
                 'creationflags': subprocess.CREATE_NO_WINDOW
             }
 
+    def _get_env_python_executable(self, env_key: str) -> Optional[Path]:
+        """Get Python executable path for env_key"""
+        env_path = self.envs_dir / env_key / ".venv"
+        if sys.platform == 'win32':
+            python_exe = env_path / "Scripts" / "python.exe"
+        else:
+            python_exe = env_path / "bin" / "python"
+        return python_exe if python_exe.exists() else None
+
     def _get_active_profile_data(self) -> Optional[dict]:
+        """Get active hardware profile data (delegates to resolver)"""
+        return self.env_key_resolver.get_active_profile_data()
+    
+    def _atomic_create_env(
+        self,
+        env_key: str,
+        profile_data: dict,
+        log_callback=None
+    ) -> Path:
         """
-        Resolve the active (selected/auto) hardware profile and return its JSON data.
-        This is the single source of truth for torch build (+cuXXX) and torch_index.
+        PHASE 2: Atomically create environment with health checks.
+        Creates in .tmp/<env_key>-<uuid>, validates, then renames to final location.
+        
+        Args:
+            env_key: Environment key
+            profile_data: Hardware profile data
+            log_callback: Optional log callback
+        
+        Returns:
+            Path to final env directory
+        
+        Raises:
+            RuntimeError: If creation or validation fails
+        """
+        def log(msg):
+            if log_callback:
+                log_callback(msg)
+            import logging
+            logging.info(msg)
+        
+        # Create unique temp directory
+        tmp_id = str(uuid.uuid4())[:8]
+        tmp_dir = self.envs_dir / ".tmp" / f"{env_key}-{tmp_id}"
+        tmp_dir.parent.mkdir(exist_ok=True)
+        
+        final_dir = self.envs_dir / env_key
+        
+        # Mark as CREATING in StateStore
+        self.state_store.upsert_env(
+            env_key=env_key,
+            status="CREATING"
+        )
+        
+        try:
+            log(f"Creating environment in temp location: {tmp_dir}")
+            
+            # Create venv
+            venv_path = tmp_dir / ".venv"
+            result = subprocess.run(
+                [sys.executable, "-m", "venv", str(venv_path), "--clear"],
+                capture_output=True,
+                text=True,
+                timeout=120,
+                **self.subprocess_flags
+            )
+            
+            if result.returncode != 0:
+                raise RuntimeError(f"Failed to create venv: {result.stderr}")
+            
+            # Get Python executable
+            if sys.platform == 'win32':
+                python_exe = venv_path / "Scripts" / "python.exe"
+            else:
+                python_exe = venv_path / "bin" / "python"
+            
+            if not python_exe.exists():
+                raise RuntimeError(f"Python executable not found after venv creation: {python_exe}")
+            
+            log(f"Virtual environment created, installing dependencies...")
+            
+            # Install base packages
+            log("Installing pip, setuptools, wheel...")
+            subprocess.run(
+                [str(python_exe), "-m", "pip", "install", "--upgrade", "pip", "setuptools", "wheel", "-q"],
+                capture_output=True,
+                text=True,
+                timeout=300,
+                **self.subprocess_flags
+            )
+            
+            # Install server framework
+            log("Installing server framework...")
+            subprocess.run(
+                [str(python_exe), "-m", "pip", "install",
+                 "uvicorn[standard]", "fastapi", "pydantic", "pyyaml", "-q"],
+                capture_output=True,
+                text=True,
+                timeout=300,
+                **self.subprocess_flags
+            )
+            
+            # Install torch stack
+            log("Installing PyTorch stack...")
+            self._ensure_profile_torch(python_exe, profile_data, log_callback=log_callback)
+            
+            # Install minimal inference stack
+            log("Installing inference packages...")
+            self._install_inference_stack(python_exe, profile_data, log_callback=log_callback)
+            
+            # Health check
+            log("Running health checks...")
+            if not self._health_check_env(python_exe, profile_data):
+                raise RuntimeError("Environment health check failed")
+            
+            # Generate constraints file
+            log("Generating constraints file...")
+            self._generate_constraints(python_exe, env_key)
+            
+            # Move to final location (atomic on same filesystem)
+            log(f"Moving environment to final location: {final_dir}")
+            if final_dir.exists():
+                # Remove old version
+                shutil.rmtree(final_dir)
+            tmp_dir.rename(final_dir)
+            
+            # Update StateStore
+            torch_version, cuda_available = self._get_torch_info(self._get_env_python_executable(env_key))
+            self.state_store.upsert_env(
+                env_key=env_key,
+                python_path=str(self._get_env_python_executable(env_key)),
+                torch_version=torch_version,
+                cuda_version=profile_data.get("cuda_version", "cpu"),
+                backend="transformers",  # Default
+                status="READY"
+            )
+            
+            log(f"Environment {env_key} ready!")
+            return final_dir
+            
+        except Exception as e:
+            # Clean up temp dir on failure
+            if tmp_dir.exists():
+                try:
+                    shutil.rmtree(tmp_dir)
+                except:
+                    pass
+            
+            # Mark as FAILED in StateStore
+            self.state_store.upsert_env(
+                env_key=env_key,
+                status="FAILED",
+                last_error=str(e)[:500]
+            )
+            
+            raise RuntimeError(f"Failed to create environment {env_key}: {e}")
+
+    def _health_check_env(self, python_exe: Path, profile_data: Optional[dict]) -> bool:
+        """
+        Run health checks on environment.
+        
+        Args:
+            python_exe: Python executable path
+            profile_data: Hardware profile data
+        
+        Returns:
+            True if all checks pass
         """
         try:
-            llm_dir = Path(__file__).resolve().parent.parent.parent  # LLM/
-            from setup_state import SetupStateManager
-            from system_detector import SystemDetector
-            from core.profile_selector import ProfileSelector
-
-            state = SetupStateManager()
-            override_profile_id = state.get_selected_profile()
-            selected_gpu_index = state.get_selected_gpu_index()
-
-            detector = SystemDetector()
-            hw_profile = detector.get_hardware_profile(selected_gpu_index=selected_gpu_index)
-
-            matrix_path = llm_dir / "metadata" / "compatibility_matrix.json"
-            selector = ProfileSelector(matrix_path)
-            profile_id, _pkg_versions, _warnings, _binary_pkgs = selector.select_profile(
-                hw_profile,
-                override_profile_id=override_profile_id,
-            )
-
-            profile_path = llm_dir / "profiles" / f"{profile_id}.json"
-            if profile_path.exists():
-                return json.loads(profile_path.read_text(encoding="utf-8"))
+            # Check basic imports
+            code = "import uvicorn, fastapi, transformers, peft, torch, accelerate, bitsandbytes\n"
+            
+            # If CUDA profile, verify CUDA is available
+            if profile_data:
+                torch_spec = str(profile_data.get("packages", {}).get("torch", ""))
+                torch_index = str(profile_data.get("torch_index", ""))
+                require_cuda = ("+cu" in torch_spec) or ("/whl/cu" in torch_index)
+                
+                if require_cuda:
+                    code += "assert torch.cuda.is_available(), 'CUDA not available'\n"
+                    code += "assert '+cu' in torch.__version__, 'CPU torch detected in CUDA env'\n"
+            
+            code += "print('OK')"
+            
+            result = self._run_python(python_exe, code, timeout=30)
+            return result.returncode == 0 and "OK" in result.stdout
         except Exception:
-            return None
-        return None
+            return False
+    
+    def _get_torch_info(self, python_exe: Path) -> tuple[str, bool]:
+        """Get torch version and CUDA availability"""
+        try:
+            result = self._run_python(
+                python_exe,
+                "import torch; print(torch.__version__); print(torch.cuda.is_available())",
+                timeout=20
+            )
+            if result.returncode == 0:
+                lines = result.stdout.strip().split("\n")
+                version = lines[0] if lines else "unknown"
+                cuda = "True" in lines[1] if len(lines) > 1 else False
+                return version, cuda
+        except:
+            pass
+        return "unknown", False
+    
+    def _generate_constraints(self, python_exe: Path, env_key: str):
+        """
+        Generate constraints file from frozen packages.
+        
+        Args:
+            python_exe: Python executable
+            env_key: Environment key
+        """
+        try:
+            result = subprocess.run(
+                [str(python_exe), "-m", "pip", "freeze"],
+                capture_output=True,
+                text=True,
+                timeout=30,
+                **self.subprocess_flags
+            )
+            
+            if result.returncode == 0:
+                constraints_file = self.constraints_dir / f"{env_key}.txt"
+                constraints_file.write_text(result.stdout, encoding="utf-8")
+        except Exception:
+            pass  # Non-fatal
+    
+    def _install_inference_stack(self, python_exe: Path, profile_data: dict, log_callback=None):
+        """Install minimal inference stack"""
+        def log(msg):
+            if log_callback:
+                log_callback(msg)
+        
+        pkgs = (profile_data or {}).get("packages", {}) if isinstance(profile_data, dict) else {}
+        
+        def _pkg(name: str, default: Optional[str] = None) -> Optional[str]:
+            v = pkgs.get(name)
+            if v is None:
+                return default
+            v = str(v).strip()
+            if v.startswith(("==", ">=", "<=", ">", "<")):
+                return f"{name}{v}"
+            return f"{name}=={v}"
+        
+        minimal_specs = [
+            _pkg("numpy", "numpy==1.26.4"),
+            _pkg("huggingface-hub", None),
+            "transformers==4.51.3",
+            "tokenizers==0.21.4",
+            _pkg("safetensors", "safetensors>=0.7.0,<0.8.0"),
+            _pkg("accelerate", "accelerate>=1.2.0,<1.3.0"),
+            _pkg("peft", "peft>=0.13.0,<0.16.0"),
+            _pkg("bitsandbytes", "bitsandbytes>=0.45.0,<0.50.0"),
+            _pkg("sentencepiece", "sentencepiece==0.2.0"),
+            _pkg("pyyaml", "pyyaml>=6.0.0,<7.0.0"),
+            _pkg("requests", "requests>=2.31.0,<3.0.0"),
+        ]
+        minimal_specs = [s for s in minimal_specs if s]
+        
+        for spec in minimal_specs:
+            log(f"Installing {spec}...")
+            r = subprocess.run(
+                [str(python_exe), "-m", "pip", "install", "--upgrade", spec],
+                capture_output=True,
+                text=True,
+                timeout=1800,
+                **self.subprocess_flags
+            )
+            if r.returncode != 0:
+                err = (r.stderr or r.stdout or "").strip()
+                log(f"Warning: Failed to install {spec}: {err[:500]}")
 
     def _run_python(self, python_exe: Path, code: str, timeout: int = 30) -> subprocess.CompletedProcess:
         return subprocess.run(
@@ -189,7 +450,8 @@ class EnvRegistry:
     
     def get_env_for_model(self, model_path: str, log_callback=None) -> EnvSpec:
         """
-        Get environment spec for a model, creating if needed.
+        PHASE 2: Get environment spec for a model using env_key.
+        Creates shared environment if needed (atomic provisioning).
         
         Args:
             model_path: Path to the model (base model path)
@@ -199,152 +461,74 @@ class EnvRegistry:
             EnvSpec with validated python executable path
             
         Raises:
-            RuntimeError: If environment is corrupted or python not found
+            RuntimeError: If environment creation/validation fails
         """
         def log(msg):
             if log_callback:
                 log_callback(msg)
             import logging
             logging.info(msg)
-
-        # Get environment path - this returns the directory path
-        env_dir = self.env_manager.get_environment_path(model_path=model_path)
         
-        # Check if environment exists
-        env_created = False
-        if not self.env_manager.environment_exists(model_path=model_path):
-            # Create the environment
-            log(f"Environment for {model_path} doesn't exist, creating...")
-            try:
-                # Create environment (this installs packages too)
-                success, error = self.env_manager.create_environment(
-                    model_path=model_path
-                )
-                if not success:
-                    raise RuntimeError(f"Failed to create environment: {error}")
-                env_created = True
-            except Exception as e:
-                raise RuntimeError(f"Failed to create environment: {e}")
-        
-        # Get Python executable path
-        python_exe = self.env_manager.get_python_executable(model_path=model_path)
-
-        # Determine active profile once (source of truth)
+        # Get profile data
         profile_data = self._get_active_profile_data()
-
-        # If the environment exists but has CPU torch while we expect CUDA, treat as missing deps.
-        if python_exe and profile_data and self._env_needs_cuda_torch(python_exe, profile_data):
-            env_created = True  # force reinstall path below
+        if not profile_data:
+            raise RuntimeError("Could not determine hardware profile")
         
-        # Install dependencies if environment was just created or if they're missing
-        if env_created or not self._has_server_dependencies(python_exe):
-            import subprocess
-            from pathlib import Path
-            
-            llm_dir = Path(__file__).parent.parent.parent
-            
-            log(f"Installing dependencies for server environment...")
-            try:
-                # First install server framework (fast, needed first)
-                log(f"Installing server framework (uvicorn, fastapi)...")
-                result = subprocess.run(
-                    [str(python_exe), "-m", "pip", "install", 
-                     "uvicorn[standard]", "fastapi", "pydantic", "pyyaml", "-q"],
-                    capture_output=True,
-                    text=True,
-                    timeout=300,
-                    **self.subprocess_flags
+        # Resolve env_key from model requirements
+        # TODO: Parse model config to determine backend/quantization
+        # For now, use transformers + quantization as default
+        env_key = self.env_key_resolver.resolve_env_key(
+            backend="transformers",
+            use_quantization=True,
+            model_path=model_path,
+            profile_data=profile_data
+        )
+        
+        log(f"Resolved env_key: {env_key}")
+        
+        # Check if env exists in StateStore
+        env_state = self.state_store.get_env(env_key)
+        
+        # PHASE 2: Check for existing ready environment
+        python_exe = self._get_env_python_executable(env_key)
+        
+        if python_exe and python_exe.exists() and env_state and env_state['status'] == 'READY':
+            # Verify health
+            if self._health_check_env(python_exe, profile_data):
+                log(f"Using existing environment: {env_key}")
+                return EnvSpec(
+                    key=env_key,
+                    python_executable=python_exe,
+                    metadata={"env_key": env_key, "status": "READY"}
                 )
-                if result.returncode != 0:
-                    log(f"Warning: Failed to install server framework: {result.stderr}")
-
-                # Ensure torch stack matches the active profile (CUDA vs CPU)
-                if profile_data:
-                    try:
-                        self._ensure_profile_torch(python_exe, profile_data, log_callback=log_callback)
-                    except Exception as e:
-                        raise RuntimeError(f"Failed to ensure profile torch stack: {e}")
-
-                # Install minimal inference stack (avoid full UI requirements in per-model env).
-                # This keeps per-model envs smaller and prevents resolver deadlocks/conflicts.
-                pkgs = (profile_data or {}).get("packages", {}) if isinstance(profile_data, dict) else {}
-                def _pkg(name: str, default: Optional[str] = None) -> Optional[str]:
-                    v = pkgs.get(name)
-                    if v is None:
-                        return default
-                    v = str(v).strip()
-                    if v.startswith(("==", ">=", "<=", ">", "<")):
-                        return f"{name}{v}"
-                    return f"{name}=={v}"
-
-                # Keep transformers pinned to a known-good build (avoids picking very new versions that
-                # can conflict with tighter hub pins in older profiles).
-                minimal_specs = [
-                    _pkg("numpy", "numpy==1.26.4"),
-                    _pkg("huggingface-hub", None),
-                    "transformers==4.51.3",
-                    "tokenizers==0.21.4",
-                    _pkg("safetensors", "safetensors>=0.7.0,<0.8.0"),
-                    _pkg("accelerate", "accelerate>=1.2.0,<1.3.0"),
-                    _pkg("peft", "peft>=0.13.0,<0.16.0"),
-                    _pkg("bitsandbytes", "bitsandbytes>=0.45.0,<0.50.0"),
-                    _pkg("sentencepiece", "sentencepiece==0.2.0"),
-                    _pkg("pyyaml", "pyyaml>=6.0.0,<7.0.0"),
-                    _pkg("requests", "requests>=2.31.0,<3.0.0"),
-                ]
-                minimal_specs = [s for s in minimal_specs if s]
-                log("Installing minimal inference stack in per-model env...")
-                for spec in minimal_specs:
-                    log(f"Installing {spec} ...")
-                    r = subprocess.run(
-                        [str(python_exe), "-m", "pip", "install", "--upgrade", spec],
-                        capture_output=True,
-                        text=True,
-                        timeout=1800,
-                        **self.subprocess_flags
-                    )
-                    if r.returncode != 0:
-                        err = (r.stderr or r.stdout or "").strip()
-                        log(f"Warning: Failed to install {spec}: {err[:500]}")
-                
-                log("Dependencies installed (per-model inference env).")
-            except Exception as e:
-                log(f"Warning: Failed to install dependencies: {e}")
-                # Non-fatal - might already be installed
-            except Exception as e:
-                logging.warning(f"Failed to install dependencies: {e}")
-                # Non-fatal - might already be installed
+            else:
+                log(f"Existing environment {env_key} failed health check, recreating...")
         
-        # VALIDATE: Ensure python executable exists
-        if python_exe is None or not python_exe.exists():
+        # PHASE 2: Check for ongoing creation (idempotency)
+        if env_state and env_state['status'] == 'CREATING':
             raise RuntimeError(
-                f"Environment python not found: {python_exe}\n"
-                f"Environment may be corrupted. Try recreating it.\n"
-                f"Environment directory: {env_dir}"
+                f"Environment {env_key} is already being created. "
+                f"Please wait for the other creation to complete."
             )
         
-        # Validate it's actually executable (on Windows, check it's a file)
-        if not python_exe.is_file():
-            raise RuntimeError(
-                f"Python path exists but is not a file: {python_exe}\n"
-                f"Environment may be corrupted."
-            )
+        # PHASE 2: Check for migration from old per-model env
+        old_env_path = self.env_manager.get_python_executable(model_path=model_path)
+        if old_env_path and old_env_path.exists() and not python_exe:
+            log(f"Found old per-model environment, will create new shared env: {env_key}")
         
-        # Load metadata
-        metadata_file = env_dir / "environment_metadata.json"
-        if metadata_file.exists():
-            try:
-                metadata = json.loads(metadata_file.read_text(encoding='utf-8'))
-            except Exception as e:
-                # Non-fatal: use empty metadata if we can't load it
-                metadata = {"error": f"Failed to load metadata: {e}"}
-        else:
-            metadata = {"warning": "No metadata file found"}
+        # Create environment atomically
+        log(f"Creating new environment: {env_key}")
+        self._atomic_create_env(env_key, profile_data, log_callback=log_callback)
+        
+        # Get Python executable
+        python_exe = self._get_env_python_executable(env_key)
+        if not python_exe or not python_exe.exists():
+            raise RuntimeError(f"Environment created but Python executable not found: {python_exe}")
         
         return EnvSpec(
-            key=env_dir.name,
+            key=env_key,
             python_executable=python_exe,
-            metadata=metadata
+            metadata={"env_key": env_key, "status": "READY"}
         )
     
     def _has_server_dependencies(self, python_exe: Path) -> bool:
@@ -358,22 +542,7 @@ class EnvRegistry:
             True if uvicorn, fastapi, transformers, peft, and torch are available.
             If the active profile expects CUDA torch, this also requires torch.cuda.is_available().
         """
-        try:
-            profile_data = self._get_active_profile_data()
-            require_cuda = False
-            if profile_data:
-                torch_spec = str(profile_data.get("packages", {}).get("torch", ""))
-                torch_index = str(profile_data.get("torch_index", ""))
-                require_cuda = ("+cu" in torch_spec) or ("/whl/cu" in torch_index)
-
-            code = "import uvicorn, fastapi, transformers, peft, torch\n"
-            if require_cuda:
-                code += "assert torch.cuda.is_available()\n"
-                code += "assert '+cu' in torch.__version__\n"
-            result = subprocess.run([str(python_exe), "-c", code], capture_output=True, timeout=30, **self.subprocess_flags)
-            return result.returncode == 0
-        except Exception:
-            return False
+        return self._health_check_env(python_exe, self._get_active_profile_data())
     
     def validate_env_spec(self, env_spec: EnvSpec) -> bool:
         """
