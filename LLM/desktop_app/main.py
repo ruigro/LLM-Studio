@@ -26,6 +26,7 @@ from desktop_app.training_widgets import MetricCard
 from desktop_app.splash_screen import SplashScreen
 from desktop_app.pages.server_page import ServerPage
 from desktop_app.pages.mcp_page import MCPPage
+from desktop_app.pages.github_import_page import GitHubImportPage
 
 from system_detector import SystemDetector
 from smart_installer import SmartInstaller
@@ -33,6 +34,7 @@ from setup_state import SetupStateManager
 from model_integrity_checker import ModelIntegrityChecker
 from core.models import (DEFAULT_BASE_MODELS, search_hf_models, download_hf_model, list_local_adapters, 
                          list_local_downloads, get_app_root, detect_model_capabilities, get_capability_icons, get_model_size)
+from core.model_requirements import get_model_compatibility_badge
 from core.training import TrainingConfig, default_output_dir, build_finetune_cmd
 from core.inference import InferenceConfig, build_run_adapter_cmd
 from core.environment_manager import EnvironmentManager
@@ -367,38 +369,54 @@ class ToolInferenceWorker(QThread):
             # Load tool server config (single source of truth)
             cfg_mgr = ConfigManager()
             tool_cfg = cfg_mgr.load()
-            port = int(tool_cfg.get("port", 8763))
-            host = str(tool_cfg.get("host", "127.0.0.1")).strip() or "127.0.0.1"
-            token = str(tool_cfg.get("token", "")).strip()
+            execution_mode = tool_cfg.get("execution_mode", "http")  # Default to HTTP for backward compatibility
+            workspace_root = Path(tool_cfg.get("workspace_root", "."))
+            
+            native_executor = None
+            tool_server_url = None
+            tool_server_token = None
+            
+            if execution_mode == "native":
+                # Native mode - execute tools directly
+                self.progress_update.emit("[INFO] Using native tool execution (no HTTP server needed)")
+                from core.tool_calling_native import NativeToolExecutor
+                native_executor = NativeToolExecutor(workspace_root, tool_cfg)
+            else:
+                # HTTP mode - use tool server
+                port = int(tool_cfg.get("port", 8763))
+                host = str(tool_cfg.get("host", "127.0.0.1")).strip() or "127.0.0.1"
+                token = str(tool_cfg.get("token", "")).strip()
 
-            # Always connect locally (even if server binds 0.0.0.0)
-            if host in ("0.0.0.0", "::", "[::]"):
-                host = "127.0.0.1"
-            tool_server_url = f"http://{host}:{port}"
+                # Always connect locally (even if server binds 0.0.0.0)
+                if host in ("0.0.0.0", "::", "[::]"):
+                    host = "127.0.0.1"
+                tool_server_url = f"http://{host}:{port}"
+                tool_server_token = token
 
-            # Quick reachability check (gives a clear error instead of “nothing happens”)
-            try:
-                with urllib.request.urlopen(f"{tool_server_url}/health", timeout=1) as resp:
-                    _ = resp.read()
-            except Exception as e:
-                raise RuntimeError(
-                    f"Tool Server is not reachable at {tool_server_url}.\n"
-                    f"Open the Servers tab and start 'Tool Server (MCP)'.\n"
-                    f"Details: {e}"
-                )
+                # Quick reachability check (gives a clear error instead of "nothing happens")
+                try:
+                    with urllib.request.urlopen(f"{tool_server_url}/health", timeout=1) as resp:
+                        _ = resp.read()
+                except Exception as e:
+                    raise RuntimeError(
+                        f"Tool Server is not reachable at {tool_server_url}.\n"
+                        f"Open the Servers tab and start 'Tool Server (MCP)'.\n"
+                        f"Details: {e}"
+                    )
             
             # Create config
             cfg = ToolEnabledInferenceConfig(
                 prompt=self.prompt,
                 model_id=self.model_id,
                 enable_tools=True,
-                tool_server_url=tool_server_url,
-                tool_server_token=token,
+                tool_server_url=tool_server_url or "",  # Empty string if native mode
+                tool_server_token=tool_server_token or "",  # Empty string if native mode
                 auto_execute_safe_tools=True,
                 max_tool_iterations=5,
                 system_prompt=self.system_prompt,
                 max_new_tokens=256,
-                temperature=0.7
+                temperature=0.7,
+                native_executor=native_executor  # Pass native executor if in native mode
             )
             
             # Tool callback to emit signals
@@ -638,10 +656,12 @@ class DownloadThread(QThread):
             dest = self.target_dir / model_slug
             
             # Download using the custom tqdm class for real-time updates
+            # Note: resume_download is not compatible with local_dir, so we handle it differently
             result = snapshot_download(
                 repo_id=self.model_id,
                 local_dir=str(dest),
                 local_dir_use_symlinks=False,
+                resume_download=False,  # Not compatible with local_dir
                 tqdm_class=CustomTqdm
             )
             
@@ -1777,6 +1797,9 @@ class MainWindow(QMainWindow):
         self._startup_env_popup_shown: bool = False
         self._model_env_popup_shown: bool = False
         self._last_env_error_details: str | None = None
+        
+        # GPU VRAM detection and storage
+        self.user_vram_gb = self._detect_gpu_vram()
 
         # Create a beautiful unified header
         header_widget = QFrame()
@@ -2138,6 +2161,7 @@ class MainWindow(QMainWindow):
         self.server_page = ServerPage(self)
         tabs.addTab(self.server_page, "Server")
         tabs.addTab(MCPPage(self), "MCP")
+        tabs.addTab(GitHubImportPage(self), "GitHub Import")
         
         self.env_page = self._build_environment_management_page()
         self.env_tab_index = tabs.addTab(self.env_page, "Environment Manager")
@@ -2957,32 +2981,84 @@ class MainWindow(QMainWindow):
         
         def _do_close():
             """Actually close the window after server has stopped and threads cleaned up"""
+            if getattr(self, "_closing", False):
+                return  # Already closing
+            self._closing = True
+            
             print("[DEBUG] Server stopped (or timed out) - cleaning up and closing window...")
+            
+            # Stop any persistent LLM servers we started (non-blocking, with timeout)
+            try:
+                from core.llm_server_manager import get_global_server_manager
+                manager = get_global_server_manager()
+                # Shutdown in a thread to avoid blocking UI
+                import threading
+                def shutdown_thread():
+                    try:
+                        manager.shutdown_all()
+                    except Exception as e:
+                        print(f"[DEBUG] Error shutting down LLM servers: {e}")
+                t = threading.Thread(target=shutdown_thread, daemon=True)
+                t.start()
+                t.join(timeout=3)  # Wait max 3 seconds for shutdown
+            except Exception as e:
+                print(f"[DEBUG] Error shutting down LLM servers: {e}")
+            
             _cleanup_all_pages()
-            self._shutdown_in_progress = True  # Ensure flag is set
-            self.close()  # This will trigger closeEvent again, but flag will allow it
+            self._shutdown_in_progress = True
+            
+            # Use QApplication.quit() to properly exit the application
+            QTimer.singleShot(50, QApplication.instance().quit)
+        
+        # Add a force-close timeout as backup (8 seconds total)
+        force_close_timer = QTimer()
+        force_close_timer.setSingleShot(True)
+        def force_close():
+            print("[DEBUG] Force close timeout - closing immediately")
+            force_close_timer.stop()
+            _do_close()
+        force_close_timer.timeout.connect(force_close)
+        force_close_timer.start(8000)  # 8 second timeout
         
         if server_page:
             try:
                 # Request stop and wait for it to actually complete (or timeout after 5s)
                 # The callback will be called when server stops OR after timeout
                 print("[DEBUG] Requesting server stop and waiting for completion...")
-                server_page.request_stop(on_done=_do_close, timeout_ms=5000)
+                callback_called = {"called": False}
+                
+                def on_server_stopped():
+                    if callback_called["called"]:
+                        return
+                    callback_called["called"] = True
+                    print("[DEBUG] Server stop callback invoked")
+                    force_close_timer.stop()
+                    _do_close()
+                
+                # request_stop will call on_done immediately if no server thread exists
+                server_stopped = server_page.request_stop(on_done=on_server_stopped, timeout_ms=5000)
+                
+                # If server wasn't running, callback should fire immediately
+                # But add a backup in case callback doesn't fire
+                if not server_stopped:
+                    print("[DEBUG] Server was not running, callback should have fired immediately")
+                    # Backup: if callback hasn't fired after 200ms, proceed anyway
+                    def backup_close():
+                        if not callback_called["called"]:
+                            print("[DEBUG] Callback backup triggered - closing anyway")
+                            force_close_timer.stop()
+                            _do_close()
+                    QTimer.singleShot(200, backup_close)
             except Exception as e:
                 print(f"[DEBUG] Error requesting server stop: {e}")
                 # If there's an error, close immediately
+                force_close_timer.stop()
                 _do_close()
         else:
             # No server page, close immediately
             print("[DEBUG] No server page found - closing immediately")
+            force_close_timer.stop()
             _do_close()
-
-        # Best-effort: also stop any persistent LLM servers we started
-        try:
-            from core.llm_server_manager import get_global_server_manager
-            get_global_server_manager().shutdown_all()
-        except Exception as e:
-            print(f"[DEBUG] Error shutting down LLM servers: {e}")
     
     def eventFilter(self, obj, event) -> bool:
         """Event filter to catch mouse events for window resizing from child widgets"""
@@ -3988,13 +4064,19 @@ class MainWindow(QMainWindow):
         sys_layout.setSpacing(6)  # Tighter spacing
         sys_layout.setContentsMargins(10, 8, 10, 8)  # Tighter margins
 
-        # Get real GPU info
-        cuda_info = self.system_info.get("cuda", {})
-        gpus = self._sort_gpus_by_memory(cuda_info.get("gpus", []))
+        # Get real GPU info (filtered by selection)
+        all_gpus_raw = self.system_info.get("cuda", {}).get("gpus", []) or []
+        all_gpus = self._sort_gpus_by_memory(all_gpus_raw)
+        gpus = self._get_filtered_gpus()
+        gpus = self._sort_gpus_by_memory(gpus)
         
         if gpus:
             status_color = self._get_status_color(True)
-            gpu_status = QLabel(f"✅ <span style='font-weight: bold; text-decoration: none; border: none; border-bottom: none;'>{len(gpus)} GPU{'s' if len(gpus) > 1 else ''} detected</span>")
+            # Show count of selected GPUs, but note if there are more available
+            if len(all_gpus) > len(gpus):
+                gpu_status = QLabel(f"✅ <span style='font-weight: bold; text-decoration: none; border: none; border-bottom: none;'>{len(gpus)} of {len(all_gpus)} GPU{'s' if len(all_gpus) > 1 else ''} selected</span>")
+            else:
+                gpu_status = QLabel(f"✅ <span style='font-weight: bold; text-decoration: none; border: none; border-bottom: none;'>{len(gpus)} GPU{'s' if len(gpus) > 1 else ''} detected</span>")
             gpu_status.setObjectName("homeGpuStatus")
             gpu_status.setStyleSheet(f"background: transparent; color: {status_color}; font-weight: bold; text-decoration: none; border: none; border-bottom: none;")
             font = gpu_status.font()
@@ -4003,8 +4085,12 @@ class MainWindow(QMainWindow):
             self.themed_widgets["labels"].append(gpu_status)
             sys_layout.addWidget(gpu_status)
             
-            # Display each GPU
-            for idx, gpu in enumerate(gpus):
+            # Display each GPU with checkboxes if more than 1 GPU detected (show all, but only selected are usable)
+            self.gpu_checkboxes = {}  # Store checkboxes by original index
+            selected_indices = self._get_selected_gpu_indices()
+            
+            # Show ALL GPUs (not just filtered) so user can select/deselect
+            for idx, gpu in enumerate(all_gpus):
                 gpu_row = QHBoxLayout()
                 gpu_name = gpu.get("name", "Unknown GPU")
                 gpu_mem = gpu.get("memory", "Unknown")
@@ -4027,6 +4113,35 @@ class MainWindow(QMainWindow):
                 gpu_mem_label.setFont(font)
                 self.themed_widgets["labels"].append(gpu_mem_label)
                 gpu_row.addWidget(gpu_mem_label)
+                
+                # Add checkbox at the end if more than 1 GPU detected (check all_gpus, not filtered)
+                if len(all_gpus) > 1:
+                    gpu_checkbox = QCheckBox()
+                    gpu_checkbox.setChecked(gpu_display_idx in selected_indices)
+                    gpu_checkbox.stateChanged.connect(lambda state, orig_idx=gpu_display_idx: self._on_gpu_selection_changed(orig_idx, state))
+                    # Make checkbox much bigger
+                    gpu_checkbox.setStyleSheet("""
+                        QCheckBox {
+                            spacing: 5px;
+                        }
+                        QCheckBox::indicator {
+                            width: 24px;
+                            height: 24px;
+                        }
+                        QCheckBox::indicator:unchecked {
+                            border: 2px solid #888;
+                            border-radius: 4px;
+                            background: transparent;
+                        }
+                        QCheckBox::indicator:checked {
+                            border: 2px solid #4CAF50;
+                            border-radius: 4px;
+                            background: #4CAF50;
+                        }
+                    """)
+                    gpu_row.addWidget(gpu_checkbox)
+                    self.gpu_checkboxes[gpu_display_idx] = gpu_checkbox
+                
                 sys_layout.addLayout(gpu_row)
         else:
             gpu_status = QLabel("⚠️ <span style='font-weight: bold; text-decoration: none; border: none; border-bottom: none;'>No GPUs detected</span>")
@@ -4265,10 +4380,88 @@ class MainWindow(QMainWindow):
         main_layout.setSpacing(10)
         main_layout.setContentsMargins(15, 15, 15, 15)
         
-        # 1. TOP SEARCH BAR (Beautiful and prominent)
+        # 1. TOP: TABS + SEARCH BAR (Integrated header)
+        header_container = QWidget()
+        header_layout = QHBoxLayout(header_container)
+        header_layout.setContentsMargins(0, 0, 0, 0)
+        header_layout.setSpacing(15)
+        
+        # Tab widget (Browse / Downloaded) - tab bar will be hidden, using custom buttons instead
+        self.models_content_tabs = QTabWidget()
+        self.models_content_tabs.tabBar().setVisible(False)  # Hide built-in tab bar
+        self.models_content_tabs.setStyleSheet("""
+            QTabWidget::pane {
+                border: 1px solid rgba(102, 126, 234, 0.2);
+                background: transparent;
+                border-radius: 8px;
+            }
+        """)
+        
+        # Create custom tab buttons styled to match the original tab appearance
+        self.browse_tab_btn = QPushButton("🚀 Browse Models")
+        self.browse_tab_btn.setCheckable(True)
+        self.browse_tab_btn.setChecked(True)  # Browse is default
+        self.browse_tab_btn.setMinimumHeight(50)
+        self.browse_tab_btn.setStyleSheet("""
+            QPushButton {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #667eea, stop:1 #764ba2);
+                color: white;
+                padding: 10px 30px;
+                border-top-left-radius: 8px;
+                border-top-right-radius: 8px;
+                font-weight: bold;
+                font-size: 12pt;
+                border: none;
+            }
+            QPushButton:checked {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #667eea, stop:1 #764ba2);
+                color: white;
+            }
+            QPushButton:!checked {
+                background: rgba(102, 126, 234, 0.1);
+                color: #888;
+            }
+        """)
+        self.browse_tab_btn.clicked.connect(lambda: self.models_content_tabs.setCurrentIndex(0))
+        
+        self.downloaded_tab_btn = QPushButton("💾 Downloaded")
+        self.downloaded_tab_btn.setCheckable(True)
+        self.downloaded_tab_btn.setChecked(False)
+        self.downloaded_tab_btn.setMinimumHeight(50)
+        self.downloaded_tab_btn.setStyleSheet("""
+            QPushButton {
+                background: rgba(102, 126, 234, 0.1);
+                color: #888;
+                padding: 10px 30px;
+                border-top-left-radius: 8px;
+                border-top-right-radius: 8px;
+                font-weight: bold;
+                font-size: 12pt;
+                border: none;
+            }
+            QPushButton:checked {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #667eea, stop:1 #764ba2);
+                color: white;
+            }
+            QPushButton:!checked {
+                background: rgba(102, 126, 234, 0.1);
+                color: #888;
+            }
+        """)
+        self.downloaded_tab_btn.clicked.connect(lambda: self.models_content_tabs.setCurrentIndex(1))
+        
+        # Add custom tab buttons to header layout
+        header_layout.addWidget(self.browse_tab_btn)
+        header_layout.addWidget(self.downloaded_tab_btn)
+        
+        # Add stretch to push search bar to the right
+        header_layout.addStretch(1)
+        
+        # Search bar on the same line as tab buttons
         search_container = QFrame()
         search_container.setObjectName("searchContainer")
-        search_container.setMinimumHeight(80)
+        search_container.setMinimumHeight(50)
+        search_container.setMaximumWidth(500)
         search_container.setStyleSheet("""
             QFrame#searchContainer {
                 background: qlineargradient(x1:0, y1:0, x2:1, y2:0, 
@@ -4277,24 +4470,24 @@ class MainWindow(QMainWindow):
                 border-radius: 12px;
             }
         """)
-        search_h_layout = QHBoxLayout(search_container)
-        search_h_layout.setContentsMargins(20, 10, 20, 10)
-        search_h_layout.setSpacing(15)
+        search_layout = QHBoxLayout(search_container)
+        search_layout.setContentsMargins(12, 5, 12, 5)
+        search_layout.setSpacing(8)
         
         search_icon = QLabel("🔍")
-        search_icon.setStyleSheet("font-size: 20pt; background: transparent;")
-        search_h_layout.addWidget(search_icon)
+        search_icon.setStyleSheet("font-size: 14pt; background: transparent;")
+        search_layout.addWidget(search_icon)
         
         self.hf_query = QLineEdit()
-        self.hf_query.setPlaceholderText("Search thousands of models on Hugging Face (e.g., Qwen2.5, Llama-3, DeepSeek)...")
-        self.hf_query.setMinimumHeight(45)
+        self.hf_query.setPlaceholderText("Search HuggingFace models...")
+        self.hf_query.setMinimumHeight(32)
         self.hf_query.setStyleSheet("""
             QLineEdit {
                 background-color: rgba(255, 255, 255, 0.05);
                 border: 2px solid rgba(102, 126, 234, 0.5);
-                border-radius: 8px;
-                padding: 5px 15px;
-                font-size: 14pt;
+                border-radius: 6px;
+                padding: 5px 10px;
+                font-size: 11pt;
                 color: white;
             }
             QLineEdit:focus {
@@ -4303,38 +4496,21 @@ class MainWindow(QMainWindow):
             }
         """)
         self.hf_query.returnPressed.connect(self._hf_search)
-        search_h_layout.addWidget(self.hf_query, 1)
+        self.hf_query.textChanged.connect(self._on_search_text_changed)
+        search_layout.addWidget(self.hf_query, 1)
         
-        self.hf_search_btn = QPushButton("Search Models")
-        self.hf_search_btn.setMinimumHeight(45)
-        self.hf_search_btn.setMinimumWidth(150)
+        self.hf_search_btn = QPushButton("Search")
+        self.hf_search_btn.setMinimumHeight(32)
+        self.hf_search_btn.setMinimumWidth(70)
         self.hf_search_btn.clicked.connect(self._hf_search)
-        search_h_layout.addWidget(self.hf_search_btn)
+        search_layout.addWidget(self.hf_search_btn)
         
-        main_layout.addWidget(search_container)
+        header_layout.addWidget(search_container)
         
-        # 2. MAIN CONTENT TABS
-        self.models_content_tabs = QTabWidget()
-        self.models_content_tabs.setStyleSheet("""
-            QTabWidget::pane {
-                border: 1px solid rgba(102, 126, 234, 0.2);
-                background: transparent;
-                border-radius: 8px;
-            }
-            QTabBar::tab {
-                background: rgba(102, 126, 234, 0.1);
-                color: #888;
-                padding: 10px 30px;
-                border-top-left-radius: 8px;
-                border-top-right-radius: 8px;
-                font-weight: bold;
-                font-size: 12pt;
-            }
-            QTabBar::tab:selected {
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #667eea, stop:1 #764ba2);
-                color: white;
-            }
-        """)
+        main_layout.addWidget(header_container)
+        
+        # Connect tab widget changes to update button states
+        self.models_content_tabs.currentChanged.connect(self._on_models_tab_changed)
         
         # 2a. BROWSE TAB (Curated + Search Results)
         browse_tab = QWidget()
@@ -4434,6 +4610,21 @@ class MainWindow(QMainWindow):
         # 3. BOTTOM STATUS & CONFIG
         bottom_row = QHBoxLayout()
         
+        # GPU VRAM display and override
+        gpu_frame = QFrame()
+        gpu_frame.setStyleSheet("background: rgba(0,0,0,0.2); border-radius: 6px; padding: 2px;")
+        gpu_layout = QHBoxLayout(gpu_frame)
+        gpu_layout.setContentsMargins(10, 5, 10, 5)
+        gpu_layout.addWidget(QLabel("🎮 GPU VRAM:"))
+        self.gpu_vram_label = QLabel(f"{self.user_vram_gb:.0f}GB")
+        self.gpu_vram_label.setStyleSheet("background: transparent; border: none; font-weight: bold; color: #667eea;")
+        gpu_layout.addWidget(self.gpu_vram_label)
+        self.gpu_vram_change_btn = QPushButton("Change")
+        self.gpu_vram_change_btn.setMaximumWidth(70)
+        self.gpu_vram_change_btn.clicked.connect(self._change_gpu_vram)
+        gpu_layout.addWidget(self.gpu_vram_change_btn)
+        bottom_row.addWidget(gpu_frame)
+        
         # Download path config
         path_frame = QFrame()
         path_frame.setStyleSheet("background: rgba(0,0,0,0.2); border-radius: 6px; padding: 2px;")
@@ -4498,12 +4689,12 @@ class MainWindow(QMainWindow):
             for model_status in incomplete_models:
                 self._log_models(f"   ✗ {model_status.model_name} - Missing: {', '.join(model_status.missing_files)}")
         
-        # Downloaded models (Grid layout)
+        # Downloaded models (Grid layout - 2 columns like browse)
         models_dir = self.root / "models"
         models_dirs = [models_dir]
         
         row, col = 0, 0
-        max_cols = 3 # More columns for downloaded models since they are smaller
+        max_cols = 2  # 2 columns (50/50) to match browse layout
         
         for base_dir in models_dirs:
             if base_dir.exists():
@@ -4511,17 +4702,30 @@ class MainWindow(QMainWindow):
                     if model_dir.is_dir():
                         model_name = model_dir.name
                         
+                        # Try to extract model ID from directory name (e.g., unsloth__model -> unsloth/model)
+                        model_id = model_name.replace("__", "/")
+                        
                         # Check if model is complete
                         status = self.model_checker.check_model(model_dir)
                         if not status.is_complete:
                             size = "⚠️ INCOMPLETE"
                             icons = "❌"
+                            compatibility_badge = None
                         else:
                             size = get_model_size(str(model_dir))
                             capabilities = detect_model_capabilities(model_name=model_name, model_path=str(model_dir))
                             icons = get_capability_icons(capabilities)
+                            # Get compatibility badge for downloaded models
+                            compatibility_badge = get_model_compatibility_badge(model_id, model_name, self.user_vram_gb)
                         
-                        card = DownloadedModelCard(model_name, str(model_dir), size, icons, is_incomplete=not status.is_complete)
+                        card = DownloadedModelCard(
+                            model_name, 
+                            str(model_dir), 
+                            size, 
+                            icons, 
+                            is_incomplete=not status.is_complete,
+                            compatibility_badge=compatibility_badge
+                        )
                         card.set_theme(self.dark_mode)
                         card.selected.connect(self._on_model_selected)
                         card.delete_clicked.connect(self._on_delete_model)
@@ -4581,7 +4785,11 @@ class MainWindow(QMainWindow):
             capabilities = detect_model_capabilities(model_id=model_id, model_name=name)
             icons = get_capability_icons(capabilities)
             
-            card = ModelCard(name, model_id, desc, size, icons, is_downloaded, is_new)
+            # Get compatibility badge
+            compatibility_badge = get_model_compatibility_badge(model_id, name, self.user_vram_gb)
+            
+            card = ModelCard(name, model_id, desc, size, icons, is_downloaded, is_new, 
+                           compatibility_badge=compatibility_badge)
             card.set_theme(self.dark_mode)
             card.download_clicked.connect(self._download_curated_model)
             self.curated_layout.addWidget(card, row, col)
@@ -4749,6 +4957,26 @@ class MainWindow(QMainWindow):
                 self._log_models(f"❌ Error deleting model: {str(e)}")
                 QMessageBox.critical(self, "Error", f"Could not delete model directory:\n{str(e)}\n\nFiles may be locked by another process.")
     
+    def _on_models_tab_changed(self, index: int):
+        """Handle models tab changes - sync custom button states"""
+        if index == 0:  # Browse Models tab
+            self.browse_tab_btn.setChecked(True)
+            self.downloaded_tab_btn.setChecked(False)
+        elif index == 1:  # Downloaded tab
+            self.browse_tab_btn.setChecked(False)
+            self.downloaded_tab_btn.setChecked(True)
+    
+    def _on_search_text_changed(self, text: str):
+        """Handle search text changes - return to curated view when cleared"""
+        if not text.strip():
+            # Search bar is empty, return to curated view
+            self.browse_stack.setCurrentIndex(0)
+    
+    def _download_model_by_id(self, model_id: str):
+        """Download a model by its ID (for search results)"""
+        # Reuse the curated model download logic
+        self._download_curated_model(model_id)
+    
     def _download_curated_model(self, model_id: str):
         """Download a curated model in background thread with progress"""
         # Check if already downloading
@@ -4756,14 +4984,22 @@ class MainWindow(QMainWindow):
             self._log_models(f"⚠ {model_id} is already downloading...")
             return
         
-        # Find the card
+        # Find the card (check both curated and search results)
         card = None
         for c in self.model_cards:
             if c.model_id == model_id:
                 card = c
                 break
         
+        # If not found in curated, check search results
         if not card:
+            for c in self.search_model_cards:
+                if c.model_id == model_id:
+                    card = c
+                    break
+        
+        if not card:
+            self._log_models(f"❌ Card not found for {model_id}")
             return
         
         # IMMEDIATELY disable button to prevent double-clicks
@@ -4909,6 +5145,27 @@ class MainWindow(QMainWindow):
         card.download_btn.setEnabled(True)
         card.download_btn.setText("❌ Failed - Retry")
 
+    def _change_gpu_vram(self) -> None:
+        """Open dialog to change GPU VRAM override"""
+        current_vram = self.user_vram_gb
+        vram, ok = QInputDialog.getDouble(
+            self,
+            "Set GPU VRAM",
+            f"Enter your GPU VRAM in GB:\n\n"
+            f"Current: {current_vram:.0f}GB\n"
+            f"(Leave empty to use auto-detection)",
+            value=current_vram,
+            min=1.0,
+            max=128.0,
+            decimals=1
+        )
+        if ok and vram > 0:
+            self._set_gpu_vram_override(vram)
+            self.gpu_vram_label.setText(f"{vram:.0f}GB")
+            # Refresh models to update compatibility badges
+            self._refresh_models()
+            self._log_models(f"✓ GPU VRAM set to {vram:.0f}GB - compatibility badges updated")
+    
     def _browse_hf_target(self) -> None:
         d = QFileDialog.getExistingDirectory(self, "Select download folder", str(self.root))
         if d:
@@ -4916,7 +5173,10 @@ class MainWindow(QMainWindow):
 
     def _hf_search(self) -> None:
         q = self.hf_query.text().strip()
+        
+        # If search is empty, return to curated view
         if not q:
+            self.browse_stack.setCurrentIndex(0)
             return
             
         # Switch to Search Results view
@@ -4958,7 +5218,10 @@ class MainWindow(QMainWindow):
                 dl_text = f"{h.downloads:,}" if h.downloads else "0"
                 likes_text = f"{h.likes:,}" if h.likes else "0"
                 
-                # Create card
+                # Get compatibility badge
+                compatibility_badge = get_model_compatibility_badge(model_id, model_name, self.user_vram_gb)
+                
+                # Create card with download functionality
                 card = ModelCard(
                     model_name, 
                     model_id, 
@@ -4967,15 +5230,17 @@ class MainWindow(QMainWindow):
                     icons, 
                     is_downloaded, 
                     downloads=dl_text, 
-                    likes=likes_text
+                    likes=likes_text,
+                    compatibility_badge=compatibility_badge
                 )
                 card.set_theme(self.dark_mode)
-                card.download_clicked.connect(self._download_curated_model)
+                # FIXED: Connect to the correct download handler for search results
+                card.download_clicked.connect(lambda mid=model_id: self._download_model_by_id(mid))
                 self.search_results_layout.addWidget(card, row, col)
                 self.search_model_cards.append(card)
                 
                 col += 1
-                if col >= 2: # 2 columns for search results
+                if col >= 2: # 2 columns for search results (50/50 ratio)
                     col = 0
                     row += 1
                     
@@ -4991,6 +5256,146 @@ class MainWindow(QMainWindow):
         """Deprecated: use individual card download buttons"""
         pass
 
+    def _detect_gpu_vram(self) -> float:
+        """
+        Detect GPU VRAM from system or load from config override.
+        Returns VRAM in GB, defaults to 24GB (RTX 4090) if detection fails.
+        """
+        # Try to load manual override from config
+        config_path = self.root / "desktop_app" / "config" / "gpu_config.json"
+        if config_path.exists():
+            try:
+                with open(config_path, "r", encoding="utf-8") as f:
+                    config = json.load(f)
+                    if "vram_gb" in config and isinstance(config["vram_gb"], (int, float)):
+                        return float(config["vram_gb"])
+            except Exception:
+                pass  # Fall through to auto-detection
+        
+        # Auto-detect from system
+        try:
+            detector = SystemDetector()
+            hardware_profile = detector.get_hardware_profile()
+            vram_gb = hardware_profile.get("vram_gb", 0)
+            if vram_gb > 0:
+                return float(vram_gb)
+        except Exception:
+            pass  # Fall through to default
+        
+        # Default to 24GB (RTX 4090) if detection fails
+        return 24.0
+    
+    def _set_gpu_vram_override(self, vram_gb: float) -> None:
+        """Save manual GPU VRAM override to config file."""
+        config_path = self.root / "desktop_app" / "config" / "gpu_config.json"
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        
+        try:
+            # Load existing config to preserve selected_gpu_indices
+            config = {}
+            if config_path.exists():
+                with open(config_path, "r", encoding="utf-8") as f:
+                    config = json.load(f)
+            
+            config["vram_gb"] = vram_gb
+            with open(config_path, "w", encoding="utf-8") as f:
+                json.dump(config, f, indent=2)
+            self.user_vram_gb = vram_gb
+        except Exception as e:
+            self._log_models(f"⚠️ Failed to save GPU VRAM override: {e}")
+    
+    def _get_selected_gpu_indices(self) -> list:
+        """Get list of selected GPU indices from config file."""
+        config_path = self.root / "desktop_app" / "config" / "gpu_config.json"
+        if config_path.exists():
+            try:
+                with open(config_path, "r", encoding="utf-8") as f:
+                    config = json.load(f)
+                    if "selected_gpu_indices" in config:
+                        selected = config["selected_gpu_indices"]
+                        # Validate that selected indices still exist
+                        cuda_info = self.system_info.get("cuda", {})
+                        all_gpus = cuda_info.get("gpus", []) or []
+                        valid_indices = [gpu.get("_orig_index", idx) for idx, gpu in enumerate(all_gpus)]
+                        # Filter to only valid indices
+                        return [idx for idx in selected if idx in valid_indices]
+            except Exception:
+                pass
+        
+        # Default: if no config, select all GPUs
+        cuda_info = self.system_info.get("cuda", {})
+        gpus = cuda_info.get("gpus", []) or []
+        if gpus:
+            return [gpu.get("_orig_index", idx) for idx, gpu in enumerate(gpus)]
+        return []
+    
+    def _save_selected_gpu_indices(self, indices: list) -> None:
+        """Save selected GPU indices to config file."""
+        config_path = self.root / "desktop_app" / "config" / "gpu_config.json"
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        
+        try:
+            # Load existing config to preserve vram_gb
+            config = {}
+            if config_path.exists():
+                with open(config_path, "r", encoding="utf-8") as f:
+                    config = json.load(f)
+            
+            config["selected_gpu_indices"] = indices
+            with open(config_path, "w", encoding="utf-8") as f:
+                json.dump(config, f, indent=2)
+        except Exception as e:
+            print(f"⚠️ Failed to save GPU selection: {e}")
+    
+    def _on_gpu_selection_changed(self, gpu_index: int, state: int) -> None:
+        """Handle GPU checkbox state change."""
+        selected = self._get_selected_gpu_indices()
+        
+        if state == Qt.Checked:
+            if gpu_index not in selected:
+                selected.append(gpu_index)
+        else:
+            # Ensure at least one GPU is selected
+            if len(selected) <= 1:
+                QMessageBox.warning(
+                    self,
+                    "GPU Selection",
+                    "At least one GPU must be selected. Please select another GPU before deselecting this one."
+                )
+                # Re-check the checkbox
+                if hasattr(self, 'gpu_checkboxes') and gpu_index in self.gpu_checkboxes:
+                    self.gpu_checkboxes[gpu_index].setChecked(True)
+                return
+            selected.remove(gpu_index)
+        
+        self._save_selected_gpu_indices(selected)
+        
+        # Refresh GPU selectors in Train/Test tabs
+        self._refresh_gpu_selectors()
+    
+    def _get_filtered_gpus(self) -> list:
+        """Get list of GPUs filtered by user selection."""
+        cuda_info = self.system_info.get("cuda", {})
+        all_gpus = cuda_info.get("gpus", []) or []
+        
+        if len(all_gpus) <= 1:
+            # If 1 or 0 GPUs, return all (no filtering needed)
+            return all_gpus
+        
+        selected_indices = self._get_selected_gpu_indices()
+        if not selected_indices:
+            # If no selection saved, default to all GPUs
+            return all_gpus
+        
+        # Filter GPUs to only include selected ones
+        filtered = []
+        for gpu in all_gpus:
+            orig_idx = gpu.get("_orig_index", all_gpus.index(gpu))
+            if orig_idx in selected_indices:
+                filtered.append(gpu)
+        
+        return filtered if filtered else all_gpus  # Fallback to all if filter results in empty
+    
     def _log_models(self, msg: str) -> None:
         self.models_status.appendPlainText(msg)
 
@@ -5312,9 +5717,12 @@ class MainWindow(QMainWindow):
         gpu_frame.setFrameShape(QFrame.StyledPanel)
         gpu_layout = QVBoxLayout(gpu_frame)
         
-        # GPU status using REAL system detection
+        # GPU status using REAL system detection (filtered by selection)
         cuda_info = self.system_info.get("cuda", {})
-        gpus = self._sort_gpus_by_memory(cuda_info.get("gpus", []))
+        all_gpus = self._sort_gpus_by_memory(cuda_info.get("gpus", []))
+        gpus = self._get_filtered_gpus()
+        # Re-sort filtered GPUs
+        gpus = self._sort_gpus_by_memory(gpus)
         
         if gpus:
             gpu_count = len(gpus)
@@ -6254,10 +6662,10 @@ class MainWindow(QMainWindow):
         gpu_frame = QGroupBox("⚙️ Hardware Settings")
         gpu_layout = QVBoxLayout(gpu_frame)
         
-        cuda_info = self.system_info.get("cuda", {})
-        gpus = self._sort_gpus_by_memory(cuda_info.get("gpus", []))
+        # GPU selection dropdown for test tab (filtered by selection)
+        gpus = self._get_filtered_gpus()
+        gpus = self._sort_gpus_by_memory(gpus)
         
-        # GPU selection dropdown for test tab
         gpu_row = QHBoxLayout()
         gpu_row.addWidget(QLabel("GPU for Inference:"))
         self.test_gpu_select = QComboBox()
@@ -6310,14 +6718,15 @@ class MainWindow(QMainWindow):
         model_a_header_layout = QVBoxLayout(model_a_header_widget)
         model_a_header_layout.setContentsMargins(0, 0, 0, 0)  # No margins
         model_a_header_layout.setSpacing(6)  # 6 pixels between header and selector
-        header_a = QLabel("🔵 <b>Model A</b>")
-        header_a.setObjectName("modelAHeader")
+        self.test_model_a_header = QLabel("🔵 <b>Model A</b> <span style='font-size:10pt;color:#888;'>(Port: -)</span>")
+        self.test_model_a_header.setObjectName("modelAHeader")
         colors = self._get_theme_colors()
-        header_a.setStyleSheet(f"font-size: 16pt; padding: 10px; background: {self._get_gradient_style(colors['primary'], colors['secondary'])}; color: white; border-radius: 6px;")
-        self.themed_widgets["labels"].append(header_a)
-        model_a_header_layout.addWidget(header_a)
+        self.test_model_a_header.setStyleSheet(f"font-size: 16pt; padding: 10px; background: {self._get_gradient_style(colors['primary'], colors['secondary'])}; color: white; border-radius: 6px;")
+        self.themed_widgets["labels"].append(self.test_model_a_header)
+        model_a_header_layout.addWidget(self.test_model_a_header)
         self.test_model_a = QComboBox()
         self.test_model_a.setEditable(True)
+        self.test_model_a.currentTextChanged.connect(self._update_model_header_ports)
         model_a_header_layout.addWidget(self.test_model_a)
         headers_layout.addWidget(model_a_header_widget, 1)
         
@@ -6327,13 +6736,14 @@ class MainWindow(QMainWindow):
         model_b_header_layout = QVBoxLayout(model_b_header_widget)
         model_b_header_layout.setContentsMargins(0, 0, 0, 0)  # No margins
         model_b_header_layout.setSpacing(6)  # 6 pixels between header and selector
-        header_b = QLabel("🟢 <b>Model B</b>")
-        header_b.setObjectName("modelBHeader")
-        header_b.setStyleSheet(f"font-size: 16pt; padding: 10px; background: {self._get_gradient_style(colors['primary'], colors['secondary'])}; color: white; border-radius: 6px;")
-        self.themed_widgets["labels"].append(header_b)
-        model_b_header_layout.addWidget(header_b)
+        self.test_model_b_header = QLabel("🟢 <b>Model B</b> <span style='font-size:10pt;color:#888;'>(Port: -)</span>")
+        self.test_model_b_header.setObjectName("modelBHeader")
+        self.test_model_b_header.setStyleSheet(f"font-size: 16pt; padding: 10px; background: {self._get_gradient_style(colors['primary'], colors['secondary'])}; color: white; border-radius: 6px;")
+        self.themed_widgets["labels"].append(self.test_model_b_header)
+        model_b_header_layout.addWidget(self.test_model_b_header)
         self.test_model_b = QComboBox()
         self.test_model_b.setEditable(True)
+        self.test_model_b.currentTextChanged.connect(self._update_model_header_ports)
         model_b_header_layout.addWidget(self.test_model_b)
         headers_layout.addWidget(model_b_header_widget, 1)
         
@@ -6343,13 +6753,14 @@ class MainWindow(QMainWindow):
         model_c_header_layout = QVBoxLayout(model_c_header_widget)
         model_c_header_layout.setContentsMargins(0, 0, 0, 0)  # No margins
         model_c_header_layout.setSpacing(6)  # 6 pixels between header and selector
-        header_c = QLabel("🟣 <b>Model C</b>")
-        header_c.setObjectName("modelCHeader")
-        header_c.setStyleSheet(f"font-size: 16pt; padding: 10px; background: {self._get_gradient_style(colors['primary'], colors['secondary'])}; color: white; border-radius: 6px;")
-        self.themed_widgets["labels"].append(header_c)
-        model_c_header_layout.addWidget(header_c)
+        self.test_model_c_header = QLabel("🟣 <b>Model C</b> <span style='font-size:10pt;color:#888;'>(Port: -)</span>")
+        self.test_model_c_header.setObjectName("modelCHeader")
+        self.test_model_c_header.setStyleSheet(f"font-size: 16pt; padding: 10px; background: {self._get_gradient_style(colors['primary'], colors['secondary'])}; color: white; border-radius: 6px;")
+        self.themed_widgets["labels"].append(self.test_model_c_header)
+        model_c_header_layout.addWidget(self.test_model_c_header)
         self.test_model_c = QComboBox()
         self.test_model_c.setEditable(True)
+        self.test_model_c.currentTextChanged.connect(self._update_model_header_ports)
         model_c_header_layout.addWidget(self.test_model_c)
         headers_layout.addWidget(model_c_header_widget, 1)
         model_c_header_widget.setVisible(False)  # Hidden by default (start with 2 models)
@@ -6892,6 +7303,11 @@ class MainWindow(QMainWindow):
             self.tool_chat_send_btn.setEnabled(True)
             return
         
+        # FIX: Auto-inject tool system prompt if not provided
+        if not system_prompt:
+            from core.model_capabilities import get_prompted_system_prompt
+            system_prompt = get_prompted_system_prompt()
+        
         if self.tool_chat_worker_a and self.tool_chat_worker_a.isRunning():
             self.tool_chat_worker_a.quit()
             self.tool_chat_worker_a.wait()
@@ -6925,6 +7341,11 @@ class MainWindow(QMainWindow):
             self.tool_chat_send_btn.setEnabled(True)
             return
         
+        # FIX: Auto-inject tool system prompt if not provided
+        if not system_prompt:
+            from core.model_capabilities import get_prompted_system_prompt
+            system_prompt = get_prompted_system_prompt()
+        
         if self.tool_chat_worker_b and self.tool_chat_worker_b.isRunning():
             self.tool_chat_worker_b.quit()
             self.tool_chat_worker_b.wait()
@@ -6957,6 +7378,11 @@ class MainWindow(QMainWindow):
             self.tool_chat_input.setEnabled(True)
             self.tool_chat_send_btn.setEnabled(True)
             return
+        
+        # FIX: Auto-inject tool system prompt if not provided
+        if not system_prompt:
+            from core.model_capabilities import get_prompted_system_prompt
+            system_prompt = get_prompted_system_prompt()
         
         if self.tool_chat_worker_c and self.tool_chat_worker_c.isRunning():
             self.tool_chat_worker_c.quit()
@@ -7114,6 +7540,56 @@ class MainWindow(QMainWindow):
             self.tool_chat_input.setEnabled(True)
             self.tool_chat_send_btn.setEnabled(True)
     
+    def _check_and_fix_port(self, model_id: str) -> int:
+        """Check if model's port is available, reassign if not"""
+        import socket
+        import yaml
+        
+        config_path = self.root / "configs" / "llm_backends.yaml"
+        if not config_path.exists():
+            raise RuntimeError("Config file not found")
+        
+        with open(config_path, 'r', encoding='utf-8') as f:
+            config = yaml.safe_load(f) or {}
+        
+        if "models" not in config or model_id not in config["models"]:
+            raise RuntimeError(f"Model '{model_id}' not found in config")
+        
+        model_cfg = config["models"][model_id]
+        original_port = model_cfg.get("port", 10500)
+        
+        # Try to bind to check availability
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            sock.bind(('127.0.0.1', original_port))
+            sock.close()
+            return original_port  # Port is free
+        except OSError:
+            sock.close()
+            # Port occupied, find alternative
+            for port in range(10500, 10601):
+                try:
+                    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                    sock.bind(('127.0.0.1', port))
+                    sock.close()
+                    # Update config in memory
+                    model_cfg['port'] = port
+                    # Update YAML file
+                    with open(config_path, 'w', encoding='utf-8') as f:
+                        yaml.safe_dump(config, f, sort_keys=False, default_flow_style=False)
+                    # Log the change (will be shown in chat when inference starts)
+                    print(f"[INFO] Port {original_port} occupied for {model_id}, reassigned to {port}")
+                    return port
+                except OSError:
+                    try:
+                        sock.close()
+                    except:
+                        pass
+                    continue
+            raise RuntimeError(f"No available ports in range 10500-10600 for model '{model_id}'")
+    
     def _run_side_by_side_test(self) -> None:
         """Run inference on both models simultaneously"""
         user_prompt = self.test_prompt.toPlainText().strip()
@@ -7159,6 +7635,7 @@ class MainWindow(QMainWindow):
             if path_data:
                 model_c_path = str(path_data)  # Ensure it's a string
         
+        
         # Get system prompts for each model
         system_prompt_a = ""
         if model_a_path and hasattr(self.test_model_a_settings, 'system_prompt'):
@@ -7171,6 +7648,26 @@ class MainWindow(QMainWindow):
         system_prompt_c = ""
         if model_c_path and hasattr(self, 'test_model_c_settings') and hasattr(self.test_model_c_settings, 'system_prompt'):
             system_prompt_c = self.test_model_c_settings.system_prompt.toPlainText().strip()
+        
+        # Check and fix ports before starting inference
+        try:
+            if model_a_path:
+                model_a_id = self._resolve_model_id_from_path(model_a_path)
+                self._check_and_fix_port(model_a_id)
+            
+            if model_b_path:
+                model_b_id = self._resolve_model_id_from_path(model_b_path)
+                self._check_and_fix_port(model_b_id)
+            
+            if model_c_path:
+                model_c_id = self._resolve_model_id_from_path(model_c_path)
+                self._check_and_fix_port(model_c_id)
+            
+            # Update port displays after potential reassignments
+            self._update_model_header_ports()
+        except Exception as e:
+            QMessageBox.warning(self, "Port Conflict", f"Failed to resolve port conflicts: {e}\n\nPlease ensure ports 10500-10600 are available.")
+            return
         
         # Keep prompts separate - system prompt will be passed separately for instruct models
         prompt_a = user_prompt
@@ -7563,6 +8060,11 @@ class MainWindow(QMainWindow):
             self.chat_display.update_model_a_response(error_msg)
             return
         
+        # FIX: Auto-inject tool system prompt if not provided
+        if not system_prompt:
+            from core.model_capabilities import get_prompted_system_prompt
+            system_prompt = get_prompted_system_prompt()
+        
         # Stop any existing worker
         if hasattr(self, 'tool_worker_a') and self.tool_worker_a is not None:
             if self.tool_worker_a.isRunning():
@@ -7898,6 +8400,11 @@ class MainWindow(QMainWindow):
             self.chat_display.update_model_b_response(error_msg)
             return
 
+        # FIX: Auto-inject tool system prompt if not provided
+        if not system_prompt:
+            from core.model_capabilities import get_prompted_system_prompt
+            system_prompt = get_prompted_system_prompt()
+
         if hasattr(self, 'tool_worker_b') and self.tool_worker_b is not None:
             if self.tool_worker_b.isRunning():
                 self.tool_worker_b.quit()
@@ -8156,6 +8663,11 @@ class MainWindow(QMainWindow):
             error_msg = f"[ERROR] Failed to resolve model_id from path: {e}"
             self.chat_display.update_model_c_response(error_msg)
             return
+
+        # FIX: Auto-inject tool system prompt if not provided
+        if not system_prompt:
+            from core.model_capabilities import get_prompted_system_prompt
+            system_prompt = get_prompted_system_prompt()
 
         if hasattr(self, 'tool_worker_c') and self.tool_worker_c is not None:
             if self.tool_worker_c.isRunning():
@@ -8518,6 +9030,74 @@ class MainWindow(QMainWindow):
         """Clear both chat histories"""
         self.chat_display.clear()
         self.test_prompt.clear()
+    
+    def _update_model_header_ports(self) -> None:
+        """Update port display in Model A/B/C headers based on selected models"""
+        if not hasattr(self, 'test_model_a_header'):
+            return
+        
+        colors = self._get_theme_colors()
+        
+        # Update Model A port
+        model_a_text = self.test_model_a.currentText().strip()
+        port_a = "-"
+        if model_a_text and not model_a_text.startswith("(No models"):
+            try:
+                model_id = self._resolve_model_id_from_path(self.test_model_a.itemData(self.test_model_a.currentIndex()))
+                if model_id:
+                    import yaml
+                    config_path = self.root / "configs" / "llm_backends.yaml"
+                    if config_path.exists():
+                        with open(config_path, 'r', encoding='utf-8') as f:
+                            config = yaml.safe_load(f) or {}
+                            if model_id in config.get("models", {}):
+                                port_a = config["models"][model_id].get("port", "-")
+            except Exception:
+                pass
+        
+        self.test_model_a_header.setText(f"🔵 <b>Model A</b> <span style='font-size:10pt;color:#888;'>(Port: {port_a})</span>")
+        self.test_model_a_header.setStyleSheet(f"font-size: 16pt; padding: 10px; background: {self._get_gradient_style(colors['primary'], colors['secondary'])}; color: white; border-radius: 6px;")
+        
+        # Update Model B port
+        model_b_text = self.test_model_b.currentText().strip()
+        port_b = "-"
+        if model_b_text and not model_b_text.startswith("(No models"):
+            try:
+                model_id = self._resolve_model_id_from_path(self.test_model_b.itemData(self.test_model_b.currentIndex()))
+                if model_id:
+                    import yaml
+                    config_path = self.root / "configs" / "llm_backends.yaml"
+                    if config_path.exists():
+                        with open(config_path, 'r', encoding='utf-8') as f:
+                            config = yaml.safe_load(f) or {}
+                            if model_id in config.get("models", {}):
+                                port_b = config["models"][model_id].get("port", "-")
+            except Exception:
+                pass
+        
+        self.test_model_b_header.setText(f"🟢 <b>Model B</b> <span style='font-size:10pt;color:#888;'>(Port: {port_b})</span>")
+        self.test_model_b_header.setStyleSheet(f"font-size: 16pt; padding: 10px; background: {self._get_gradient_style(colors['primary'], colors['secondary'])}; color: white; border-radius: 6px;")
+        
+        # Update Model C port (if visible)
+        if hasattr(self, 'test_model_c_header') and hasattr(self, 'test_model_c'):
+            model_c_text = self.test_model_c.currentText().strip()
+            port_c = "-"
+            if model_c_text and not model_c_text.startswith("(No models"):
+                try:
+                    model_id = self._resolve_model_id_from_path(self.test_model_c.itemData(self.test_model_c.currentIndex()))
+                    if model_id:
+                        import yaml
+                        config_path = self.root / "configs" / "llm_backends.yaml"
+                        if config_path.exists():
+                            with open(config_path, 'r', encoding='utf-8') as f:
+                                config = yaml.safe_load(f) or {}
+                                if model_id in config.get("models", {}):
+                                    port_c = config["models"][model_id].get("port", "-")
+                except Exception:
+                    pass
+            
+            self.test_model_c_header.setText(f"🟣 <b>Model C</b> <span style='font-size:10pt;color:#888;'>(Port: {port_c})</span>")
+            self.test_model_c_header.setStyleSheet(f"font-size: 16pt; padding: 10px; background: {self._get_gradient_style(colors['primary'], colors['secondary'])}; color: white; border-radius: 6px;")
 
     # ---------------- Info/About tab ----------------
     def _is_package_functional(self, pkg_name: str, python_exe: Optional[str] = None) -> bool:
@@ -12584,8 +13164,7 @@ respective package directories or official repositories.
 
     def _refresh_gpu_selectors(self) -> None:
         """Refresh Train/Test GPU dropdowns based on latest detection results."""
-        cuda_info = self.system_info.get("cuda", {})
-        gpus = cuda_info.get("gpus", []) or []
+        gpus = self._get_filtered_gpus()
 
         # Train tab GPU selector
         if hasattr(self, "gpu_select") and hasattr(self, "gpu_status_label") and hasattr(self, "training_info_label"):
@@ -12799,6 +13378,10 @@ respective package directories or official repositories.
                 idx = self.test_model_c.findText(current_c)
                 if idx >= 0:
                     self.test_model_c.setCurrentIndex(idx)
+        
+        # Update port displays after refreshing models
+        if hasattr(self, '_update_model_header_ports'):
+            self._update_model_header_ports()
 
         # log list from repo root and logs directory
         # Check if logs tab widgets exist (lazy-loaded)

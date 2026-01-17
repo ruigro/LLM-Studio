@@ -13,7 +13,7 @@ from PySide6.QtCore import QThread, Signal, Qt, QUrl, QTimer
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QLineEdit,
     QCheckBox, QTextEdit, QFileDialog, QGroupBox, QFrame, QMessageBox, QApplication,
-    QGridLayout
+    QGridLayout, QRadioButton, QComboBox
 )
 from PySide6.QtGui import QDesktopServices, QClipboard
 
@@ -107,9 +107,14 @@ class ServerPage(QWidget):
         """
         thread = self.server_thread
         if thread is None:
-            print("[DEBUG] request_stop: No server thread found")
+            print("[DEBUG] request_stop: No server thread found - calling callback immediately")
             if callable(on_done):
-                QTimer.singleShot(0, on_done)
+                # Call immediately (no need to wait for event loop)
+                try:
+                    print("[DEBUG] request_stop: Executing immediate callback")
+                    on_done()
+                except Exception as e:
+                    print(f"[DEBUG] request_stop: Error in callback: {e}")
             return False
 
         try:
@@ -249,6 +254,32 @@ class ServerPage(QWidget):
         
         tool_server_layout.addLayout(settings_grid)
 
+        # Execution Mode (Native vs HTTP)
+        mode_group = QGroupBox("Tool Execution Mode")
+        mode_layout = QVBoxLayout()
+        mode_layout.setSpacing(6)
+        
+        self.mode_native_radio = QRadioButton("Native (Direct Python - Faster, Local Only)")
+        self.mode_http_radio = QRadioButton("HTTP (Network-capable, Remote Access)")
+        
+        # Info labels
+        native_info = QLabel("• No port conflicts\n• Faster execution\n• No server needed")
+        native_info.setStyleSheet("font-size: 9pt; color: #888; margin-left: 20px;")
+        http_info = QLabel("• Can expose to network\n• Works with remote servers\n• MCP protocol compatible")
+        http_info.setStyleSheet("font-size: 9pt; color: #888; margin-left: 20px;")
+        
+        mode_layout.addWidget(self.mode_native_radio)
+        mode_layout.addWidget(native_info)
+        mode_layout.addWidget(self.mode_http_radio)
+        mode_layout.addWidget(http_info)
+        
+        mode_group.setLayout(mode_layout)
+        tool_server_layout.addWidget(mode_group)
+        
+        # Connect to save
+        self.mode_native_radio.toggled.connect(self._save_config_silent)
+        self.mode_http_radio.toggled.connect(self._save_config_silent)
+
         # Permissions (compact)
         perm_label = QLabel("<b>Permissions:</b>")
         tool_server_layout.addWidget(perm_label)
@@ -306,6 +337,16 @@ class ServerPage(QWidget):
         self.llm_server_status_label = QLabel("● Not running")
         self.llm_server_status_label.setStyleSheet("font-weight: bold;")
         llm_server_layout.addWidget(self.llm_server_status_label)
+        
+        # Model selector
+        model_select_label = QLabel("Select Model:")
+        model_select_label.setStyleSheet("font-weight: bold; font-size: 9pt;")
+        llm_server_layout.addWidget(model_select_label)
+        
+        self.llm_model_selector = QComboBox()
+        self.llm_model_selector.setToolTip("Select which model to run for the OpenAI-compatible API")
+        self._populate_model_selector()
+        llm_server_layout.addWidget(self.llm_model_selector)
         
         # Compact info grid
         info_grid = QGridLayout()
@@ -426,6 +467,60 @@ class ServerPage(QWidget):
         self.token_edit.setText(token)
         self.token_edit.setEchoMode(QLineEdit.Normal)  # Show it briefly
         QTimer.singleShot(2000, lambda: self.token_edit.setEchoMode(QLineEdit.Password))  # Hide after 2s
+    
+    def _populate_model_selector(self):
+        """Populate the model selector dropdown with models from llm_backends.yaml"""
+        try:
+            import yaml
+            from pathlib import Path
+            
+            config_path = Path(__file__).parent.parent.parent / "configs" / "llm_backends.yaml"
+            if not config_path.exists():
+                self.llm_model_selector.addItem("(No models configured)", None)
+                return
+            
+            with open(config_path, 'r', encoding='utf-8') as f:
+                config = yaml.safe_load(f) or {}
+            
+            models = config.get("models", {})
+            if not models:
+                self.llm_model_selector.addItem("(No models configured)", None)
+                return
+            
+            # Add all models except "default" (or include it if it's the only one)
+            model_items = []
+            for model_id, model_cfg in models.items():
+                if model_id == "default" and len(models) > 1:
+                    continue  # Skip default if there are other models
+                
+                base_model = model_cfg.get("base_model", "")
+                port = model_cfg.get("port", "?")
+                
+                # Extract model name from path
+                if base_model:
+                    model_name = Path(base_model).name
+                    display_text = f"{model_name} (Port: {port})"
+                else:
+                    display_text = f"{model_id} (Port: {port})"
+                
+                model_items.append((display_text, model_id))
+            
+            # Sort by model name for easier selection
+            model_items.sort(key=lambda x: x[0])
+            
+            self.llm_model_selector.clear()
+            if not model_items:
+                self.llm_model_selector.addItem("(No models configured)", None)
+            else:
+                for display_text, model_id in model_items:
+                    self.llm_model_selector.addItem(display_text, model_id)
+                
+                # Select first model by default
+                if self.llm_model_selector.count() > 0:
+                    self.llm_model_selector.setCurrentIndex(0)
+        except Exception as e:
+            self.llm_model_selector.clear()
+            self.llm_model_selector.addItem(f"(Error loading models: {e})", None)
 
     def _load_config(self):
         """Load configuration from file."""
@@ -441,6 +536,14 @@ class ServerPage(QWidget):
             self.allow_git_check.setChecked(config.get("allow_git", True))
             self.allow_network_check.setChecked(config.get("allow_network", False))
             self.expose_to_lan_check.setChecked(config.get("expose_to_lan", False))
+            
+            # Load execution mode
+            execution_mode = config.get("execution_mode", "http")
+            if execution_mode == "native":
+                self.mode_native_radio.setChecked(True)
+            else:
+                self.mode_http_radio.setChecked(True)
+            
             self.config_path_label.setText(f"Config: {self.config_manager.get_config_path()}")
         except Exception:
             # Non-critical - use defaults
@@ -454,6 +557,7 @@ class ServerPage(QWidget):
             existing = self.config_manager.load()
             expose = self.expose_to_lan_check.isChecked()
             config = {
+                "execution_mode": "native" if self.mode_native_radio.isChecked() else "http",
                 "host": "0.0.0.0" if expose else "127.0.0.1",
                 "port": int(self.port_edit.text() or "8765"),
                 "token": self.token_edit.text().strip(),
@@ -477,6 +581,7 @@ class ServerPage(QWidget):
             existing = self.config_manager.load()
             expose = self.expose_to_lan_check.isChecked()
             config = {
+                "execution_mode": "native" if self.mode_native_radio.isChecked() else "http",
                 "host": "0.0.0.0" if expose else "127.0.0.1",
                 "port": int(self.port_edit.text() or "8765"),
                 "token": self.token_edit.text().strip(),
@@ -554,6 +659,18 @@ class ServerPage(QWidget):
     def _start_server(self):
         """Start the server (called after ensuring previous thread is cleaned up)."""
         try:
+            # Check execution mode
+            execution_mode = "native" if self.mode_native_radio.isChecked() else "http"
+            
+            if execution_mode == "native":
+                # Native mode - no HTTP server needed
+                self._append_log("[INFO] Native mode - no HTTP server needed")
+                self._append_log("[INFO] Tools will execute directly in-process")
+                self._append_log("[INFO] Native mode is active. You can use tools in chat without starting a server.")
+                self._on_started("native://local")
+                return
+            
+            # HTTP mode - continue with server startup
             # Clean up previous thread if it exists (before creating new one)
             old_thread = self.server_thread
             if old_thread is not None:
@@ -853,11 +970,17 @@ class ServerPage(QWidget):
         try:
             from core.llm_server_manager import get_global_server_manager
             
+            # Get selected model ID
+            selected_model_id = self.llm_model_selector.currentData()
+            if selected_model_id is None:
+                QMessageBox.warning(self, "No Model Selected", "Please select a model from the dropdown.")
+                return
+            
             self.llm_start_btn.setEnabled(False)
             self.llm_start_btn.setText("⏳ Starting...")
             self.llm_server_status_label.setText("● Starting...")
             self.llm_server_status_label.setStyleSheet("font-weight: bold; color: #FF9800;")
-            self._append_log("[LLM] Starting server (may take 2-3 minutes)...")
+            self._append_log(f"[LLM] Starting server for model '{selected_model_id}' (may take 2-3 minutes)...")
             
             # Start in background thread to avoid blocking UI
             import threading
@@ -868,8 +991,8 @@ class ServerPage(QWidget):
                         QTimer.singleShot(0, lambda: self._append_log(f"[LLM] {msg}"))
 
                     manager = get_global_server_manager()
-                    url = manager.ensure_server_running("default", log_callback=log_cb)
-                    QTimer.singleShot(0, lambda: self._on_llm_server_started(url))
+                    url = manager.ensure_server_running(selected_model_id, log_callback=log_cb)
+                    QTimer.singleShot(0, lambda: self._on_llm_server_started(url, selected_model_id))
                 except Exception as e:
                     import traceback
                     error_details = f"{str(e)}\n\nTraceback:\n{traceback.format_exc()}"
@@ -886,11 +1009,16 @@ class ServerPage(QWidget):
         try:
             from core.llm_server_manager import get_global_server_manager
             
+            # Get selected model ID
+            selected_model_id = self.llm_model_selector.currentData()
+            if selected_model_id is None:
+                return
+            
             self.llm_stop_btn.setEnabled(False)
-            self._append_log("[LLM] Stopping server...")
+            self._append_log(f"[LLM] Stopping server for model '{selected_model_id}'...")
             
             manager = get_global_server_manager()
-            manager.shutdown_server("default")
+            manager.shutdown_server(selected_model_id)
             
             self.llm_server_status_label.setText("● Stopped")
             self.llm_server_status_label.setStyleSheet("font-weight: bold; color: #888;")
@@ -907,7 +1035,7 @@ class ServerPage(QWidget):
             self._append_log(f"[LLM Server] Error stopping: {e}")
             self.llm_stop_btn.setEnabled(True)
     
-    def _on_llm_server_started(self, url: str):
+    def _on_llm_server_started(self, url: str, model_id: str):
         """Called when LLM server successfully starts"""
         self.llm_server_status_label.setText("● Running")
         self.llm_server_status_label.setStyleSheet("font-weight: bold; color: #4CAF50;")
@@ -921,11 +1049,14 @@ class ServerPage(QWidget):
             config_path = Path(__file__).parent.parent.parent / "configs" / "llm_backends.yaml"
             with open(config_path, 'r') as f:
                 config = yaml.safe_load(f)
-                model_path = config['models']['default']['base_model']
-                model_name = Path(model_path).name
-                self.llm_model_label.setText(model_name)
+                if model_id in config.get('models', {}):
+                    model_path = config['models'][model_id]['base_model']
+                    model_name = Path(model_path).name
+                    self.llm_model_label.setText(model_name)
+                else:
+                    self.llm_model_label.setText(model_id)
         except Exception:
-            self.llm_model_label.setText("default")
+            self.llm_model_label.setText(model_id if model_id else "unknown")
         
         self.llm_start_btn.setEnabled(False)
         self.llm_start_btn.setText("● Running")
@@ -965,15 +1096,20 @@ class ServerPage(QWidget):
             import requests
             from pathlib import Path
             
+            # Get selected model ID
+            selected_model_id = self.llm_model_selector.currentData()
+            if selected_model_id is None:
+                return
+            
             manager = get_global_server_manager()
             
             # Check if server is in running_servers dict
-            if "default" in manager.running_servers:
-                process = manager.running_servers["default"]
+            if selected_model_id in manager.running_servers:
+                process, _, _ = manager.running_servers[selected_model_id]
                 if process.poll() is None:  # Process is alive
                     # Try health check
                     try:
-                        url = manager._get_server_url("default")
+                        url = manager._get_server_url(selected_model_id)
                         response = requests.get(f"{url}/health", timeout=1)
                         if response.status_code == 200:
                             # Server is healthy - ALWAYS update UI with current info
@@ -992,12 +1128,12 @@ class ServerPage(QWidget):
                             
                             # Update model name from config
                             try:
-                                model_cfg = manager.config["models"]["default"]
+                                model_cfg = manager.config["models"][selected_model_id]
                                 base_model = model_cfg["base_model"]
                                 model_name = Path(base_model).name
                                 self.llm_model_label.setText(model_name)
                             except Exception:
-                                self.llm_model_label.setText("default")
+                                self.llm_model_label.setText(selected_model_id)
                             
                             # Update button states
                             self.llm_start_btn.setEnabled(False)
@@ -1028,8 +1164,15 @@ class ServerPage(QWidget):
         """Copy OpenAI-compatible API URL to clipboard"""
         try:
             from core.llm_server_manager import get_global_server_manager
+            
+            # Get selected model ID
+            selected_model_id = self.llm_model_selector.currentData()
+            if selected_model_id is None:
+                QMessageBox.warning(self, "Error", "No model selected.")
+                return
+            
             manager = get_global_server_manager()
-            url = manager._get_server_url("default")
+            url = manager._get_server_url(selected_model_id)
             api_url = f"{url}/v1"
             
             clipboard = QApplication.clipboard()

@@ -103,7 +103,7 @@ def list_local_downloads(download_root: Optional[Path] = None) -> List[str]:
 
 
 def detect_model_capabilities(model_id=None, model_name=None, model_path=None):
-    """Detect model capabilities (vision, tools, text, reasoning) from model ID, name, or config"""
+    """Detect model capabilities (vision, tools, text, reasoning, code) from model ID, name, or config"""
     capabilities = []
     
     # Check model path if provided
@@ -129,6 +129,10 @@ def detect_model_capabilities(model_id=None, model_name=None, model_path=None):
                     # Reasoning detection
                     if any(keyword in model_type + arch_str for keyword in ["reasoning", "r1", "o1", "deepseek", "cot"]):
                         capabilities.append("reasoning")
+                    
+                    # Code detection
+                    if any(keyword in model_type + arch_str for keyword in ["code", "coder", "codegen"]):
+                        capabilities.append("code")
             except Exception:
                 pass
     
@@ -143,13 +147,29 @@ def detect_model_capabilities(model_id=None, model_name=None, model_path=None):
     if "vision" not in capabilities and any(keyword in check_str for keyword in ["vision", "vl", "multimodal", "llava", "clip"]):
         capabilities.append("vision")
     
-    # Tools keywords
-    if "tools" not in capabilities and any(keyword in check_str for keyword in ["tool", "function-calling", "function_calling", "agent"]):
-        capabilities.append("tools")
+    # Tools keywords (enhanced detection for Llama 3.1+, Mistral, Qwen, Phi, Hermes)
+    if "tools" not in capabilities:
+        has_tools = (
+            any(keyword in check_str for keyword in ["tool", "function-calling", "function_calling", "agent", "hermes", "functionary"]) or
+            # Llama 3.1+ has native tool support
+            ("llama" in check_str and any(version in check_str for version in ["3.1", "3.2", "3.3", "3.4"])) or
+            # Mistral models have tool support
+            ("mistral" in check_str or "mixtral" in check_str) or
+            # Qwen 2+ has tool support
+            ("qwen" in check_str and any(version in check_str for version in ["2.", "2-", "2.5"])) or
+            # Phi-3+ has tool support
+            ("phi" in check_str and any(version in check_str for version in ["3", "4"]))
+        )
+        if has_tools:
+            capabilities.append("tools")
     
     # Reasoning keywords
     if "reasoning" not in capabilities and any(keyword in check_str for keyword in ["reasoning", "r1", "deepseek-r1", "o1", "chain-of-thought", "cot", "-reasoning"]):
         capabilities.append("reasoning")
+    
+    # Code keywords
+    if "code" not in capabilities and any(keyword in check_str for keyword in ["code", "coder", "codegen", "starcoder", "codellama", "wizardcoder", "codeqwen"]):
+        capabilities.append("code")
     
     # Default to text if no special capabilities
     if not capabilities:
@@ -159,17 +179,24 @@ def detect_model_capabilities(model_id=None, model_name=None, model_path=None):
 
 
 def get_capability_icons(capabilities):
-    """Get emoji icons for model capabilities"""
+    """Get emoji icons for model capabilities - shows all relevant icons"""
     icons = []
+    
+    # Always show icons in a consistent order
     if "vision" in capabilities:
         icons.append("👁️")
+    if "code" in capabilities:
+        icons.append("💻")
     if "tools" in capabilities:
         icons.append("🔧")
     if "reasoning" in capabilities:
         icons.append("🧠")
-    if "text" in capabilities and len(capabilities) == 1:
-        icons.append("📝")
-    return " ".join(icons) if icons else "📝"
+    
+    # If only text capability (no special features), show text icon
+    if not icons or (len(capabilities) == 1 and "text" in capabilities):
+        icons = ["📝"]
+    
+    return " ".join(icons)
 
 
 def get_model_size(model_path):

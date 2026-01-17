@@ -120,28 +120,33 @@ def get_prompted_system_prompt() -> str:
 
 <tool_call>tool_name(arg1="value1", arg2="value2")</tool_call>
 
+IMPORTANT - File Paths:
+- All paths must be RELATIVE to the workspace root
+- Use forward slashes: LLM/file.txt (not LLM\\file.txt)
+- Do NOT use absolute paths like C:\\ or /home/
+- Examples: "README.md", "LLM/Dios.txt", "docs/guide.md"
+
 Available tools:
-- read_file(path: str) - Read the contents of a text file
+- read_file(path: str) - Read a text file
+  Example: <tool_call>read_file(path="LLM/Dios.txt")</tool_call>
   Example: <tool_call>read_file(path="README.md")</tool_call>
 
-- write_file(path: str, content: str) - Write content to a file (creates parent directories if needed)
-  Example: <tool_call>write_file(path="output.txt", content="Hello World")</tool_call>
+- write_file(path: str, content: str) - Write to a file
+  Example: <tool_call>write_file(path="output.txt", content="Hello")</tool_call>
+  Example: <tool_call>write_file(path="LLM/results.txt", content="Data")</tool_call>
 
-- list_dir(path: str) - List files and directories in a path (default: current directory)
+- list_dir(path: str) - List directory contents (default: ".")
   Example: <tool_call>list_dir(path=".")</tool_call>
+  Example: <tool_call>list_dir(path="LLM")</tool_call>
 
-- run_shell(command: str) - Execute a shell command and return output
+- run_shell(command: str) - Execute a shell command
+  Example: <tool_call>run_shell(command="dir")</tool_call>
   Example: <tool_call>run_shell(command="ls -la")</tool_call>
 
-- git_status() - Get the current git status of the repository
+- git_status() - Get git repository status
   Example: <tool_call>git_status()</tool_call>
 
-After calling a tool, you will receive the result in this format:
-<tool_result tool="tool_name">
-result content here
-</tool_result>
-
-Use the tool results to formulate your final answer to the user. Only call tools when necessary to answer the question."""
+After calling a tool, you will receive the result. Use it to formulate your answer. Only call tools when necessary."""
 
 
 def get_tool_system_prompt(model_path: str) -> str:

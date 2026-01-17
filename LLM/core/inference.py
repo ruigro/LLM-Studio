@@ -31,6 +31,7 @@ class ToolEnabledInferenceConfig(InferenceConfig):
     auto_execute_safe_tools: bool = True
     max_tool_iterations: int = 5  # Prevent infinite loops
     system_prompt: str = ""  # System prompt for tool instructions
+    native_executor: Optional[Any] = None  # NativeToolExecutor instance (if using native mode)
 
 
 def build_run_adapter_cmd(cfg: InferenceConfig) -> List[str]:
@@ -110,7 +111,13 @@ def run_inference_with_tools(
         return output, []
     
     # Initialize tool infrastructure
-    executor = ToolExecutor(cfg.tool_server_url, cfg.tool_server_token)
+    # Check if native executor provided (native mode)
+    if cfg.native_executor is not None:
+        executor = cfg.native_executor
+    else:
+        # HTTP mode - use ToolExecutor
+        executor = ToolExecutor(cfg.tool_server_url, cfg.tool_server_token)
+    
     approval_manager = ToolApprovalManager(cfg.auto_execute_safe_tools)
     detector = ToolCallDetector()
     

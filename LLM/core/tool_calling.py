@@ -19,7 +19,8 @@ from enum import Enum
 
 class ToolCallFormat(Enum):
     """Format of tool call in LLM output"""
-    JSON = "json"  # PHASE 4: Only JSON supported
+    JSON = "json"
+    XML = "xml"  # Added back: <tool_call>name(arg="val")</tool_call>
     UNKNOWN = "unknown"
 
 
@@ -75,7 +76,8 @@ class ToolCallDetector:
     
     def detect(self, text: str) -> List[ToolCall]:
         """
-        Detect tool calls in LLM output (PHASE 4: JSON-only).
+        Detect tool calls in LLM output.
+        Supports both JSON and XML formats for compatibility.
         
         Args:
             text: LLM output text
@@ -85,7 +87,13 @@ class ToolCallDetector:
         """
         calls = []
         
-        # Extract first valid JSON object
+        # Try XML format first (most common from system prompt)
+        xml_calls = self._detect_xml_calls(text)
+        if xml_calls:
+            calls.extend(xml_calls)
+            return calls
+        
+        # Fall back to JSON format
         tool_call_obj = self._extract_json_object(text)
         
         if tool_call_obj:
@@ -96,10 +104,78 @@ class ToolCallDetector:
                     arguments=tool_call_obj["args"],
                     format=ToolCallFormat.JSON,
                     raw_text=json.dumps(tool_call_obj),
-                    call_id=tool_call_obj["id"]
+                    call_id=tool_call_obj.get("id", str(uuid.uuid4()))
                 ))
         
         return calls
+    
+    def _detect_xml_calls(self, text: str) -> List[ToolCall]:
+        """
+        Detect XML format tool calls: <tool_call>name(arg="val")</tool_call>
+        Also handles markdown code blocks and malformed tags.
+        
+        Args:
+            text: LLM output text
+        
+        Returns:
+            List of detected tool calls
+        """
+        calls = []
+        
+        # Remove markdown code blocks first
+        cleaned_text = re.sub(r'```[\w]*\n?', '', text)  # Remove ```xml, ```python, etc.
+        cleaned_text = re.sub(r'`+', '', cleaned_text)   # Remove inline backticks
+        
+        # Pattern 1: Proper XML format <tool_call>function_name(...)</tool_call>
+        pattern1 = r'<tool_call>\s*(\w+)\s*\((.*?)\)\s*</tool_call>'
+        
+        # Pattern 2: Malformed (missing opening <): tool_call>function_name(...)</tool_call>
+        pattern2 = r'tool_call>\s*(\w+)\s*\((.*?)\)\s*</tool_call>'
+        
+        # Try both patterns
+        for pattern in [pattern1, pattern2]:
+            for match in re.finditer(pattern, cleaned_text, re.DOTALL):
+                tool_name = match.group(1)
+                args_str = match.group(2)
+                
+                # Parse arguments
+                arguments = self._parse_xml_args(args_str)
+                
+                calls.append(ToolCall(
+                    name=tool_name,
+                    arguments=arguments,
+                    format=ToolCallFormat.XML,
+                    raw_text=match.group(0),
+                    call_id=str(uuid.uuid4())
+                ))
+        
+        return calls
+    
+    def _parse_xml_args(self, args_str: str) -> Dict[str, Any]:
+        """
+        Parse arguments from XML tool call format.
+        Handles: arg1="value1", arg2="value2"
+        
+        Args:
+            args_str: Arguments string
+        
+        Returns:
+            Dict of parsed arguments
+        """
+        arguments = {}
+        
+        if not args_str or not args_str.strip():
+            return arguments
+        
+        # Pattern: arg_name="value" or arg_name='value'
+        arg_pattern = r'(\w+)\s*=\s*["\']([^"\']*)["\']'
+        
+        for match in re.finditer(arg_pattern, args_str):
+            arg_name = match.group(1)
+            arg_value = match.group(2)
+            arguments[arg_name] = arg_value
+        
+        return arguments
     
     def _extract_json_object(self, text: str) -> Optional[dict]:
         """
@@ -245,6 +321,11 @@ class ToolExecutor:
                 "args": tool_call.arguments
             }
             
+            # DEBUG: Log what we're sending
+            import logging
+            logging.info(f"[ToolExecutor] Calling {self.server_url}/call")
+            logging.info(f"[ToolExecutor] Payload: {json.dumps(payload, indent=2)}")
+            
             req = urllib.request.Request(
                 f"{self.server_url}/call",
                 headers=headers,
@@ -268,10 +349,18 @@ class ToolExecutor:
                     )
         
         except urllib.error.HTTPError as e:
+            # Try to read error response body for more details
+            try:
+                error_body = e.read().decode('utf-8')
+                error_details = json.loads(error_body)
+                error_msg = error_details.get('error', str(e))
+            except:
+                error_msg = f"HTTP {e.code}: {e.reason}"
+            
             return ToolResult(
                 success=False,
                 result=None,
-                error=f"HTTP {e.code}: {e.reason}"
+                error=error_msg
             )
         except urllib.error.URLError as e:
             return ToolResult(

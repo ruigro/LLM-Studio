@@ -178,8 +178,19 @@ class EnvRegistry:
             log(f"Moving environment to final location: {final_dir}")
             if final_dir.exists():
                 # Remove old version
-                shutil.rmtree(final_dir)
-            tmp_dir.rename(final_dir)
+                log("Removing old environment...")
+                self._rmtree_windows_safe(final_dir)
+            
+            # FIX: Use copytree instead of rename to avoid Windows MAX_PATH issues
+            # This is slower but much more reliable on Windows with deep package structures
+            if sys.platform == 'win32':
+                log("Copying environment (Windows long path workaround)...")
+                shutil.copytree(tmp_dir, final_dir, dirs_exist_ok=True)
+                # Clean up temp after successful copy
+                self._rmtree_windows_safe(tmp_dir)
+            else:
+                # On Unix, rename is atomic and fast
+                tmp_dir.rename(final_dir)
             
             # Update StateStore
             torch_version, cuda_available = self._get_torch_info(self._get_env_python_executable(env_key))
@@ -199,7 +210,7 @@ class EnvRegistry:
             # Clean up temp dir on failure
             if tmp_dir.exists():
                 try:
-                    shutil.rmtree(tmp_dir)
+                    self._rmtree_windows_safe(tmp_dir)
                 except:
                     pass
             
@@ -211,6 +222,52 @@ class EnvRegistry:
             )
             
             raise RuntimeError(f"Failed to create environment {env_key}: {e}")
+    
+    def _rmtree_windows_safe(self, path: Path):
+        """
+        Remove directory tree with Windows MAX_PATH workaround.
+        Uses extended-length path prefix for Windows paths exceeding 260 chars.
+        """
+        if sys.platform == 'win32':
+            # Convert to extended-length path for Windows
+            # This allows paths up to 32,767 characters
+            path_str = str(path.resolve())
+            if not path_str.startswith('\\\\?\\'):
+                if path_str.startswith('\\\\'):
+                    # UNC path: \\server\share -> \\?\UNC\server\share
+                    path_str = '\\\\?\\UNC\\' + path_str[2:]
+                else:
+                    # Regular path: C:\path -> \\?\C:\path
+                    path_str = '\\\\?\\' + path_str
+            
+            import os
+            
+            # Use os.walk with extended path for deletion
+            for root, dirs, files in os.walk(path_str, topdown=False):
+                for name in files:
+                    file_path = os.path.join(root, name)
+                    try:
+                        os.chmod(file_path, 0o777)
+                        os.remove(file_path)
+                    except Exception:
+                        pass
+                for name in dirs:
+                    dir_path = os.path.join(root, name)
+                    try:
+                        os.chmod(dir_path, 0o777)
+                        os.rmdir(dir_path)
+                    except Exception:
+                        pass
+            
+            # Remove root directory
+            try:
+                os.chmod(path_str, 0o777)
+                os.rmdir(path_str)
+            except Exception:
+                pass
+        else:
+            # Unix: regular shutil.rmtree works fine
+            shutil.rmtree(path)
 
     def _health_check_env(self, python_exe: Path, profile_data: Optional[dict]) -> bool:
         """
@@ -448,10 +505,51 @@ class EnvRegistry:
                 f"Per-model env torch verification failed.\nSTDOUT:\n{verify.stdout}\nSTDERR:\n{verify.stderr}"
             )
     
+    def _check_old_env_health(self, python_exe: Path, profile_data: Optional[dict]) -> bool:
+        """
+        Check if an old per-model environment is healthy and usable.
+        
+        Args:
+            python_exe: Python executable path from old environment
+            profile_data: Hardware profile data
+        
+        Returns:
+            True if environment is healthy and has all required packages
+        """
+        if not python_exe or not python_exe.exists():
+            return False
+        
+        try:
+            # Check basic imports (more lenient than new env health check)
+            code = "import torch, transformers, peft, accelerate\n"
+            
+            # If CUDA profile, verify CUDA is available
+            if profile_data:
+                torch_spec = str(profile_data.get("packages", {}).get("torch", ""))
+                torch_index = str(profile_data.get("torch_index", ""))
+                require_cuda = ("+cu" in torch_spec) or ("/whl/cu" in torch_index)
+                
+                if require_cuda:
+                    # For old envs, just check if CUDA is available, don't require specific version
+                    code += "assert torch.cuda.is_available(), 'CUDA not available'\n"
+            
+            code += "print('OK')"
+            
+            result = self._run_python(python_exe, code, timeout=30)
+            return result.returncode == 0 and "OK" in result.stdout
+        except Exception:
+            return False
+    
     def get_env_for_model(self, model_path: str, log_callback=None) -> EnvSpec:
         """
         PHASE 2: Get environment spec for a model using env_key.
-        Creates shared environment if needed (atomic provisioning).
+        
+        MIGRATION STRATEGY:
+        1. Check if new shared env exists and is healthy -> use it
+        2. Check if old per-model env exists and is healthy -> use it as fallback
+        3. Create new shared env if neither exists
+        
+        This allows graceful migration without breaking existing setups.
         
         Args:
             model_path: Path to the model (base model path)
@@ -486,41 +584,75 @@ class EnvRegistry:
         
         log(f"Resolved env_key: {env_key}")
         
-        # Check if env exists in StateStore
+        # STRATEGY 1: Check for existing new shared environment
         env_state = self.state_store.get_env(env_key)
-        
-        # PHASE 2: Check for existing ready environment
         python_exe = self._get_env_python_executable(env_key)
         
         if python_exe and python_exe.exists() and env_state and env_state['status'] == 'READY':
             # Verify health
             if self._health_check_env(python_exe, profile_data):
-                log(f"Using existing environment: {env_key}")
+                log(f"Using existing shared environment: {env_key}")
                 return EnvSpec(
                     key=env_key,
                     python_executable=python_exe,
-                    metadata={"env_key": env_key, "status": "READY"}
+                    metadata={"env_key": env_key, "status": "READY", "source": "shared"}
                 )
             else:
-                log(f"Existing environment {env_key} failed health check, recreating...")
+                log(f"Existing shared environment {env_key} failed health check")
         
-        # PHASE 2: Check for ongoing creation (idempotency)
+        # STRATEGY 2: Fallback to old per-model environment (MIGRATION PATH)
+        old_env_path = self.env_manager.get_python_executable(model_path=model_path)
+        if old_env_path and old_env_path.exists():
+            log(f"Checking old per-model environment: {old_env_path}")
+            if self._check_old_env_health(old_env_path, profile_data):
+                log(f"✓ Using healthy old per-model environment (migration fallback)")
+                log(f"  To migrate to new shared envs, delete: {old_env_path.parent.parent}")
+                
+                # Create a pseudo env_key for the old environment
+                old_env_key = f"legacy-{Path(model_path).name}"
+                
+                return EnvSpec(
+                    key=old_env_key,
+                    python_executable=old_env_path,
+                    metadata={
+                        "env_key": old_env_key,
+                        "status": "READY",
+                        "source": "legacy-per-model",
+                        "migration_target": env_key
+                    }
+                )
+            else:
+                log(f"Old per-model environment exists but is unhealthy, will create new shared env")
+        
+        # STRATEGY 3: Check for ongoing creation (idempotency)
         if env_state and env_state['status'] == 'CREATING':
             raise RuntimeError(
                 f"Environment {env_key} is already being created. "
                 f"Please wait for the other creation to complete."
             )
         
-        # PHASE 2: Check for migration from old per-model env
-        old_env_path = self.env_manager.get_python_executable(model_path=model_path)
-        if old_env_path and old_env_path.exists() and not python_exe:
-            log(f"Found old per-model environment, will create new shared env: {env_key}")
+        # STRATEGY 4: Create new shared environment
+        log(f"Creating new shared environment: {env_key}")
+        try:
+            self._atomic_create_env(env_key, profile_data, log_callback=log_callback)
+        except Exception as e:
+            # If creation fails and we have an old env, fall back to it even if unhealthy
+            if old_env_path and old_env_path.exists():
+                log(f"⚠ New env creation failed, attempting to use old environment as last resort")
+                old_env_key = f"legacy-{Path(model_path).name}"
+                return EnvSpec(
+                    key=old_env_key,
+                    python_executable=old_env_path,
+                    metadata={
+                        "env_key": old_env_key,
+                        "status": "DEGRADED",
+                        "source": "legacy-per-model-fallback",
+                        "warning": "Using old environment as fallback after creation failure"
+                    }
+                )
+            raise
         
-        # Create environment atomically
-        log(f"Creating new environment: {env_key}")
-        self._atomic_create_env(env_key, profile_data, log_callback=log_callback)
-        
-        # Get Python executable
+        # Get Python executable from newly created env
         python_exe = self._get_env_python_executable(env_key)
         if not python_exe or not python_exe.exists():
             raise RuntimeError(f"Environment created but Python executable not found: {python_exe}")
@@ -528,7 +660,7 @@ class EnvRegistry:
         return EnvSpec(
             key=env_key,
             python_executable=python_exe,
-            metadata={"env_key": env_key, "status": "READY"}
+            metadata={"env_key": env_key, "status": "READY", "source": "shared"}
         )
     
     def _has_server_dependencies(self, python_exe: Path) -> bool:
