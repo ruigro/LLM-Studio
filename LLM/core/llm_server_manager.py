@@ -2,6 +2,9 @@
 LLM Server Manager
 Manages lifecycle of persistent LLM inference servers.
 Handles starting, health checking, and monitoring server processes.
+
+PHASE 1 REFACTOR: Uses StateStore for runtime state instead of rewriting YAML.
+YAML is now static config only; ports are allocated at runtime and stored in DB.
 """
 import yaml
 import subprocess
@@ -12,6 +15,8 @@ import logging
 import os
 from pathlib import Path
 from typing import Dict, Optional
+
+from core.state_store import get_state_store
 
 logger = logging.getLogger(__name__)
 
@@ -24,7 +29,7 @@ class LLMServerManager:
         Initialize server manager.
         
         Args:
-            config_path: Path to llm_backends.yaml configuration file
+            config_path: Path to llm_backends.yaml configuration file (static config only)
         """
         self.config_path = config_path
         
@@ -33,6 +38,9 @@ class LLMServerManager:
         
         self._config_mtime: Optional[float] = None
         self._load_config()
+        
+        # StateStore for runtime state (PHASE 1: single source of truth)
+        self.state_store = get_state_store()
         
         # Import environment registry
         from core.envs.env_registry import EnvRegistry
@@ -85,16 +93,13 @@ class LLMServerManager:
                 logger.warning(f"Failed to reload LLM config: {e}")
 
     def _save_config(self) -> None:
-        """Persist current config to disk (best-effort)."""
-        try:
-            with open(self.config_path, "w", encoding="utf-8") as f:
-                yaml.safe_dump(self.config, f, sort_keys=False, default_flow_style=False)
-            try:
-                self._config_mtime = self.config_path.stat().st_mtime
-            except Exception:
-                self._config_mtime = None
-        except Exception as e:
-            logger.warning(f"Failed to save LLM config: {e}")
+        """
+        PHASE 1: DEPRECATED - YAML is now static config only.
+        Runtime state (ports, PIDs) is stored in StateStore.
+        This method is kept for backward compatibility but does nothing.
+        """
+        logger.warning("_save_config() called but YAML rewriting is deprecated. Use StateStore instead.")
+        # NO-OP: Do not rewrite YAML at runtime
 
     def _find_free_port(self, start_port: int, used_ports: Optional[set] = None, max_tries: int = 200) -> Optional[int]:
         """Find a free localhost port not in used_ports."""
@@ -182,6 +187,7 @@ class LLMServerManager:
     def _start_server(self, model_id: str, log_callback=None):
         """
         Start server in correct environment with warmup polling.
+        PHASE 1: Uses StateStore for port allocation instead of rewriting YAML.
         
         Args:
             model_id: Model identifier from config
@@ -198,7 +204,20 @@ class LLMServerManager:
 
         model_cfg = self.config["models"][model_id]
         base_model = model_cfg["base_model"]
-        port = model_cfg["port"]
+        
+        # PHASE 1: Check StateStore for existing server first
+        server_state = self.state_store.get_server(model_id)
+        if server_state and server_state['status'] == 'RUNNING':
+            # Try to reuse existing server
+            port = server_state['port']
+            status, reported_model = self._check_health(model_id, return_status=True)
+            if isinstance(status, str) and status in {"ok", "loading"}:
+                log(f"Reusing existing server on port {port} (status={status})")
+                return
+        
+        # PHASE 1: Get preferred port from YAML or allocate new one
+        preferred_port = model_cfg.get("port", 10500)  # Default if not specified
+        port = preferred_port
         
         log(f"Starting server for model '{model_id}' on port {port}")
         
@@ -218,14 +237,22 @@ class LLMServerManager:
                     log(f"Port {port} has a different server (model={reported_model}, status={status}); will reassign port")
                 else:
                     log(f"Port {port} already has a server (status={status}), using it")
+                    # PHASE 1: Update StateStore
+                    self.state_store.upsert_server(model_id, None, port, "RUNNING")
                     return
             
             if attempt < max_retries - 1:
                 log(f"Port {port} appears in use, retrying in 2 seconds... (attempt {attempt + 1}/{max_retries})")
                 time.sleep(2)
             else:
-                # Last attempt failed: auto-reassign to a free port and persist it.
-                used_ports = {cfg.get("port") for cfg in self.config.get("models", {}).values() if isinstance(cfg, dict)}
+                # PHASE 1: Auto-reassign to a free port and persist to StateStore (not YAML)
+                # Get all ports currently in use from StateStore
+                all_servers = self.state_store.list_servers()
+                used_ports = {s['port'] for s in all_servers}
+                # Also check YAML ports as a hint
+                used_ports.update({cfg.get("port") for cfg in self.config.get("models", {}).values() 
+                                 if isinstance(cfg, dict) and cfg.get("port")})
+                
                 new_port = self._find_free_port(port + 1, used_ports=used_ports)
                 if new_port is None:
                     raise RuntimeError(
@@ -234,10 +261,8 @@ class LLMServerManager:
                         f"Use 'netstat -ano | findstr :{port}' to find the process"
                     )
                 log(f"Port {port} is in use and not our server; switching '{model_id}' to port {new_port}")
-                self.config["models"][model_id]["port"] = int(new_port)
-                self._save_config()
                 port = int(new_port)
-                log(f"Updated config: {model_id}.port = {port}")
+                log(f"Allocated runtime port: {model_id} -> {port} (stored in StateStore)")
                 break
         
         # Get environment for this model
@@ -260,6 +285,16 @@ class LLMServerManager:
         log(f"Launching server: {env_spec.python_executable} {launcher_script} {model_id}")
         log(f"Working directory: {app_root}")
         
+        # PHASE 1: Record server starting in StateStore
+        from datetime import datetime
+        self.state_store.upsert_server(
+            model_id=model_id,
+            pid=None,  # Will update after process starts
+            port=port,
+            status="STARTING",
+            started_at=datetime.utcnow().isoformat()
+        )
+        
         try:
             process = subprocess.Popen(
                 [str(env_spec.python_executable), 
@@ -275,10 +310,26 @@ class LLMServerManager:
             )
             self.running_servers[model_id] = process
             log(f"Server process started with PID: {process.pid}")
+            
+            # PHASE 1: Update StateStore with PID
+            self.state_store.upsert_server(
+                model_id=model_id,
+                pid=process.pid,
+                port=port,
+                status="STARTING"
+            )
         except Exception as e:
             import traceback
             error_msg = f"Failed to launch server process: {e}\n{traceback.format_exc()}"
             logger.error(error_msg)
+            # PHASE 1: Record failure in StateStore
+            self.state_store.upsert_server(
+                model_id=model_id,
+                pid=None,
+                port=port,
+                status="FAILED",
+                last_error=error_msg[:500]
+            )
             raise RuntimeError(error_msg)
         
         # Warmup: poll /health with timeout
@@ -303,6 +354,16 @@ class LLMServerManager:
                 if model_id in self.running_servers:
                     del self.running_servers[model_id]
                 
+                # PHASE 1: Record failure in StateStore
+                self.state_store.upsert_server(
+                    model_id=model_id,
+                    pid=process.pid,
+                    port=port,
+                    status="FAILED",
+                    stopped_at=datetime.utcnow().isoformat(),
+                    last_error=f"Process died during startup (exit code {process.returncode})"
+                )
+                
                 error_msg = (
                     f"Server process for '{model_id}' died during startup.\n"
                     f"Exit code: {process.returncode}\n"
@@ -324,6 +385,13 @@ class LLMServerManager:
                         if status == "ok":
                             elapsed = time.time() - start_time
                             logger.info(f"Server '{model_id}' is ready at {server_url} (took {elapsed:.1f}s)")
+                            # PHASE 1: Record success in StateStore
+                            self.state_store.upsert_server(
+                                model_id=model_id,
+                                pid=process.pid,
+                                port=port,
+                                status="RUNNING"
+                            )
                             return
                         # Still loading; keep waiting
                         last_error = f"Server up, model status={status}"
@@ -407,6 +475,7 @@ class LLMServerManager:
     def _get_server_url(self, model_id: str) -> str:
         """
         Get base URL for model server.
+        PHASE 1: Checks StateStore first, falls back to YAML.
         
         Args:
             model_id: Model identifier
@@ -414,7 +483,13 @@ class LLMServerManager:
         Returns:
             Base URL (e.g., "http://127.0.0.1:9100")
         """
-        port = self.config["models"][model_id]["port"]
+        # PHASE 1: Check StateStore for runtime port first
+        server_state = self.state_store.get_server(model_id)
+        if server_state:
+            port = server_state['port']
+        else:
+            # Fallback to YAML port
+            port = self.config["models"][model_id].get("port", 10500)
         return f"http://127.0.0.1:{port}"
     
     def shutdown_server(self, model_id: str):
@@ -434,6 +509,16 @@ class LLMServerManager:
                 logger.warning(f"Server '{model_id}' didn't terminate gracefully, killing")
                 process.kill()
             del self.running_servers[model_id]
+            
+            # PHASE 1: Update StateStore
+            from datetime import datetime
+            self.state_store.upsert_server(
+                model_id=model_id,
+                pid=None,
+                port=0,  # Mark as stopped
+                status="STOPPED",
+                stopped_at=datetime.utcnow().isoformat()
+            )
     
     def shutdown_all(self):
         """Shutdown all running servers"""

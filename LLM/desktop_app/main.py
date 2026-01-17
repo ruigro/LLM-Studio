@@ -2498,12 +2498,13 @@ class MainWindow(QMainWindow):
         is_instruct = "instruct" in model_path_lower or "chat" in model_path_lower or "-it" in model_path_lower
         model_type = "instruct" if is_instruct else "base"
         
-        # Add new entry
+        # PHASE 1: Add to YAML (static config) + StateStore (runtime state)
+        # Port in YAML is just a "preferred" port hint; actual runtime port is in StateStore
         config["models"][model_id] = {
             "base_model": model_path_str,
             "adapter_dir": None,
             "model_type": model_type,
-            "port": port,
+            "port": port,  # Preferred port only
             "use_4bit": True,
             "system_prompt": ""
         }
@@ -2511,6 +2512,17 @@ class MainWindow(QMainWindow):
         # Save config
         with open(config_path, 'w', encoding='utf-8') as f:
             yaml.safe_dump(config, f, sort_keys=False, default_flow_style=False)
+        
+        # PHASE 1: Also register in StateStore
+        from core.state_store import get_state_store
+        state_store = get_state_store()
+        state_store.upsert_model(
+            model_id=model_id,
+            backend="transformers",  # Default backend
+            model_path=model_path_str,
+            env_key=None,  # Will be determined by env_registry later
+            params={"use_4bit": True, "model_type": model_type, "preferred_port": port}
+        )
         
         return model_id
     
