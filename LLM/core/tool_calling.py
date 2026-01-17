@@ -1,10 +1,8 @@
 """
 Tool calling infrastructure for LLM inference.
 
-Supports multiple formats:
-1. Native JSON function calling
-2. XML-style tags (prompted)
-3. Python-style calls (alternative)
+PHASE 4 REFACTOR: Strict JSON-only tool calling with schema validation.
+Removed XML/Python parsers. Single envelope: {"tool": "name", "args": {}, "id": "uuid"}
 """
 from __future__ import annotations
 
@@ -12,26 +10,27 @@ import json
 import re
 import urllib.request
 import urllib.error
+import uuid
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Optional, Dict, Any, List, Tuple, Callable
 from enum import Enum
 
 
 class ToolCallFormat(Enum):
     """Format of tool call in LLM output"""
-    NATIVE_JSON = "native_json"
-    XML_STYLE = "xml_style"
-    PYTHON_STYLE = "python_style"
+    JSON = "json"  # PHASE 4: Only JSON supported
     UNKNOWN = "unknown"
 
 
 @dataclass
 class ToolCall:
-    """Represents a detected tool call"""
+    """Represents a detected tool call (PHASE 4: JSON only)"""
     name: str
     arguments: Dict[str, Any]
     format: ToolCallFormat
     raw_text: str  # Original text from LLM
+    call_id: str  # Unique call ID
 
 
 @dataclass
@@ -43,145 +42,174 @@ class ToolResult:
 
 
 class ToolCallDetector:
-    """Parse LLM output to detect tool calls in various formats"""
+    """
+    Parse LLM output to detect tool calls (PHASE 4: JSON-only with schema validation).
     
-    # Regex patterns for different formats
-    XML_PATTERN = r'<tool_call>(.*?)</tool_call>'
-    PYTHON_PATTERN = r'(\w+)\((.*?)\)'
+    Expected format:
+    {"tool": "calculator", "args": {"expression": "42*17"}, "id": "call_123"}
+    """
     
-    @staticmethod
-    def detect(text: str) -> List[ToolCall]:
-        """
-        Detect tool calls in LLM output.
-        Returns list of detected tool calls.
-        """
-        calls = []
-        
-        # Try native JSON format first
-        calls.extend(ToolCallDetector._detect_json(text))
-        
-        # Try XML-style tags
-        calls.extend(ToolCallDetector._detect_xml(text))
-        
-        # Try Python-style calls (only if no other format found)
-        if not calls:
-            calls.extend(ToolCallDetector._detect_python(text))
-        
-        return calls
+    def __init__(self):
+        """Initialize detector with JSON schema"""
+        self.schema = self._load_schema()
     
-    @staticmethod
-    def _detect_json(text: str) -> List[ToolCall]:
-        """Detect native JSON function calls"""
-        calls = []
-        
-        # Look for JSON objects with "name" and "arguments" keys
-        # This matches OpenAI function calling format
-        json_pattern = r'\{[^{}]*"name"\s*:\s*"([^"]+)"[^{}]*"arguments"\s*:\s*(\{[^{}]*\})[^{}]*\}'
-        
-        for match in re.finditer(json_pattern, text, re.DOTALL):
-            try:
-                full_match = match.group(0)
-                obj = json.loads(full_match)
-                name = obj.get("name")
-                args = obj.get("arguments", {})
-                
-                if name:
-                    calls.append(ToolCall(
-                        name=name,
-                        arguments=args if isinstance(args, dict) else {},
-                        format=ToolCallFormat.NATIVE_JSON,
-                        raw_text=full_match
-                    ))
-            except json.JSONDecodeError:
-                continue
-        
-        return calls
-    
-    @staticmethod
-    def _detect_xml(text: str) -> List[ToolCall]:
-        """Detect XML-style tool calls: <tool_call>tool_name(arg="val")</tool_call>"""
-        calls = []
-        
-        for match in re.finditer(ToolCallDetector.XML_PATTERN, text, re.DOTALL):
-            content = match.group(1).strip()
-            
-            # Parse the content as Python-style call
-            python_match = re.match(r'(\w+)\((.*?)\)', content, re.DOTALL)
-            if python_match:
-                tool_name = python_match.group(1)
-                args_str = python_match.group(2)
-                
-                # Parse arguments
-                args = ToolCallDetector._parse_arguments(args_str)
-                
-                calls.append(ToolCall(
-                    name=tool_name,
-                    arguments=args,
-                    format=ToolCallFormat.XML_STYLE,
-                    raw_text=match.group(0)
-                ))
-        
-        return calls
-    
-    @staticmethod
-    def _detect_python(text: str) -> List[ToolCall]:
-        """Detect Python-style calls (last resort, prone to false positives)"""
-        # Only look for known tool names to avoid false positives
-        known_tools = ['read_file', 'write_file', 'list_dir', 'run_shell', 'git_status']
-        calls = []
-        
-        for tool_name in known_tools:
-            pattern = rf'\b{tool_name}\((.*?)\)'
-            for match in re.finditer(pattern, text, re.DOTALL):
-                args_str = match.group(1)
-                args = ToolCallDetector._parse_arguments(args_str)
-                
-                calls.append(ToolCall(
-                    name=tool_name,
-                    arguments=args,
-                    format=ToolCallFormat.PYTHON_STYLE,
-                    raw_text=match.group(0)
-                ))
-        
-        return calls
-    
-    @staticmethod
-    def _parse_arguments(args_str: str) -> Dict[str, Any]:
-        """Parse argument string into dictionary"""
-        args = {}
-        
-        if not args_str.strip():
-            return args
-        
-        # Try parsing as JSON first
+    def _load_schema(self) -> dict:
+        """Load tool call JSON schema"""
         try:
-            parsed = json.loads(f'{{{args_str}}}')
-            if isinstance(parsed, dict):
-                return parsed
-        except:
+            schema_path = Path(__file__).parent.parent / "tools" / "schema.json"
+            if schema_path.exists():
+                return json.loads(schema_path.read_text(encoding="utf-8"))
+        except Exception:
             pass
         
-        # Parse key=value pairs
-        # Supports: key="value", key='value', key=value
-        arg_pattern = r'(\w+)\s*=\s*(["\'])(.*?)\2|(\w+)\s*=\s*(\S+)'
+        # Fallback schema if file not found
+        return {
+            "type": "object",
+            "required": ["tool", "args", "id"],
+            "properties": {
+                "tool": {"type": "string", "pattern": "^[a-zA-Z][a-zA-Z0-9_]*$"},
+                "args": {"type": "object"},
+                "id": {"type": "string"}
+            }
+        }
+    
+    def detect(self, text: str) -> List[ToolCall]:
+        """
+        Detect tool calls in LLM output (PHASE 4: JSON-only).
         
-        for match in re.finditer(arg_pattern, args_str):
-            if match.group(1):  # Quoted value
-                key = match.group(1)
-                value = match.group(3)
-            else:  # Unquoted value
-                key = match.group(4)
-                value = match.group(5)
+        Args:
+            text: LLM output text
+        
+        Returns:
+            List of detected tool calls
+        """
+        calls = []
+        
+        # Extract first valid JSON object
+        tool_call_obj = self._extract_json_object(text)
+        
+        if tool_call_obj:
+            # Validate against schema
+            if self._validate_schema(tool_call_obj):
+                calls.append(ToolCall(
+                    name=tool_call_obj["tool"],
+                    arguments=tool_call_obj["args"],
+                    format=ToolCallFormat.JSON,
+                    raw_text=json.dumps(tool_call_obj),
+                    call_id=tool_call_obj["id"]
+                ))
+        
+        return calls
+    
+    def _extract_json_object(self, text: str) -> Optional[dict]:
+        """
+        Extract first valid JSON object from text.
+        
+        Args:
+            text: Text potentially containing JSON
+        
+        Returns:
+            Parsed JSON object or None
+        """
+        # Try to find JSON object with brace matching
+        brace_level = 0
+        start_idx = None
+        
+        for i, char in enumerate(text):
+            if char == '{':
+                if brace_level == 0:
+                    start_idx = i
+                brace_level += 1
+            elif char == '}':
+                brace_level -= 1
+                if brace_level == 0 and start_idx is not None:
+                    # Found complete JSON object
+                    json_str = text[start_idx:i+1]
+                    try:
+                        obj = json.loads(json_str)
+                        # Check if it looks like a tool call (has required keys)
+                        if "tool" in obj and "args" in obj and "id" in obj:
+                            return obj
+                    except json.JSONDecodeError:
+                        # Try jsonfix repair
+                        obj = self._repair_json(json_str)
+                        if obj:
+                            return obj
+                    
+                    # Reset for next object
+                    start_idx = None
+        
+        return None
+    
+    def _repair_json(self, json_str: str) -> Optional[dict]:
+        """
+        Attempt to repair malformed JSON (ONE attempt).
+        
+        Args:
+            json_str: Potentially malformed JSON string
+        
+        Returns:
+            Parsed object or None if repair failed
+        """
+        try:
+            # Try jsonfix if available
+            import jsonfix
+            obj = jsonfix.loads(json_str)
             
-            # Try to parse value as JSON (for booleans, numbers, etc.)
+            # Validate it has required keys
+            if isinstance(obj, dict) and "tool" in obj and "args" in obj and "id" in obj:
+                return obj
+        except ImportError:
+            # jsonfix not available, try basic repairs
             try:
-                value = json.loads(value)
+                # Common fixes: trailing commas, single quotes
+                repaired = json_str.replace("'", '"')  # Single to double quotes
+                repaired = re.sub(r',\s*}', '}', repaired)  # Trailing commas in objects
+                repaired = re.sub(r',\s*]', ']', repaired)  # Trailing commas in arrays
+                
+                obj = json.loads(repaired)
+                if isinstance(obj, dict) and "tool" in obj and "args" in obj and "id" in obj:
+                    return obj
             except:
-                pass  # Keep as string
-            
-            args[key] = value
+                pass
+        except Exception:
+            pass
         
-        return args
+        return None
+    
+    def _validate_schema(self, obj: dict) -> bool:
+        """
+        Validate JSON object against schema.
+        
+        Args:
+            obj: JSON object to validate
+        
+        Returns:
+            True if valid
+        """
+        try:
+            # Try jsonschema if available
+            import jsonschema
+            jsonschema.validate(instance=obj, schema=self.schema)
+            return True
+        except ImportError:
+            # Manual validation if jsonschema not available
+            required = self.schema.get("required", [])
+            for key in required:
+                if key not in obj:
+                    return False
+            
+            # Check tool name pattern
+            if not re.match(r'^[a-zA-Z][a-zA-Z0-9_]*$', obj.get("tool", "")):
+                return False
+            
+            # Check args is dict
+            if not isinstance(obj.get("args"), dict):
+                return False
+            
+            return True
+        except Exception:
+            return False
 
 
 class ToolExecutor:
