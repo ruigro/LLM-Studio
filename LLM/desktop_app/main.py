@@ -4459,6 +4459,7 @@ class MainWindow(QMainWindow):
     
     # ---------------- Models (Download) tab ----------------
     def _build_models_tab(self) -> QWidget:
+        from desktop_app.model_card_widget import ModelDetailsPanel
         w = QWidget()
         main_layout = QVBoxLayout(w)
         main_layout.setSpacing(10)
@@ -4639,7 +4640,6 @@ class MainWindow(QMainWindow):
         curated_horizontal.addWidget(cards_widget, 2)  # 2/3 width
         
         # Right: Model details panel (takes 1/3 of space)
-        from desktop_app.model_card_widget import ModelDetailsPanel
         self.curated_details_panel = ModelDetailsPanel()
         curated_details_scroll = QScrollArea()
         curated_details_scroll.setWidgetResizable(True)
@@ -4691,7 +4691,6 @@ class MainWindow(QMainWindow):
         search_horizontal.addWidget(search_cards_widget, 2)  # 2/3 width
         
         # Right: Model details panel (takes 1/3 of space)
-        from desktop_app.model_card_widget import ModelDetailsPanel
         self.search_details_panel = ModelDetailsPanel()
         search_details_scroll = QScrollArea()
         search_details_scroll.setWidgetResizable(True)
@@ -4709,6 +4708,7 @@ class MainWindow(QMainWindow):
         # 2b. DOWNLOADED TAB
         downloaded_tab = QWidget()
         downloaded_layout = QVBoxLayout(downloaded_tab)
+        downloaded_layout.setContentsMargins(10, 10, 10, 10)
         
         downloaded_header = QHBoxLayout()
         downloaded_title = QLabel("📥 My Local Models")
@@ -4721,17 +4721,40 @@ class MainWindow(QMainWindow):
         downloaded_header.addWidget(refresh_btn)
         downloaded_layout.addLayout(downloaded_header)
         
+        # 3-column layout: Cards (2/3) + Details (1/3)
+        downloaded_horizontal = QHBoxLayout()
+        downloaded_horizontal.setSpacing(10)
+        downloaded_horizontal.setContentsMargins(0, 0, 0, 0)
+        
+        # Left: Model cards in 2-column grid (takes 2/3)
+        dl_cards_widget = QWidget()
+        dl_cards_layout = QVBoxLayout(dl_cards_widget)
+        dl_cards_layout.setContentsMargins(0, 0, 0, 0)
+        
         downloaded_scroll = QScrollArea()
         downloaded_scroll.setWidgetResizable(True)
         downloaded_scroll.setFrameShape(QFrame.NoFrame)
+        downloaded_scroll.setStyleSheet("background: transparent;")
         
         self.downloaded_container = QWidget()
-        self.downloaded_layout = QGridLayout(self.downloaded_container) # Use grid for consistency
+        self.downloaded_layout = QGridLayout(self.downloaded_container)
         self.downloaded_layout.setSpacing(20)
         self.downloaded_layout.setContentsMargins(5, 5, 5, 5)
         
         downloaded_scroll.setWidget(self.downloaded_container)
-        downloaded_layout.addWidget(downloaded_scroll)
+        dl_cards_layout.addWidget(downloaded_scroll)
+        downloaded_horizontal.addWidget(dl_cards_widget, 2)
+        
+        # Right: Model details panel (takes 1/3)
+        self.downloaded_details_panel = ModelDetailsPanel()
+        dl_details_scroll = QScrollArea()
+        dl_details_scroll.setWidgetResizable(True)
+        dl_details_scroll.setFrameShape(QFrame.NoFrame)
+        dl_details_scroll.setStyleSheet("background: rgba(0, 0, 0, 0.1); border-left: 1px solid rgba(102, 126, 234, 0.2);")
+        dl_details_scroll.setWidget(self.downloaded_details_panel)
+        downloaded_horizontal.addWidget(dl_details_scroll, 1)
+        
+        downloaded_layout.addLayout(downloaded_horizontal)
         
         self.models_content_tabs.addTab(downloaded_tab, "💾 Downloaded")
         
@@ -4935,6 +4958,15 @@ class MainWindow(QMainWindow):
     def _on_model_selected(self, model_path: str):
         """Handle downloaded model selection"""
         self._log_models(f"Selected: {model_path}")
+        
+        # Extract model ID from path for details fetching
+        path = Path(model_path)
+        model_name = path.name
+        model_id = model_name.replace("__", "/")
+        
+        # Show details in the downloaded details panel
+        if hasattr(self, 'downloaded_details_panel'):
+            self._show_model_details(model_id, self.downloaded_details_panel)
     
     def _on_repair_model(self, model_path: str):
         """Repair or resume download for an incomplete model"""

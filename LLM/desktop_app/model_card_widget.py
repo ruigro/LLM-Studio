@@ -173,14 +173,43 @@ class ModelCard(QFrame):
         
         layout.addStretch(1)
         
-        # Download button (left-aligned, sized to fit text+icon)
+        # Button row (left-aligned)
+        button_layout = QHBoxLayout()
+        button_layout.setSpacing(8)
+        
+        # Download button (sized to fit text+icon)
         self.download_btn = QPushButton("📥 Download" if not is_downloaded else "✓ Downloaded")
         self.download_btn.setEnabled(not is_downloaded)
         self.download_btn.clicked.connect(lambda: self.download_clicked.emit(model_id))
         self.download_btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         self.download_btn.setMinimumHeight(38)
         self.download_btn.setMinimumWidth(140)  # Enough for icon + text
-        layout.addWidget(self.download_btn, 0, Qt.AlignLeft)
+        self.download_btn.setStyleSheet("""
+            QPushButton {
+                background: rgba(102, 126, 234, 0.15);
+                border: 1px solid rgba(102, 126, 234, 0.4);
+                color: white;
+                border-radius: 6px;
+                padding: 6px 15px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background: rgba(102, 126, 234, 0.25);
+                border: 1px solid rgba(102, 126, 234, 0.6);
+            }
+            QPushButton:pressed {
+                background: rgba(102, 126, 234, 0.35);
+            }
+            QPushButton:disabled {
+                background: rgba(150, 150, 150, 0.05);
+                color: #888;
+                border: 1px solid rgba(150, 150, 150, 0.1);
+            }
+        """)
+        button_layout.addWidget(self.download_btn)
+        button_layout.addStretch(1)
+        
+        layout.addLayout(button_layout)
         
         # Make card clickable (but don't interfere with download button)
         self.setCursor(Qt.PointingHandCursor)
@@ -442,6 +471,29 @@ class DownloadedModelCard(QFrame):
         button_layout = QHBoxLayout()
         button_layout.setSpacing(8)
         
+        button_style = """
+            QPushButton {
+                background: rgba(102, 126, 234, 0.15);
+                border: 1px solid rgba(102, 126, 234, 0.4);
+                color: white;
+                border-radius: 6px;
+                padding: 6px 15px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background: rgba(102, 126, 234, 0.25);
+                border: 1px solid rgba(102, 126, 234, 0.6);
+            }
+            QPushButton:pressed {
+                background: rgba(102, 126, 234, 0.35);
+            }
+            QPushButton:disabled {
+                background: rgba(150, 150, 150, 0.05);
+                color: #888;
+                border: 1px solid rgba(150, 150, 150, 0.1);
+            }
+        """
+        
         # Repair button for incomplete models
         if is_incomplete:
             self.repair_btn = QPushButton("🔧 Repair")
@@ -449,7 +501,8 @@ class DownloadedModelCard(QFrame):
             self.repair_btn.setMinimumHeight(35)
             self.repair_btn.setCursor(Qt.ArrowCursor)
             self.repair_btn.clicked.connect(lambda: self.repair_clicked.emit(self.model_path))
-            button_layout.addWidget(self.repair_btn, 1)
+            self.repair_btn.setStyleSheet(button_style)
+            button_layout.addWidget(self.repair_btn)
         
         # Delete button
         self.delete_btn = QPushButton("🗑️ Delete")
@@ -458,8 +511,10 @@ class DownloadedModelCard(QFrame):
         self.delete_btn.setCursor(Qt.ArrowCursor)
         self.delete_btn.clicked.connect(lambda: self.delete_clicked.emit(self.model_path))
         self.delete_btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        self.delete_btn.setStyleSheet(button_style)
         button_layout.addWidget(self.delete_btn)
         
+        button_layout.addStretch(1)
         layout.addLayout(button_layout)
         
         self._apply_style()
