@@ -539,15 +539,25 @@ class RepairThread(QThread):
     
     def run(self):
         try:
-            from huggingface_hub import snapshot_download, model_info
+            from huggingface_hub import snapshot_download
             from tqdm import tqdm
+            import os
+            import requests
+            from urllib.parse import quote
             
             # Get total size for progress
             total_size = 0
             try:
                 self.progress.emit(2)
-                info = model_info(self.model_id)
-                total_size = sum(f.size for f in info.siblings if f.size is not None)
+                token = os.getenv("HF_TOKEN") or os.getenv("HUGGINGFACEHUB_API_TOKEN")
+                headers = {"Authorization": f"Bearer {token}"} if token else {}
+                # Use HF REST API to avoid model_info hangs
+                url = f"https://huggingface.co/api/models/{quote(self.model_id, safe='/')}"
+                resp = requests.get(url, params={"files_metadata": "true"}, headers=headers, timeout=(3.0, 10.0))
+                if resp.ok:
+                    data = resp.json()
+                    siblings = data.get("siblings") or []
+                    total_size = sum(int(s.get("size") or 0) for s in siblings if s.get("size") is not None)
             except Exception:
                 pass
             
@@ -558,6 +568,8 @@ class RepairThread(QThread):
                     self.downloaded = 0
                     self.signal = signal
                     self.last_percent = 5
+                    self._fallback_percent = 5
+                    self._fallback_bytes = 0
                 
                 def update(self, n):
                     self.downloaded += n
@@ -567,6 +579,14 @@ class RepairThread(QThread):
                         if percent > self.last_percent:
                             self.last_percent = percent
                             self.signal.emit(percent)
+                    else:
+                        # Fallback: show "activity" progress even when total size is unknown
+                        self._fallback_bytes += n
+                        # Advance ~1% per ~50MB downloaded (clamped)
+                        if self._fallback_bytes >= 50 * 1024 * 1024 and self._fallback_percent < 99:
+                            self._fallback_bytes = 0
+                            self._fallback_percent += 1
+                            self.signal.emit(self._fallback_percent)
             
             tracker = ProgressTracker(total_size, self.progress)
             
@@ -609,15 +629,25 @@ class DownloadThread(QThread):
     def run(self):
         try:
             # Import here to avoid import errors if not installed
-            from huggingface_hub import snapshot_download, model_info
+            from huggingface_hub import snapshot_download
             from tqdm import tqdm
+            import os
+            import requests
+            from urllib.parse import quote
             
             # 1. Try to get total size for accurate progress tracking
             total_size = 0
             try:
                 self.progress.emit(2)
-                info = model_info(self.model_id)
-                total_size = sum(f.size for f in info.siblings if f.size is not None)
+                token = os.getenv("HF_TOKEN") or os.getenv("HUGGINGFACEHUB_API_TOKEN")
+                headers = {"Authorization": f"Bearer {token}"} if token else {}
+                # Use HF REST API to avoid model_info hangs
+                url = f"https://huggingface.co/api/models/{quote(self.model_id, safe='/')}"
+                resp = requests.get(url, params={"files_metadata": "true"}, headers=headers, timeout=(3.0, 10.0))
+                if resp.ok:
+                    data = resp.json()
+                    siblings = data.get("siblings") or []
+                    total_size = sum(int(s.get("size") or 0) for s in siblings if s.get("size") is not None)
             except Exception:
                 pass
                 
@@ -628,6 +658,8 @@ class DownloadThread(QThread):
                     self.downloaded = 0
                     self.signal = signal
                     self.last_percent = 5
+                    self._fallback_percent = 5
+                    self._fallback_bytes = 0
                 
                 def update(self, n):
                     self.downloaded += n
@@ -638,6 +670,14 @@ class DownloadThread(QThread):
                         if percent > self.last_percent:
                             self.last_percent = percent
                             self.signal.emit(percent)
+                    else:
+                        # Fallback: show "activity" progress even when total size is unknown
+                        self._fallback_bytes += n
+                        # Advance ~1% per ~50MB downloaded (clamped)
+                        if self._fallback_bytes >= 50 * 1024 * 1024 and self._fallback_percent < 99:
+                            self._fallback_bytes = 0
+                            self._fallback_percent += 1
+                            self.signal.emit(self._fallback_percent)
 
             tracker = ProgressTracker(total_size, self.progress)
             
@@ -1665,6 +1705,46 @@ class RequirementCheckThread(QThread):
 
     def stop(self):
         self._is_running = False
+
+
+class ModelDetailsWorker(QObject):
+    """Worker class for fetching model details in background thread with thread-safe signals"""
+    details_ready = Signal(dict)  # Emits model details dict
+    error_occurred = Signal(str)  # Emits error message
+    retrying = Signal(int, int)  # Emits (current_attempt, max_attempts) for retry feedback
+    
+    def __init__(self, model_id: str, max_retries: int = 2):
+        super().__init__()
+        self.model_id = model_id
+        self.max_retries = max_retries
+    
+    def fetch(self):
+        """Fetch model details with retry logic - runs in background thread"""
+        import time
+        
+        for attempt in range(1, self.max_retries + 1):
+            try:
+                from core.models import get_model_details
+                details = get_model_details(self.model_id)
+                self.details_ready.emit(details)
+                return  # Success, exit retry loop
+            except Exception as e:
+                error_msg = str(e)
+                
+                # Don't retry on certain errors (e.g., model not found, authentication)
+                if any(skip in error_msg.lower() for skip in ["not found", "unauthorized", "forbidden", "not available"]):
+                    self.error_occurred.emit(error_msg)
+                    return
+                
+                # If this is the last attempt, emit error
+                if attempt >= self.max_retries:
+                    self.error_occurred.emit(error_msg)
+                    return
+                
+                # Otherwise, retry with exponential backoff
+                self.retrying.emit(attempt, self.max_retries)
+                wait_time = min(2 ** attempt, 5)  # 2s, 4s, max 5s
+                time.sleep(wait_time)
 
 
 class MainWindow(QMainWindow):
@@ -4066,6 +4146,10 @@ class MainWindow(QMainWindow):
 
         # Get real GPU info (filtered by selection)
         all_gpus_raw = self.system_info.get("cuda", {}).get("gpus", []) or []
+        # Ensure all GPUs have _orig_index set before sorting
+        for idx, gpu in enumerate(all_gpus_raw):
+            if "_orig_index" not in gpu:
+                gpu["_orig_index"] = idx
         all_gpus = self._sort_gpus_by_memory(all_gpus_raw)
         gpus = self._get_filtered_gpus()
         gpus = self._sort_gpus_by_memory(gpus)
@@ -4530,6 +4614,16 @@ class MainWindow(QMainWindow):
         curated_header.addStretch(1)
         curated_v_layout.addLayout(curated_header)
         
+        # 3-column layout: Cards (2/3) + Details (1/3)
+        curated_horizontal = QHBoxLayout()
+        curated_horizontal.setSpacing(10)
+        curated_horizontal.setContentsMargins(0, 0, 0, 0)
+        
+        # Left: Model cards in 2-column grid (takes 2/3 of space)
+        cards_widget = QWidget()
+        cards_layout = QVBoxLayout(cards_widget)
+        cards_layout.setContentsMargins(0, 0, 0, 0)
+        
         curated_scroll = QScrollArea()
         curated_scroll.setWidgetResizable(True)
         curated_scroll.setFrameShape(QFrame.NoFrame)
@@ -4541,7 +4635,20 @@ class MainWindow(QMainWindow):
         self.curated_layout.setContentsMargins(5, 5, 5, 5)
         
         curated_scroll.setWidget(self.curated_container)
-        curated_v_layout.addWidget(curated_scroll)
+        cards_layout.addWidget(curated_scroll)
+        curated_horizontal.addWidget(cards_widget, 2)  # 2/3 width
+        
+        # Right: Model details panel (takes 1/3 of space)
+        from desktop_app.model_card_widget import ModelDetailsPanel
+        self.curated_details_panel = ModelDetailsPanel()
+        curated_details_scroll = QScrollArea()
+        curated_details_scroll.setWidgetResizable(True)
+        curated_details_scroll.setFrameShape(QFrame.NoFrame)
+        curated_details_scroll.setStyleSheet("background: rgba(0, 0, 0, 0.1); border-left: 1px solid rgba(102, 126, 234, 0.2);")
+        curated_details_scroll.setWidget(self.curated_details_panel)
+        curated_horizontal.addWidget(curated_details_scroll, 1)  # 1/3 width
+        
+        curated_v_layout.addLayout(curated_horizontal)
         self.browse_stack.addWidget(curated_view)
         
         # Search Results View
@@ -4560,6 +4667,16 @@ class MainWindow(QMainWindow):
         search_results_header.addStretch(1)
         search_v_layout.addLayout(search_results_header)
         
+        # 3-column layout: Cards (2/3) + Details (1/3)
+        search_horizontal = QHBoxLayout()
+        search_horizontal.setSpacing(10)
+        search_horizontal.setContentsMargins(0, 0, 0, 0)
+        
+        # Left: Model cards in 2-column grid (takes 2/3 of space)
+        search_cards_widget = QWidget()
+        search_cards_layout = QVBoxLayout(search_cards_widget)
+        search_cards_layout.setContentsMargins(0, 0, 0, 0)
+        
         search_scroll = QScrollArea()
         search_scroll.setWidgetResizable(True)
         search_scroll.setFrameShape(QFrame.NoFrame)
@@ -4570,7 +4687,20 @@ class MainWindow(QMainWindow):
         self.search_results_layout.setContentsMargins(5, 5, 5, 5)
         
         search_scroll.setWidget(self.search_results_container)
-        search_v_layout.addWidget(search_scroll)
+        search_cards_layout.addWidget(search_scroll)
+        search_horizontal.addWidget(search_cards_widget, 2)  # 2/3 width
+        
+        # Right: Model details panel (takes 1/3 of space)
+        from desktop_app.model_card_widget import ModelDetailsPanel
+        self.search_details_panel = ModelDetailsPanel()
+        search_details_scroll = QScrollArea()
+        search_details_scroll.setWidgetResizable(True)
+        search_details_scroll.setFrameShape(QFrame.NoFrame)
+        search_details_scroll.setStyleSheet("background: rgba(0, 0, 0, 0.1); border-left: 1px solid rgba(102, 126, 234, 0.2);")
+        search_details_scroll.setWidget(self.search_details_panel)
+        search_horizontal.addWidget(search_details_scroll, 1)  # 1/3 width
+        
+        search_v_layout.addLayout(search_horizontal)
         self.browse_stack.addWidget(search_view)
         
         browse_layout.addWidget(self.browse_stack)
@@ -4792,6 +4922,8 @@ class MainWindow(QMainWindow):
                            compatibility_badge=compatibility_badge)
             card.set_theme(self.dark_mode)
             card.download_clicked.connect(self._download_curated_model)
+            # Connect card click to show details - use functools.partial to avoid lambda capture issues
+            card.card_clicked.connect(lambda checked=False, mid=model_id: self._show_model_details(mid, self.curated_details_panel))
             self.curated_layout.addWidget(card, row, col)
             self.model_cards.append(card)
             
@@ -5236,6 +5368,8 @@ class MainWindow(QMainWindow):
                 card.set_theme(self.dark_mode)
                 # FIXED: Connect to the correct download handler for search results
                 card.download_clicked.connect(lambda mid=model_id: self._download_model_by_id(mid))
+                # Connect card click to show details - use functools.partial to avoid lambda capture issues
+                card.card_clicked.connect(lambda checked=False, mid=model_id: self._show_model_details(mid, self.search_details_panel))
                 self.search_results_layout.addWidget(card, row, col)
                 self.search_model_cards.append(card)
                 
@@ -5255,6 +5389,136 @@ class MainWindow(QMainWindow):
     def _hf_download_selected(self) -> None:
         """Deprecated: use individual card download buttons"""
         pass
+    
+    def _show_model_details(self, model_id: str, details_panel) -> None:
+        """Fetch and display detailed model information in the details panel"""
+        # Show loading state
+        details_panel.show_loading()
+        
+        # Create worker and thread for background fetching
+        worker = ModelDetailsWorker(model_id, max_retries=2)
+        thread = QThread()
+        worker.moveToThread(thread)
+        
+        # Map worker -> panel so slots can resolve it safely on main thread
+        if not hasattr(self, "_detail_panel_by_worker"):
+            self._detail_panel_by_worker = {}
+        self._detail_panel_by_worker[worker] = details_panel
+
+        # Connect signals with explicit Qt.QueuedConnection to ensure main thread execution
+        from PySide6.QtCore import Qt
+        worker.details_ready.connect(self._on_details_ready, Qt.QueuedConnection)
+        worker.error_occurred.connect(self._on_details_error, Qt.QueuedConnection)
+        worker.retrying.connect(self._on_retrying, Qt.QueuedConnection)
+        
+        # Start thread and trigger fetch
+        thread.started.connect(worker.fetch)
+        thread.start()
+        
+        # Store references to prevent garbage collection
+        if not hasattr(self, "_detail_threads"):
+            self._detail_threads = []
+        if not hasattr(self, "_detail_workers"):
+            self._detail_workers = []
+        self._detail_threads.append(thread)
+        self._detail_workers.append(worker)
+        
+        # Cleanup thread and worker when done
+        worker.details_ready.connect(thread.quit)
+        worker.error_occurred.connect(thread.quit)
+        def _cleanup_worker():
+            try:
+                if hasattr(self, "_detail_panel_by_worker") and worker in self._detail_panel_by_worker:
+                    self._detail_panel_by_worker.pop(worker, None)
+                if worker in self._detail_workers:
+                    self._detail_workers.remove(worker)
+                if thread in self._detail_threads:
+                    self._detail_threads.remove(thread)
+            except Exception:
+                pass
+        thread.finished.connect(_cleanup_worker)
+        thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(worker.deleteLater)
+        
+        # Quick watchdog timer - show error if still loading after 6 seconds
+        # This catches cases where api.model_info() hangs despite timeout parameter
+        watchdog_timer = QTimer()
+        watchdog_timer.setSingleShot(True)
+        watchdog_timer.timeout.connect(lambda: self._check_still_loading(details_panel, model_id))
+        watchdog_timer.start(6000)  # 6 seconds - matches API timeout + buffer
+        
+        # Store watchdog timer reference
+        if not hasattr(self, '_detail_watchdogs'):
+            self._detail_watchdogs = []
+        self._detail_watchdogs.append(watchdog_timer)
+    
+    def _on_retrying(self, attempt: int, max_attempts: int) -> None:
+        """Update UI to show retry status"""
+        try:
+            worker = self.sender()
+            details_panel = None
+            if hasattr(self, "_detail_panel_by_worker"):
+                details_panel = self._detail_panel_by_worker.get(worker)
+            if details_panel is None:
+                return
+            details_panel.description_label.setText(
+                f"Request failed, retrying... (Attempt {attempt} of {max_attempts})"
+            )
+            details_panel.description_label.setStyleSheet("color: #ffa500; font-size: 11pt; padding: 10px;")
+        except Exception:
+            pass  # Ignore errors in retry feedback
+    
+    def _on_details_ready(self, details: dict) -> None:
+        """Handle successful model details fetch"""
+        try:
+            worker = self.sender()
+            details_panel = None
+            if hasattr(self, "_detail_panel_by_worker"):
+                details_panel = self._detail_panel_by_worker.get(worker)
+            if details_panel is None:
+                return
+            details_panel.display_details(details)
+        except Exception as e:
+            try:
+                if details_panel is not None:
+                    details_panel.show_error(f"Error displaying details: {e}")
+            except Exception:
+                pass
+    
+    def _on_details_error(self, error_msg: str) -> None:
+        """Handle error during model details fetch"""
+        # Provide user-friendly error messages
+        if "timeout" in error_msg.lower() or "timed out" in error_msg.lower():
+            friendly_msg = "Request timed out. The Hugging Face API may be slow or unavailable. Please check your internet connection and try again."
+        elif "network" in error_msg.lower() or "connection" in error_msg.lower():
+            friendly_msg = "Network error. Please check your internet connection and try again."
+        elif "not available" in error_msg.lower():
+            friendly_msg = "Hugging Face API is not available. Please ensure huggingface_hub is installed."
+        else:
+            friendly_msg = f"Failed to fetch model details: {error_msg}"
+        
+        try:
+            worker = self.sender()
+            details_panel = None
+            if hasattr(self, "_detail_panel_by_worker"):
+                details_panel = self._detail_panel_by_worker.get(worker)
+            if details_panel is None:
+                return
+            details_panel.show_error(friendly_msg)
+        except Exception:
+            pass
+    
+    def _check_still_loading(self, details_panel, model_id: str) -> None:
+        """Watchdog: Check if panel is still showing loading state"""
+        try:
+            # Check if title still says "Loading model details..."
+            if details_panel.title_label.text() == "Loading model details...":
+                details_panel.show_error(
+                    "Request is taking too long. The Hugging Face API may be unavailable or slow. "
+                    "Please check your internet connection and try again."
+                )
+        except Exception:
+            pass  # Ignore errors in watchdog check
 
     def _detect_gpu_vram(self) -> float:
         """
@@ -5306,6 +5570,23 @@ class MainWindow(QMainWindow):
     
     def _get_selected_gpu_indices(self) -> list:
         """Get list of selected GPU indices from config file."""
+        cuda_info = self.system_info.get("cuda", {})
+        all_gpus = cuda_info.get("gpus", []) or []
+        
+        # Ensure all GPUs have _orig_index set
+        for idx, gpu in enumerate(all_gpus):
+            if "_orig_index" not in gpu:
+                gpu["_orig_index"] = idx
+        
+        if not all_gpus:
+            return []
+        
+        # Find the most powerful GPU
+        sorted_gpus = self._sort_gpus_by_memory(all_gpus)
+        most_powerful_idx = None
+        if sorted_gpus:
+            most_powerful_idx = sorted_gpus[0].get("_orig_index")
+        
         config_path = self.root / "desktop_app" / "config" / "gpu_config.json"
         if config_path.exists():
             try:
@@ -5314,19 +5595,30 @@ class MainWindow(QMainWindow):
                     if "selected_gpu_indices" in config:
                         selected = config["selected_gpu_indices"]
                         # Validate that selected indices still exist
-                        cuda_info = self.system_info.get("cuda", {})
-                        all_gpus = cuda_info.get("gpus", []) or []
                         valid_indices = [gpu.get("_orig_index", idx) for idx, gpu in enumerate(all_gpus)]
                         # Filter to only valid indices
-                        return [idx for idx in selected if idx in valid_indices]
-            except Exception:
-                pass
+                        filtered = [idx for idx in selected if idx in valid_indices]
+                        if filtered:
+                            # If we have a saved selection but it's not the most powerful, reset to most powerful
+                            # (This ensures default is always most powerful on first run)
+                            if most_powerful_idx is not None and most_powerful_idx not in filtered:
+                                # Reset to most powerful if current selection doesn't include it
+                                print(f"[DEBUG] Saved selection {filtered} doesn't include most powerful GPU {most_powerful_idx}, resetting")
+                                self._save_selected_gpu_indices([most_powerful_idx])
+                                return [most_powerful_idx]
+                            return filtered
+            except Exception as e:
+                print(f"[DEBUG] Error reading GPU config: {e}")
+                import traceback
+                traceback.print_exc()
         
-        # Default: if no config, select all GPUs
-        cuda_info = self.system_info.get("cuda", {})
-        gpus = cuda_info.get("gpus", []) or []
-        if gpus:
-            return [gpu.get("_orig_index", idx) for idx, gpu in enumerate(gpus)]
+        # Default: if no config or invalid selection, select the most powerful GPU (highest VRAM)
+        if most_powerful_idx is not None:
+            # Save this as default selection
+            self._save_selected_gpu_indices([most_powerful_idx])
+            print(f"[DEBUG] Defaulting to most powerful GPU: {most_powerful_idx}")
+            return [most_powerful_idx]
+        
         return []
     
     def _save_selected_gpu_indices(self, indices: list) -> None:
@@ -5338,22 +5630,32 @@ class MainWindow(QMainWindow):
             # Load existing config to preserve vram_gb
             config = {}
             if config_path.exists():
-                with open(config_path, "r", encoding="utf-8") as f:
-                    config = json.load(f)
+                try:
+                    with open(config_path, "r", encoding="utf-8") as f:
+                        config = json.load(f)
+                except Exception:
+                    config = {}
             
-            config["selected_gpu_indices"] = indices
+            config["selected_gpu_indices"] = sorted(indices)  # Sort for consistency
             with open(config_path, "w", encoding="utf-8") as f:
                 json.dump(config, f, indent=2)
+            print(f"[DEBUG] Saved GPU indices to config: {sorted(indices)}")
         except Exception as e:
             print(f"⚠️ Failed to save GPU selection: {e}")
+            import traceback
+            traceback.print_exc()
     
     def _on_gpu_selection_changed(self, gpu_index: int, state: int) -> None:
         """Handle GPU checkbox state change."""
-        selected = self._get_selected_gpu_indices()
+        # Get current selection (force fresh read)
+        selected = list(self._get_selected_gpu_indices())  # Make a copy
+        
+        print(f"[DEBUG] GPU selection changed: GPU {gpu_index}, state={state}, current selection={selected}")
         
         if state == Qt.Checked:
             if gpu_index not in selected:
                 selected.append(gpu_index)
+                print(f"[DEBUG] GPU {gpu_index} added to selection. New selection: {selected}")
         else:
             # Ensure at least one GPU is selected
             if len(selected) <= 1:
@@ -5364,19 +5666,38 @@ class MainWindow(QMainWindow):
                 )
                 # Re-check the checkbox
                 if hasattr(self, 'gpu_checkboxes') and gpu_index in self.gpu_checkboxes:
+                    self.gpu_checkboxes[gpu_index].blockSignals(True)
                     self.gpu_checkboxes[gpu_index].setChecked(True)
+                    self.gpu_checkboxes[gpu_index].blockSignals(False)
                 return
-            selected.remove(gpu_index)
+            if gpu_index in selected:
+                selected.remove(gpu_index)
+                print(f"[DEBUG] GPU {gpu_index} removed from selection. New selection: {selected}")
         
+        # Save the updated selection
         self._save_selected_gpu_indices(selected)
+        print(f"[DEBUG] Saved GPU selection to config: {selected}")
         
         # Refresh GPU selectors in Train/Test tabs
         self._refresh_gpu_selectors()
+        
+        # Update Home tab status label without rebuilding the whole tab
+        if hasattr(self, 'gpu_status_label'):
+            all_gpus = self.system_info.get("cuda", {}).get("gpus", []) or []
+            if len(all_gpus) > len(selected):
+                self.gpu_status_label.setText(f"✅ <span style='font-weight: bold; text-decoration: none; border: none; border-bottom: none;'>{len(selected)} of {len(all_gpus)} GPU{'s' if len(all_gpus) > 1 else ''} selected</span>")
+            else:
+                self.gpu_status_label.setText(f"✅ <span style='font-weight: bold; text-decoration: none; border: none; border-bottom: none;'>{len(selected)} GPU{'s' if len(selected) > 1 else ''} detected</span>")
     
     def _get_filtered_gpus(self) -> list:
         """Get list of GPUs filtered by user selection."""
         cuda_info = self.system_info.get("cuda", {})
         all_gpus = cuda_info.get("gpus", []) or []
+        
+        # Ensure all GPUs have _orig_index set
+        for idx, gpu in enumerate(all_gpus):
+            if "_orig_index" not in gpu:
+                gpu["_orig_index"] = idx
         
         if len(all_gpus) <= 1:
             # If 1 or 0 GPUs, return all (no filtering needed)
@@ -5384,17 +5705,28 @@ class MainWindow(QMainWindow):
         
         selected_indices = self._get_selected_gpu_indices()
         if not selected_indices:
-            # If no selection saved, default to all GPUs
+            # If no selection, default to most powerful GPU
+            sorted_gpus = self._sort_gpus_by_memory(all_gpus)
+            if sorted_gpus:
+                return [sorted_gpus[0]]  # Return only the most powerful
             return all_gpus
         
         # Filter GPUs to only include selected ones
         filtered = []
         for gpu in all_gpus:
-            orig_idx = gpu.get("_orig_index", all_gpus.index(gpu))
-            if orig_idx in selected_indices:
+            # Get original index - it should be stored in _orig_index
+            orig_idx = gpu.get("_orig_index")
+            if orig_idx is not None and orig_idx in selected_indices:
                 filtered.append(gpu)
         
-        return filtered if filtered else all_gpus  # Fallback to all if filter results in empty
+        # If filter resulted in empty, fallback to most powerful GPU
+        if not filtered:
+            sorted_gpus = self._sort_gpus_by_memory(all_gpus)
+            if sorted_gpus:
+                return [sorted_gpus[0]]
+            return all_gpus
+        
+        return filtered
     
     def _log_models(self, msg: str) -> None:
         self.models_status.appendPlainText(msg)

@@ -1,14 +1,20 @@
 """Custom widget for displaying model cards with rich visual design"""
 from __future__ import annotations
-from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QFrame
-from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QFont
+from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QFrame, QScrollArea, QSizePolicy, QGridLayout
+from PySide6.QtCore import Qt, Signal, QUrl
+from PySide6.QtGui import QFont, QPixmap, QMouseEvent
+try:
+    from PySide6.QtNetwork import QNetworkAccessManager, QNetworkRequest
+    NETWORK_AVAILABLE = True
+except ImportError:
+    NETWORK_AVAILABLE = False
 
 
 class ModelCard(QFrame):
     """Beautiful large card widget matching Streamlit design"""
     
     download_clicked = Signal(str)  # Emits model ID
+    card_clicked = Signal(str)  # Emits model ID when card is clicked
     
     def __init__(self, model_name: str, model_id: str, description: str, size: str, 
                  icons: str, is_downloaded: bool = False, is_new: bool = False, 
@@ -167,13 +173,34 @@ class ModelCard(QFrame):
         
         layout.addStretch(1)
         
-        # Download button
+        # Download button (left-aligned, sized to fit text+icon)
         self.download_btn = QPushButton("📥 Download" if not is_downloaded else "✓ Downloaded")
         self.download_btn.setEnabled(not is_downloaded)
         self.download_btn.clicked.connect(lambda: self.download_clicked.emit(model_id))
-        layout.addWidget(self.download_btn)
+        self.download_btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        self.download_btn.setMinimumHeight(38)
+        self.download_btn.setMinimumWidth(140)  # Enough for icon + text
+        layout.addWidget(self.download_btn, 0, Qt.AlignLeft)
+        
+        # Make card clickable (but don't interfere with download button)
+        self.setCursor(Qt.PointingHandCursor)
         
         self._apply_style()
+    
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+
+    def mousePressEvent(self, event):
+        """Handle card click - emit signal but don't interfere with button clicks"""
+        if event.button() == Qt.LeftButton:
+            # Check if click is on download button
+            if self.download_btn.geometry().contains(event.pos()):
+                # Let the button handle it
+                super().mousePressEvent(event)
+                return
+            # Otherwise, emit card_clicked signal
+            self.card_clicked.emit(self.model_id)
+        super().mousePressEvent(event)
     
     def _set_model_icon(self, model_id, author_icon):
         """Set a visual icon based on model family or author"""
@@ -430,7 +457,8 @@ class DownloadedModelCard(QFrame):
         self.delete_btn.setMinimumHeight(35)
         self.delete_btn.setCursor(Qt.ArrowCursor)
         self.delete_btn.clicked.connect(lambda: self.delete_clicked.emit(self.model_path))
-        button_layout.addWidget(self.delete_btn, 1)
+        self.delete_btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        button_layout.addWidget(self.delete_btn)
         
         layout.addLayout(button_layout)
         
@@ -531,5 +559,402 @@ class DownloadedModelCard(QFrame):
         if event.button() == Qt.LeftButton:
             self.selected.emit(self.model_path)
         super().mousePressEvent(event)
+
+
+class ModelDetailsPanel(QWidget):
+    """Panel displaying detailed model information from Hugging Face API"""
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.is_dark = True
+        self._setup_ui()
+        self._show_empty_state()
+    
+    def _setup_ui(self):
+        """Setup the UI layout"""
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(14, 14, 14, 14)
+        layout.setSpacing(10)
+        
+        # Header row: avatar (left) + title/meta (right)
+        header_row = QHBoxLayout()
+        header_row.setSpacing(12)
+
+        self.avatar_label = QLabel()
+        self.avatar_label.setFixedSize(96, 96)
+        self.avatar_label.setAlignment(Qt.AlignCenter)
+        self.avatar_label.setStyleSheet(
+            "QLabel { border: 2px solid rgba(102,126,234,0.25); border-radius: 10px; background: rgba(0,0,0,0.18); }"
+        )
+        header_row.addWidget(self.avatar_label, 0, Qt.AlignTop)
+
+        title_col = QVBoxLayout()
+        title_col.setSpacing(4)
+
+        self.title_label = QLabel()
+        self.title_label.setAlignment(Qt.AlignLeft)
+        title_font = QFont()
+        title_font.setPointSize(15)
+        title_font.setBold(True)
+        self.title_label.setFont(title_font)
+        self.title_label.setWordWrap(True)
+        title_col.addWidget(self.title_label)
+
+        self.author_label = QLabel()
+        self.author_label.setAlignment(Qt.AlignLeft)
+        self.author_label.setStyleSheet("color: #9aa4b2; font-size: 10.5pt;")
+        self.author_label.setWordWrap(True)
+        title_col.addWidget(self.author_label)
+
+        self.repo_label = QLabel()
+        self.repo_label.setAlignment(Qt.AlignLeft)
+        self.repo_label.setStyleSheet("color: #7d8696; font-size: 9.5pt;")
+        self.repo_label.setWordWrap(True)
+        title_col.addWidget(self.repo_label)
+
+        header_row.addLayout(title_col, 1)
+        layout.addLayout(header_row)
+        
+        # Separator
+        separator = QFrame()
+        separator.setFrameShape(QFrame.HLine)
+        separator.setStyleSheet("color: rgba(102, 126, 234, 0.25);")
+        layout.addWidget(separator)
+        
+        # Description (compact)
+        self.description_label = QLabel()
+        self.description_label.setWordWrap(True)
+        self.description_label.setStyleSheet(
+            "color: #d7dde7; font-size: 10.5pt; padding: 8px 10px; background: rgba(255,255,255,0.04); border-radius: 8px;"
+        )
+        layout.addWidget(self.description_label)
+
+        # Compact stats grid (downloads/likes/license/task)
+        self.stats_grid = QGridLayout()
+        self.stats_grid.setHorizontalSpacing(10)
+        self.stats_grid.setVerticalSpacing(6)
+
+        self.stats_left = QLabel()
+        self.stats_left.setStyleSheet("color: #b6c0cf; font-size: 10pt;")
+        self.stats_left.setWordWrap(True)
+        self.stats_right = QLabel()
+        self.stats_right.setStyleSheet("color: #b6c0cf; font-size: 10pt;")
+        self.stats_right.setWordWrap(True)
+
+        self.stats_grid.addWidget(self.stats_left, 0, 0)
+        self.stats_grid.addWidget(self.stats_right, 0, 1)
+        layout.addLayout(self.stats_grid)
+        
+        # Tags (chips)
+        tags_header = QLabel("Tags")
+        tags_header.setStyleSheet("font-weight: 600; font-size: 10.5pt; color: #8ea2ff; margin-top: 4px;")
+        layout.addWidget(tags_header)
+        self.tags_label = QLabel()
+        self.tags_label.setWordWrap(True)
+        self.tags_label.setTextFormat(Qt.RichText)
+        self.tags_label.setStyleSheet("color: #c2cad6; font-size: 9.5pt;")
+        layout.addWidget(self.tags_label)
+        
+        # License (kept, but compact)
+        license_header = QLabel("License")
+        license_header.setStyleSheet("font-weight: 600; font-size: 10.5pt; color: #8ea2ff; margin-top: 4px;")
+        layout.addWidget(license_header)
+        self.license_label = QLabel()
+        self.license_label.setWordWrap(True)
+        self.license_label.setStyleSheet("color: #c2cad6; font-size: 9.5pt;")
+        layout.addWidget(self.license_label)
+        
+        # Files section
+        files_header = QLabel("Files (top)")
+        files_header.setStyleSheet("font-weight: 600; font-size: 10.5pt; color: #8ea2ff; margin-top: 4px;")
+        layout.addWidget(files_header)
+        self.files_label = QLabel()
+        self.files_label.setWordWrap(True)
+        self.files_label.setStyleSheet("color: #b6c0cf; font-size: 9pt; font-family: Consolas, monospace;")
+        layout.addWidget(self.files_label)
+        
+        # Additional info
+        info_header = QLabel("Info")
+        info_header.setStyleSheet("font-weight: 600; font-size: 10.5pt; color: #8ea2ff; margin-top: 4px;")
+        layout.addWidget(info_header)
+        self.info_label = QLabel()
+        self.info_label.setWordWrap(True)
+        self.info_label.setStyleSheet("color: #b6c0cf; font-size: 9.5pt;")
+        layout.addWidget(self.info_label)
+        
+        layout.addStretch()
+    
+    def _show_empty_state(self):
+        """Show empty state when no model is selected"""
+        self.avatar_label.clear()
+        self.avatar_label.setText("📦")
+        self.title_label.setText("Select a model to view details")
+        self.title_label.setStyleSheet("color: #888; font-size: 14pt;")
+        self.author_label.clear()
+        self.repo_label.clear()
+        self.description_label.clear()
+        self.tags_label.clear()
+        self.license_label.clear()
+        if hasattr(self, "stats_left"):
+            self.stats_left.clear()
+        if hasattr(self, "stats_right"):
+            self.stats_right.clear()
+        self.files_label.clear()
+        self.info_label.clear()
+    
+    def show_loading(self):
+        """Show loading state"""
+        self.avatar_label.clear()
+        self.avatar_label.setText("⏳")
+        self.title_label.setText("Loading model details...")
+        self.title_label.setStyleSheet("color: #667eea; font-size: 14pt;")
+        self.author_label.clear()
+        self.repo_label.clear()
+        self.description_label.setText("Fetching information from Hugging Face...")
+        self.tags_label.clear()
+        self.license_label.clear()
+        if hasattr(self, "stats_left"):
+            self.stats_left.clear()
+        if hasattr(self, "stats_right"):
+            self.stats_right.clear()
+        self.files_label.clear()
+        self.info_label.clear()
+    
+    def show_error(self, error_msg: str):
+        """Show error state"""
+        self.avatar_label.clear()
+        self.avatar_label.setText("❌")
+        self.title_label.setText("Error loading model details")
+        self.title_label.setStyleSheet("color: #f44336; font-size: 14pt;")
+        self.author_label.clear()
+        self.repo_label.clear()
+        self.description_label.setText(f"Error: {error_msg}")
+        self.description_label.setStyleSheet("color: #f44336; font-size: 11pt; padding: 10px;")
+        self.tags_label.clear()
+        self.license_label.clear()
+        if hasattr(self, "stats_left"):
+            self.stats_left.clear()
+        if hasattr(self, "stats_right"):
+            self.stats_right.clear()
+        self.files_label.clear()
+        self.info_label.clear()
+    
+    def display_details(self, details: dict):
+        """Display detailed model information - MUST be called from main thread"""
+        # Avatar/Logo (try multiple candidates)
+        # Note: This MUST run in main thread to avoid "Cannot create children for parent in different thread"
+        candidates = details.get("thumbnail_candidates") or []
+        if isinstance(candidates, str):
+            candidates = [candidates]
+        if details.get("thumbnail"):
+            candidates = [details.get("thumbnail")] + list(candidates)
+        if details.get("avatar_url"):
+            candidates = list(candidates) + [details.get("avatar_url")]
+        # de-dup
+        seen = set()
+        candidates = [u for u in candidates if u and not (u in seen or seen.add(u))]
+        
+        # Load avatar directly (we're already in main thread via signal connection)
+        if candidates:
+            self._load_avatar_candidates(candidates)
+        else:
+            self.avatar_label.clear()
+            self.avatar_label.setText("🤖")
+        
+        # Title
+        model_id = details.get("model_id", "Unknown Model")
+        model_name = model_id.split("/")[-1] if "/" in model_id else model_id
+        self.title_label.setText(model_name)
+        self.title_label.setStyleSheet("color: white; font-size: 16pt; font-weight: bold;")
+        self.repo_label.setText(model_id if "/" in model_id else "")
+        
+        # Author
+        author = details.get("author", "Unknown")
+        self.author_label.setText(f"by {author}")
+        
+        # Description
+        description = details.get("description") or details.get("text") or "No description available."
+        # Truncate if too long
+        if len(description) > 500:
+            description = description[:500] + "..."
+        self.description_label.setText(description)
+        
+        # Tags (chips)
+        tags = details.get("tags", [])
+        if tags:
+            show = tags[:14]
+            chips = []
+            for t in show:
+                chips.append(
+                    f"<span style=\"display:inline-block; padding:2px 8px; margin:2px 6px 2px 0; "
+                    f"border-radius:10px; background:rgba(102,126,234,0.18); color:#cdd6ff;\">{t}</span>"
+                )
+            more = ""
+            if len(tags) > len(show):
+                more = f"<span style=\"color:#98a3b7;\">+{len(tags)-len(show)} more</span>"
+            self.tags_label.setText("".join(chips) + more)
+        else:
+            self.tags_label.setText("No tags available")
+        
+        # License
+        license_info = details.get("license")
+        if license_info:
+            if isinstance(license_info, list):
+                license_text = ", ".join(license_info)
+            else:
+                license_text = str(license_info)
+            self.license_label.setText(license_text)
+        else:
+            self.license_label.setText("Not specified")
+        
+        # Compact stats
+        downloads = details.get("downloads", 0)
+        likes = details.get("likes", 0)
+        pipeline_tag = details.get("pipeline_tag") or ""
+        lib = details.get("library_name") or ""
+        left = f"⬇ {downloads:,} downloads\n❤ {likes:,} likes"
+        right_parts = []
+        if pipeline_tag:
+            right_parts.append(f"Task: {pipeline_tag}")
+        if lib:
+            right_parts.append(f"Library: {lib}")
+        self.stats_left.setText(left)
+        self.stats_right.setText("\n".join(right_parts) if right_parts else "")
+        
+        # Files (short list)
+        siblings = details.get("siblings", [])
+        if siblings:
+            files_text = ""
+            total_size = 0
+            for file_info in siblings[:8]:  # Show first 8 files
+                filename = file_info.get("filename", "unknown")
+                size = file_info.get("size", 0)
+                if size:
+                    size_mb = size / (1024 * 1024)
+                    files_text += f"{filename} ({size_mb:.1f} MB)\n"
+                    total_size += size
+                else:
+                    files_text += f"{filename}\n"
+            if len(siblings) > 8:
+                files_text += f"... +{len(siblings) - 8} more\n"
+            if total_size > 0:
+                total_gb = total_size / (1024 ** 3)
+                files_text += f"\nTotal size: {total_gb:.2f} GB"
+            self.files_label.setText(files_text)
+        else:
+            self.files_label.setText("No file information available")
+        
+        # Additional info
+        info_parts = []
+        pipeline_tag = details.get("pipeline_tag")
+        if pipeline_tag:
+            info_parts.append(f"Task: {pipeline_tag}")
+        library_name = details.get("library_name")
+        if library_name:
+            info_parts.append(f"Library: {library_name}")
+        base_model = details.get("base_model")
+        if base_model:
+            info_parts.append(f"Base Model: {base_model}")
+        model_type = details.get("model_type")
+        if model_type:
+            info_parts.append(f"Type: {model_type}")
+        if details.get("private"):
+            info_parts.append("Private: Yes")
+        if details.get("gated"):
+            info_parts.append("Gated: Yes (requires access approval)")
+        
+        if info_parts:
+            self.info_label.setText("\n".join(info_parts))
+        else:
+            self.info_label.setText("No additional information available")
+    
+    def _load_avatar(self, url: str):
+        """Load avatar/logo from URL"""
+        if not NETWORK_AVAILABLE:
+            self.avatar_label.clear()
+            self.avatar_label.setText("🤖")
+            return
+        
+        try:
+            if not hasattr(self, 'network_manager'):
+                self.network_manager = QNetworkAccessManager()
+            
+            request = QNetworkRequest(QUrl(url))
+            reply = self.network_manager.get(request)
+            
+            def on_finished():
+                try:
+                    from PySide6.QtNetwork import QNetworkReply
+                    if reply.error() == QNetworkReply.NetworkError.NoError:
+                        pixmap = QPixmap()
+                        pixmap.loadFromData(reply.readAll())
+                        if not pixmap.isNull():
+                            # Scale to fit
+                            scaled = pixmap.scaled(120, 120, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                            self.avatar_label.setPixmap(scaled)
+                except Exception:
+                    pass
+                finally:
+                    reply.deleteLater()
+            
+            reply.finished.connect(on_finished)
+        except Exception as e:
+            # Fallback to emoji if image loading fails
+            self.avatar_label.clear()
+            self.avatar_label.setText("🤖")
+
+    def _load_avatar_candidates(self, urls: list) -> None:
+        """Try multiple avatar URLs until one loads. Must be called from main thread."""
+        if not urls:
+            self.avatar_label.clear()
+            self.avatar_label.setText("🤖")
+            return
+        if not NETWORK_AVAILABLE:
+            self.avatar_label.clear()
+            self.avatar_label.setText("🤖")
+            return
+        
+        try:
+            # Ensure network manager is created in the main thread
+            if not hasattr(self, "network_manager") or self.network_manager is None:
+                self.network_manager = QNetworkAccessManager(self)  # Parent it to this widget
+ 
+            # capture a mutable index
+            state = {"i": 0}
+ 
+            def try_next():
+                if state["i"] >= len(urls):
+                    self.avatar_label.clear()
+                    self.avatar_label.setText("🤖")
+                    return
+                url = urls[state["i"]]
+                state["i"] += 1
+                
+                request = QNetworkRequest(QUrl(url))
+                reply = self.network_manager.get(request)
+ 
+                def on_finished():
+                    try:
+                        from PySide6.QtNetwork import QNetworkReply
+                        if reply.error() == QNetworkReply.NetworkError.NoError:
+                            pixmap = QPixmap()
+                            pixmap.loadFromData(reply.readAll())
+                            if not pixmap.isNull():
+                                scaled = pixmap.scaled(96, 96, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                                self.avatar_label.setPixmap(scaled)
+                                reply.deleteLater()
+                                return
+                    except Exception:
+                        pass
+                    finally:
+                        reply.deleteLater()
+                    try_next()
+ 
+                reply.finished.connect(on_finished)
+ 
+            try_next()
+        except Exception:
+            self.avatar_label.clear()
+            self.avatar_label.setText("🤖")
 
 

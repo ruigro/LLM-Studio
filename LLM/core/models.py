@@ -7,10 +7,11 @@ import json
 import os
 
 try:
-    from huggingface_hub import snapshot_download, list_models
+    from huggingface_hub import snapshot_download, list_models, HfApi
 except Exception:  # pragma: no cover
     snapshot_download = None
     list_models = None
+    HfApi = None
 
 
 DEFAULT_BASE_MODELS: List[str] = [
@@ -75,6 +76,164 @@ def download_hf_model(model_id: str, target_dir: Path) -> Path:
         resume_download=True,
     )
     return dest
+
+
+def get_model_details(model_id: str) -> dict:
+    """Fetch detailed model information from Hugging Face API."""
+    if HfApi is None:
+        raise RuntimeError("huggingface_hub is not available. Install requirements.txt")
+    
+    import requests
+    import os
+    from urllib.parse import quote
+    
+    # Direct REST call workaround (faster/more reliable than model_info in some cases)
+    # Known workaround: call /api/models/{repo_id} with files_metadata=false
+    base_url = "https://huggingface.co/api/models/"
+    # IMPORTANT: do NOT encode "/" in "org/model". Many servers do not decode "%2F" in paths.
+    encoded_id = quote(model_id, safe="/")
+    url = f"{base_url}{encoded_id}"
+    params = {
+        "files_metadata": "false",
+    }
+    headers = {}
+    token = os.getenv("HF_TOKEN") or os.getenv("HUGGINGFACEHUB_API_TOKEN")
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    
+    try:
+        resp = requests.get(url, params=params, headers=headers, timeout=(3.0, 8.0))
+        if resp.status_code in (401, 403):
+            raise RuntimeError("Access denied. This model may be gated or require a token.")
+        if resp.status_code == 404:
+            # Provide a clear, actionable error; this also helps diagnose URL encoding issues.
+            raise RuntimeError(f"Model not found on Hugging Face: {model_id}")
+        try:
+            resp.raise_for_status()
+        except requests.exceptions.HTTPError as e:
+            snippet = (resp.text or "")[:300]
+            raise RuntimeError(f"HF API HTTP {resp.status_code}: {snippet}") from e
+        data = resp.json()
+    except requests.exceptions.Timeout:
+        raise RuntimeError("Request timed out. The Hugging Face API is taking too long to respond.")
+    except requests.exceptions.RequestException as e:
+        raise RuntimeError(f"Network error: {e}")
+    except Exception as e:
+        raise RuntimeError(f"Failed to fetch model info: {type(e).__name__}: {e}")
+    
+    # Extract all available information from JSON
+    details = {
+        "model_id": data.get("id") or data.get("modelId") or model_id,
+        "author": data.get("author"),
+        "tags": data.get("tags") or [],
+        "pipeline_tag": data.get("pipeline_tag"),
+        "library_name": data.get("library_name"),
+        "downloads": data.get("downloads"),
+        "likes": data.get("likes"),
+        "created_at": data.get("createdAt"),
+        "last_modified": data.get("lastModified"),
+        "private": data.get("private"),
+        "gated": data.get("gated"),
+        "siblings": [],
+        "config": data.get("config"),
+        "sha": data.get("sha"),
+    }
+    
+    # Extract file information from siblings if available
+    siblings = data.get("siblings") or []
+    for s in siblings:
+        try:
+            details["siblings"].append({
+                "filename": s.get("rfilename") or s.get("path"),
+                "size": s.get("size"),
+            })
+        except Exception:
+            pass
+    
+    # Extract card data if available
+    card = data.get("cardData") or {}
+    details["description"] = card.get("text")  # often empty; we'll fallback to README excerpt
+    details["license"] = card.get("license")
+    details["thumbnail"] = card.get("thumbnail")
+    details["base_model"] = card.get("base_model")
+    details["datasets"] = card.get("datasets")
+    details["metrics"] = card.get("metrics")
+    details["model_type"] = card.get("model_type")
+
+    # Collect thumbnail candidates (model thumbnails are inconsistent; try multiple common paths)
+    thumb_candidates: list[str] = []
+    if details.get("thumbnail"):
+        thumb_candidates.append(str(details["thumbnail"]))
+    # Some API responses expose an avatarUrl for the repo
+    repo_avatar = data.get("avatarUrl") or data.get("avatar_url")
+    if repo_avatar:
+        thumb_candidates.append(str(repo_avatar))
+    # Common HF thumbnail locations (best-effort)
+    thumb_candidates.extend(
+        [
+            f"https://huggingface.co/{encoded_id}/resolve/main/thumbnail.png",
+            f"https://huggingface.co/{encoded_id}/resolve/main/thumbnail.jpg",
+            f"https://huggingface.co/{encoded_id}/resolve/main/thumbnail.jpeg",
+            f"https://huggingface.co/{encoded_id}/resolve/main/logo.png",
+            f"https://huggingface.co/{encoded_id}/resolve/main/logo.jpg",
+        ]
+    )
+    
+    # Try to get owner avatar (optional)
+    details["avatar_url"] = None
+    author = details.get("author")
+    if author:
+        try:
+            user_url = f"https://huggingface.co/api/users/{quote(author, safe='')}"
+            user_resp = requests.get(user_url, headers=headers, timeout=(2.0, 4.0))
+            if user_resp.ok:
+                details["avatar_url"] = user_resp.json().get("avatar_url")
+        except Exception:
+            pass
+
+    # Add author avatar as a fallback thumbnail
+    if details.get("avatar_url"):
+        thumb_candidates.append(str(details["avatar_url"]))
+    # De-dup while preserving order
+    seen = set()
+    details["thumbnail_candidates"] = [u for u in thumb_candidates if u and not (u in seen or seen.add(u))]
+
+    # Description fallback: fetch README.md and extract first meaningful paragraph
+    if not details.get("description"):
+        def _readme_excerpt(md: str, max_chars: int = 700) -> str:
+            lines = md.splitlines()
+            cleaned: list[str] = []
+            for line in lines:
+                s = line.strip()
+                if not s:
+                    if cleaned:
+                        break
+                    continue
+                # skip common badge/header noise
+                if s.startswith("[![") or s.startswith("![") or s.startswith("<img") or s.startswith("---"):
+                    continue
+                if s.startswith("#"):
+                    continue
+                cleaned.append(s)
+            text = " ".join(cleaned).strip()
+            if len(text) > max_chars:
+                text = text[: max_chars - 3].rstrip() + "..."
+            return text
+
+        try:
+            # Try main then master
+            for rev in ("main", "master"):
+                readme_url = f"https://huggingface.co/{encoded_id}/raw/{rev}/README.md"
+                r = requests.get(readme_url, headers=headers, timeout=(2.0, 6.0))
+                if r.status_code == 200 and r.text:
+                    excerpt = _readme_excerpt(r.text)
+                    if excerpt:
+                        details["description"] = excerpt
+                        break
+        except Exception:
+            pass
+    
+    return details
 
 
 def list_local_adapters(adapter_root: Optional[Path] = None) -> List[str]:
